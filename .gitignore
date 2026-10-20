@@ -1,0 +1,15 @@
+# 运行期数据：数据库、媒体、签名密钥，一律不入库
+data/
+
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+*.log
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini

@@ -1,0 +1,15 @@
+{
+  "name": "online-vwi",
+  "version": "1.0.0",
+  "private": true,
+  "description": "在线VWI发布项目 —— 产线工位可视化作业指导的发布与下发系统",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {}
+}
