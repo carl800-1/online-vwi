@@ -126,11 +126,11 @@ function renderMatrix() {
   const tbody = $('matrix').querySelector('tbody');
 
   thead.innerHTML = '<tr>' +
-    '<th style="min-width:190px">型号</th>' +
+    '<th style="width:186px">型号</th>' +
     S.processes.map((p) =>
       `<th><span class="pname" data-pid="${p.id}" title="点击改名">${H(p.code)}<small>${H(p.name)}</small> ✎</span></th>`
     ).join('') +
-    '<th style="min-width:130px">完成度</th></tr>';
+    '<th style="width:112px">完成度</th></tr>';
 
   let done = 0, total = 0;
   tbody.innerHTML = S.models.map((m) => {

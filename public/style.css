@@ -200,9 +200,12 @@ button, input, select { font: inherit; color: inherit; }
   transition: width .3s;
 }
 
+/* 固定表格布局：列宽由表头决定，不被内容撑开。
+   为什么不用 auto：5 个工序列 + 完成度列会互相挤，最后那列容易被推到容器外。 */
 table.matrix {
   width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
 }
 table.matrix th, table.matrix td {
   border-bottom: 1px solid var(--line2);
