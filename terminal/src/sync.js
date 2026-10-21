@@ -15,6 +15,16 @@ const cache = require('./cache');
 const ONLINE_PUSH_MS = 30_000;   // 断线后的兜底轮询间隔上限
 const FLIP_TIMEOUT_MS = 10_000;  // 等渲染层 ack 的上限，超时算翻转失败（保留旧画面）
 
+/**
+ * 清单指纹：改一张图、加一段视频、调一次停留秒数，指纹都会变。
+ * 用它判断"服务端说内容变了，但我这套其实没动"——避免别的工序改动把全厂屏都闪一下。
+ */
+function fpOf(items) {
+  return (items || [])
+    .map((it) => `${it.mediaId || it.file || ''}:${it.dwellSec || 0}:${it.kind || ''}`)
+    .join('|');
+}
+
 class Syncer extends EventEmitter {
   constructor(cfg, opts = {}) {
     super();
@@ -37,6 +47,9 @@ class Syncer extends EventEmitter {
     this.prepared = new Map();     // modelId -> { modelCode, items, at }
     this.inflight = null;          // { modelId, controller }
     this.serverCurrentId = '';     // 服务端当前该播的型号（最近一次轮询结果）
+    this.serverContentRev = 0;     // 服务端内容版本（任何清单/媒体改动都会变）
+    this.appliedContentRev = null; // 本机已生效的内容版本；null = 冷启动还没核对过
+    this.appliedFp = '';           // 已生效清单的指纹，用来判断"内容其实没变"
     this.flipping = false;
     this.lastView = null;
     this.startedAt = Date.now();
@@ -75,6 +88,7 @@ class Syncer extends EventEmitter {
     if (local) {
       this.appliedModelId = local.modelId;
       this.appliedCode = local.modelCode;
+      this.appliedFp = fpOf(local.items);
       this.status = 'play';
       this.pushView(local.items, local.modelCode, local.modelId, { reason: 'cold-start' });
     } else {
@@ -151,6 +165,7 @@ class Syncer extends EventEmitter {
     const curId = st.currentModelId || '';
     const curCode = st.modelCode || '';
     this.serverCurrentId = curId;
+    this.serverContentRev = Number(st.contentRev) || 0;
 
     // ① prepare：先把内容备好，画面不动
     if (st.phase === 'prepare' && st.pendingModelId && st.pendingModelId !== this.appliedModelId) {
@@ -174,6 +189,15 @@ class Syncer extends EventEmitter {
     }
 
     if (curId === this.appliedModelId) {
+      // 型号没变，但内容可能被工程部改了（改错图、补注意事项）。
+      // appliedContentRev 为 null 表示刚开机还没核对过，也走一次静默核对。
+      const checked = this.appliedContentRev !== null;
+      if (!checked || (this.serverContentRev && this.serverContentRev !== this.appliedContentRev)) {
+        console.log(`[sync] 核对本工序内容（contentRev ${checked ? this.appliedContentRev : '未核对'} → ${this.serverContentRev}）`);
+        this.prepared.delete(curId);          // 重新取一次清单，指纹一样就不会闪屏
+        this.startPrepare(curId, curCode, { silent: checked === false });
+        return;
+      }
       // 已经是这个型号了
       this.status = this.missing.length ? 'incomplete' : 'play';
       this.emitStatus();
@@ -205,14 +229,14 @@ class Syncer extends EventEmitter {
    * 长轮询是终端的耳朵：一旦被下载堵住，就听不到服务端的强制切换，
    * 掉队那台会一直显示"准备中"，等于把故障藏起来了。
    */
-  startPrepare(modelId, modelCode) {
+  startPrepare(modelId, modelCode, opts = {}) {
     if (this.prepared.has(modelId)) return;
     if (this.inflight && this.inflight.modelId === modelId) return;
-    this.ensurePrepared(modelId, modelCode).catch(() => { /* 失败由下一轮轮询重试 */ });
+    this.ensurePrepared(modelId, modelCode, opts).catch(() => { /* 失败由下一轮轮询重试 */ });
   }
 
   /** 下载并校验某个（型号 × 本工序），完成即举手。返回是否可用。 */
-  async ensurePrepared(modelId, modelCode) {
+  async ensurePrepared(modelId, modelCode, opts = {}) {
     if (this.prepared.has(modelId)) return true;
     if (this.inflight && this.inflight.modelId === modelId) {
       await this.inflight.promise;
@@ -223,10 +247,13 @@ class Syncer extends EventEmitter {
     const controller = new AbortController();
     const job = { modelId, controller };
 
-    this.status = 'preparing';
-    this.progress = { done: 0, total: 0 };
-    this.missing = [];
-    this.emitStatus(true);
+    // silent：刚开机核对同一个型号的内容，画面上本来就在播，别闪一下"准备中"
+    if (!opts.silent) {
+      this.status = 'preparing';
+      this.progress = { done: 0, total: 0 };
+      this.missing = [];
+      this.emitStatus(true);
+    }
 
     job.promise = (async () => {
       try {
@@ -268,11 +295,23 @@ class Syncer extends EventEmitter {
         await this.reportReady(modelId);
         this.emitStatus(true);
 
-        // 掉队自愈：服务端可能早就不等它、已经强翻过了。
-        // 内容一到就立刻补上，别让红字白亮 25 秒等下一次长轮询。
-        if (this.running && this.serverCurrentId === modelId && this.appliedModelId !== modelId) {
+        // 下完就自己补上，别干等下一轮长轮询：
+        //   · 掉队（服务端早就不等它、已经强翻过）—— 补播新型号
+        //   · 同型号内容被改（工程部改了指导书）—— 指纹变了就换，没变只更新版本号
+        if (this.running && this.serverCurrentId === modelId) {
           const prep = this.prepared.get(modelId);
-          if (prep) await this.flipTo(prep, code, modelId);
+          const sameModel = this.appliedModelId === modelId;
+          const needFlip = !sameModel || (this.serverContentRev !== this.appliedContentRev);
+          if (prep && needFlip) {
+            if (sameModel && fpOf(prep.items) === this.appliedFp) {
+              // 变的是别的工序/别的型号，本机这套其实没动 —— 记下版本号，不闪屏
+              this.appliedContentRev = this.serverContentRev;
+              console.log('[sync] 内容版本更新，但本工序清单未变，不重载');
+            } else {
+              console.log(sameModel ? '[sync] 本工序内容已更新，重载画面' : '[sync] 补播');
+              await this.flipTo(prep, code, modelId);
+            }
+          }
         }
         return true;
       } catch (e) {
@@ -329,6 +368,8 @@ class Syncer extends EventEmitter {
       cache.commit({ modelCode, modelId, seq: this.serverSeq }, prep.items);
       this.appliedModelId = modelId;
       this.appliedCode = modelCode;
+      this.appliedFp = fpOf(prep.items);
+      this.appliedContentRev = this.serverContentRev;
       this.status = prep.items.length ? 'play' : 'incomplete';
       this.emitStatus(true);
 

@@ -57,6 +57,16 @@ function isValid(c) {
 }
 
 /**
+ * 部署包所在目录（"exe 旁边"到底在哪）。
+ * portable 单文件包运行时会把程序解到 %TEMP%\<unpackDirName>，process.execPath 指向临时目录，
+ * 真正的 exe 所在目录由 electron-builder 通过 PORTABLE_EXECUTABLE_DIR 告诉我们；
+ * 免安装解压版 / 安装版则直接取 execPath 的目录。
+ */
+function exeDir() {
+  return process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(process.execPath);
+}
+
+/**
  * 读配置。优先级：
  *   1. exe 同级目录的 config.json —— 部署包自带，运维批量改这一份最方便
  *   2. %LOCALAPPDATA% 里的 config.json —— 装机向导写出来的
@@ -64,7 +74,7 @@ function isValid(c) {
  */
 function load() {
   ensureDirs();
-  const portable = path.join(path.dirname(process.execPath), 'config.json');
+  const portable = path.join(exeDir(), 'config.json');
   const fromPortable = readJson(portable, null);
   if (fromPortable) {
     const c = normalize(fromPortable);
@@ -87,4 +97,4 @@ function save(c) {
   return clean;
 }
 
-module.exports = { PATHS, DEFAULTS, load, save, isValid, normalize, ensureDirs, readJson };
+module.exports = { PATHS, DEFAULTS, load, save, isValid, normalize, ensureDirs, readJson, exeDir };

@@ -25,11 +25,13 @@ const ready = new Map();    // op -> { modelId, at }
 const waiters = new Set();  // { resolve, timer }
 
 let rev = 0;
+let contentRev = 0;         // 内容版本：任何清单/媒体改动都 +1，终端据此核对"我这套内容有没有变"
 let deadlineTimer = null;
 
 // ---------- 初始化 ----------
 export function initSwitch() {
   rev = Number(getSetting('rev', '0')) || 0;
+  contentRev = Number(getSetting('content_rev', '0')) || 0;
   // 服务重启时可能有一次切换还在进行中：把超时定时器接回去
   const deadline = Number(getSetting('pending_deadline', '0')) || 0;
   if (deadline) armDeadline(deadline);
@@ -56,6 +58,7 @@ function onlineOps() {
 export function getState() {
   return {
     rev,
+    contentRev,
     seq: Number(getSetting('seq', '0')) || 0,
     phase: getSetting('pending_model_id') ? 'prepare' : 'idle',
     currentModelId: getSetting('current_model_id', ''),
@@ -209,6 +212,9 @@ export function cancelSwitch() {
  * 而不是等下一次换型才发现屏上还是老图。
  */
 export function notifyContentChanged() {
-  tx(() => setSetting('rev', String(++rev)));
+  tx(() => {
+    setSetting('content_rev', String(++contentRev));
+    setSetting('rev', String(++rev));
+  });
   bump();
 }

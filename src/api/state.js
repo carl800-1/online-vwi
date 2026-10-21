@@ -9,6 +9,7 @@ function decorate(state) {
   const procCount = q.get('SELECT COUNT(*) n FROM process').n;
   return {
     rev: state.rev,
+    contentRev: state.contentRev,
     seq: state.seq,
     phase: state.phase,
     currentModelId: state.currentModelId,

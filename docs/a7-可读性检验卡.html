@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>A7 可读性检验卡 · 1280x720</title>
+<style>
+  /* 这张卡是给 19 寸 1280x1024 面板用的：1280x720 正好铺满内容区、1:1 不缩放，
+     所以卡上的像素宽 = 面板像素 = 0.2944 mm，2 mm 就是 6.8 px。 */
+  html, body { margin: 0; padding: 0; width: 1280px; height: 720px; background: #fff; overflow: hidden; }
+  body { font-family: "Microsoft YaHei", "Segoe UI", sans-serif; color: #111; }
+  .hdr { height: 52px; background: #111; color: #fff; display: flex; align-items: center;
+         justify-content: space-between; padding: 0 20px; font-size: 20px; font-weight: 700; }
+  .hdr .sub { font-weight: 400; font-size: 15px; opacity: .85; }
+  .body { height: 634px; padding: 10px 22px 0; box-sizing: border-box;
+          display: flex; flex-direction: column; justify-content: space-between; }
+  .row { display: flex; align-items: center; height: 58px; border-bottom: 1px dashed #d5dbe3; }
+  .lab { width: 330px; font-size: 17px; }
+  .lab b { font-size: 22px; }
+  .lab em { font-style: normal; color: #666; font-size: 14px; }
+  .bars { display: flex; align-items: flex-end; gap: 11px; height: 44px; }
+  .bars i { display: block; background: #000; height: 42px; }
+  .note { flex: 1; font-size: 13px; color: #555; text-align: right; line-height: 1.35; }
+  .cal { display: flex; align-items: center; height: 54px; }
+  .cal .bar { width: 34px; height: 26px; background: #000; }
+  .cal .cap { margin-left: 16px; font-size: 15px; color: #333; }
+  .howto { background: #f4f7fb; border-left: 5px solid #276fc9; padding: 10px 16px; font-size: 14px; line-height: 1.62; color: #24384f; }
+  .howto b { color: #12314f; }
+  .texts { display: flex; flex-direction: column; gap: 6px; padding-bottom: 6px; }
+  .t48 { font-size: 48px; line-height: 52px; font-weight: 700; }
+  .t24 { font-size: 24px; line-height: 28px; }
+  .t16 { font-size: 16px; line-height: 20px; }
+  .t12 { font-size: 12px; line-height: 16px; color: #333; }
+  .ftr { height: 34px; background: #eef2f7; display: flex; align-items: center;
+         justify-content: center; font-size: 14px; color: #33445c; }
+</style>
+</head>
+<body>
+  <div class="hdr">
+    <div>A7 可读性检验卡<span class="sub">　19″ 1280×1024 · 1.0 m 观看</span></div>
+    <div class="sub">1 px = 0.294 mm　判据：看清 2 mm 特征</div>
+  </div>
+
+  <div class="body">
+    <div>
+      <div class="row">
+        <div class="lab"><b>2.0 mm</b>　判据线　<em>6.8 px</em></div>
+        <div class="bars">
+          <i style="width:7px"></i><i style="width:7px"></i><i style="width:7px"></i>
+          <i style="width:7px"></i><i style="width:7px"></i>
+        </div>
+        <div class="note">1 m 处张角 6.9 弧分，人眼极限 1 弧分<br>看不清这条 → A7 不通过</div>
+      </div>
+
+      <div class="row">
+        <div class="lab"><b>1.5 mm</b>　参考　<em>5.1 px</em></div>
+        <div class="bars">
+          <i style="width:5px"></i><i style="width:5px"></i><i style="width:5px"></i>
+          <i style="width:5px"></i><i style="width:5px"></i>
+        </div>
+        <div class="note">张角 5.2 弧分</div>
+      </div>
+
+      <div class="row">
+        <div class="lab"><b>1.0 mm</b>　参考　<em>3.4 px</em></div>
+        <div class="bars">
+          <i style="width:3px"></i><i style="width:3px"></i><i style="width:3px"></i>
+          <i style="width:3px"></i><i style="width:3px"></i>
+        </div>
+        <div class="note">张角 3.4 弧分</div>
+      </div>
+
+      <div class="row">
+        <div class="lab"><b>0.5 mm</b>　下限探测　<em>1.7 px</em></div>
+        <div class="bars">
+          <i style="width:2px"></i><i style="width:2px"></i><i style="width:2px"></i>
+          <i style="width:2px"></i><i style="width:2px"></i>
+        </div>
+        <div class="note">张角 1.7 弧分，接近极限，看不清属正常</div>
+      </div>
+
+      <div class="cal">
+        <div class="bar"></div>
+        <div class="cap">↑ 这段黑色应为 <b>10.0 mm</b>（34 px），用卡尺量一下可校验屏幕标定</div>
+      </div>
+
+      <div class="howto">
+        <b>怎么用：</b>① 管理端把这张图设成本工序内容，终端全屏显示；
+        ② 站到 <b>1.0 m</b>（工位实际距离），看 <b>2.0 mm</b> 那行五条竖线是否根根分明；
+        ③ 用卡尺量左边黑条，若不是 <b>10.0 mm</b>，说明屏没按 1280×1024 输出，先修分辨率再判。
+      </div>
+    </div>
+
+    <div class="texts">
+      <div class="t48">装配前确认夹具型号</div>
+      <div class="t24">拧紧扭矩 8.5 N·m，顺序 1 → 4</div>
+      <div class="t16">检查密封圈无破损、无扭曲，卡扣完全到位</div>
+      <div class="t12">编号 3-A 的螺栓需复检；力矩扳手每班校准一次，记录在《设备点检表》第 4 页</div>
+    </div>
+  </div>
+
+  <div class="ftr">站到 1.0 m 处：线对能分到第几行？四行字里最小能读清哪一行？把结果填进验收记录</div>
+</body>
+</html>

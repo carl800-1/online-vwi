@@ -1,6 +1,6 @@
 {
   "name": "online-vwi",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "description": "在线VWI发布项目 —— 型号 → 工序 → 播放清单，服务端遥控换型",
   "type": "module",
