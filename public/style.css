@@ -578,6 +578,95 @@ tr.row-cur td.model { box-shadow: inset 3px 0 0 var(--brand); }
 
 .hide { display: none !important; }
 
+/* ---------- 桌面程序专属（系统面板） ----------
+   网页版打开时 body 上没有 .is-desktop，这一整块自动不渲染，
+   所以同一套界面既能当浏览器管理页、也能当桌面程序，逻辑不重复。 */
+.desk-only { display: none; }
+body.is-desktop .topbar .stat.desk-only { display: flex; }
+body.is-desktop .topbar button.desk-only { display: inline-flex; }
+
+.modal {
+  position: fixed; inset: 0;
+  background: rgba(16, 24, 42, .42);
+  display: none; align-items: center; justify-content: center;
+  z-index: 60;
+}
+body.is-desktop .modal.desk-only { display: none; }
+body.is-desktop .modal.desk-only.on { display: flex; }
+
+.modal-card {
+  width: 560px; max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 80px);
+  display: flex; flex-direction: column;
+  background: #fff; border-radius: 12px;
+  box-shadow: 0 18px 48px rgba(16, 24, 42, .28);
+  overflow: hidden;
+}
+.modal-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 18px; border-bottom: 1px solid var(--line2);
+}
+.modal-head h3 { margin: 0; font-size: 15px; }
+.modal-head .spacer { flex: 1; }
+.modal-body { padding: 6px 18px 18px; overflow: auto; }
+.modal-foot {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 18px; border-top: 1px solid var(--line2); background: #fafbfd;
+}
+.modal-foot .spacer { flex: 1; }
+
+.kv {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 0; border-bottom: 1px dashed var(--line2);
+  font-size: 13px;
+}
+.kv > span { width: 96px; flex: none; color: var(--ink3); }
+.kv > b { font-weight: 600; }
+.kv .path {
+  flex: 1; min-width: 0;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px; font-weight: 500; color: #48566b;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.sys-block { padding: 12px 0; border-bottom: 1px dashed var(--line2); }
+.sys-label { font-size: 13px; color: var(--ink3); margin-bottom: 8px; }
+.sys-label em {
+  display: block; font-style: normal; font-size: 12px; color: #a2adbd; margin-top: 2px;
+}
+.lan-list { display: flex; flex-direction: column; gap: 6px; }
+.lan-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px;
+  background: #f6f8fb; border: 1px solid var(--line); border-radius: var(--r);
+  font-family: Consolas, "Cascadia Mono", monospace; font-size: 13px;
+}
+.lan-item b { font-weight: 600; }
+.lan-item .spacer { flex: 1; }
+.lan-item button { padding: 3px 10px; font-size: 12px; }
+
+.switch { position: relative; display: inline-block; width: 40px; height: 22px; flex: none; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch i {
+  position: absolute; inset: 0; cursor: pointer;
+  background: #cfd7e3; border-radius: 22px; transition: background .15s;
+}
+.switch i::before {
+  content: ''; position: absolute; left: 3px; top: 3px;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; transition: transform .15s;
+}
+.switch input:checked + i { background: var(--brand); }
+.switch input:checked + i::before { transform: translateX(18px); }
+.switch-txt { font-size: 12px; color: var(--ink3); font-weight: 500; }
+
+.sys-tip {
+  margin: 14px 0 0; padding: 10px 12px;
+  background: #fff8e6; border: 1px solid #ffe3a3; border-radius: var(--r);
+  font-size: 12px; line-height: 1.6; color: #7a6320;
+}
+.sys-tip strong { color: #5c4a12; }
+
 @media (max-width: 1100px) {
   td.model { width: 160px; }
   .topbar { gap: 12px; padding: 0 12px; }

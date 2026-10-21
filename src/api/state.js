@@ -2,6 +2,7 @@
 import { q } from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
 import { getState, switchTo, markReady, waitForChange, cancelSwitch, touch, SWITCH_TIMEOUT_MS } from '../switch.js';
+import { VERSION } from '../version.js';
 
 function decorate(state) {
   const cur = state.currentModelId ? q.get('SELECT code, name FROM model WHERE id = ?', state.currentModelId) : null;
@@ -88,7 +89,7 @@ export function register(router) {
       processes: procs,
       items,
       media: { count: media.n, bytes: media.b },
-      version: '2.0.0'
+      version: VERSION
     });
   });
 }

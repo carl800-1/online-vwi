@@ -632,6 +632,105 @@ $('adviceBtn').addEventListener('click', async () => {
   } catch (err) { toast(err.message, 'err'); }
 });
 
+// ---------- 桌面程序：系统面板 ----------
+// 同一份界面服务两种场景：浏览器管理页（历史用法，还能远程排障）、
+// 桌面程序（现场双击 exe 用）。window.vwiDesktop 只在桌面程序里存在，
+// 所以下面整块在浏览器里等于空操作，不需要维护两份界面。
+const desk = window.vwiDesktop;
+let sysInfo = null;
+
+if (desk) {
+  document.body.classList.add('is-desktop');
+
+  const modal = $('sysModal');
+
+  const openSys = () => {
+    modal.classList.add('on');
+    desk.info().then((info) => {
+      sysInfo = info;
+      $('sysVer').textContent = 'v' + info.version;
+      $('sysPort').textContent = info.port;
+      $('sysData').textContent = info.dataDir;
+      $('sysData').title = info.dataDir;
+      $('sysLog').textContent = info.logFile;
+      $('sysLog').title = info.logFile;
+      $('sysAuto').checked = !!info.autoStart;
+      $('sysAutoTxt').textContent = info.autoStart ? '已开启' : '已关闭';
+
+      // 开发模式（直接跑 electron .）下不能写开机自启：那会把 electron.exe 注册进去。
+      // 界面直接把开关锁掉，别让人以为能设。
+      if (info.dev) {
+        $('sysAuto').disabled = true;
+        $('sysAutoTxt').textContent = '仅打包后可用（当前为开发模式）';
+      }
+
+      // 终端装机要填的地址。这里把 127.0.0.1 单独拎出来提醒别填错 ——
+      // 那是服务端自己看到的地址，填到别的机器上必然连不上。
+      const lan = info.lan || [];
+      $('sysLan').innerHTML = lan.length
+        ? '<div class="lan-list">' + lan.map((u) => (
+            '<div class="lan-item"><b>' + H(u) + '</b><div class="spacer"></div>' +
+            '<button class="btn" data-copy="' + H(u) + '">复制</button></div>'
+          )).join('') + '</div>'
+        : '<div class="lan-item">没有检测到局域网地址，请确认网线已插、IP 已配置</div>';
+    });
+  };
+
+  const closeSys = () => modal.classList.remove('on');
+
+  $('sysBtn').addEventListener('click', () => (modal.classList.contains('on') ? closeSys() : openSys()));
+  $('sysClose').addEventListener('click', closeSys);
+  modal.addEventListener('click', (e) => { if (e.target === modal) closeSys(); });
+
+  $('sysLan').addEventListener('click', async (e) => {
+    const url = e.target.dataset && e.target.dataset.copy;
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      toast('已复制 ' + url, 'ok');
+    } catch { toast('复制失败，请手动选中地址复制', 'err'); }
+  });
+
+  $('sysOpenData').addEventListener('click', () => desk.openData());
+  $('sysOpenLog').addEventListener('click', () => desk.openLog());
+
+  $('sysAuto').addEventListener('change', async (e) => {
+    const on = e.target.checked;
+    const real = await desk.setAutoStart(on);
+    e.target.checked = !!real;
+    $('sysAutoTxt').textContent = real ? '已开启' : '已关闭';
+    toast(real ? '已设为开机自动启动' : '已取消开机自动启动', 'ok');
+  });
+
+  $('sysHide').addEventListener('click', () => { closeSys(); desk.hide(); });
+
+  $('sysQuit').addEventListener('click', async () => {
+    const n = S.online.length;
+    closeSys();
+    if (n > 0) {
+      const ok = confirm(
+        '还有 ' + n + ' 台终端在线（' + S.online.join('、') + '）。\n\n' +
+        '退出会中断它们的播放，等于整线停产。确定要退出吗？'
+      );
+      if (!ok) return;
+    }
+    desk.quit();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modal.classList.contains('on')) closeSys();
+  });
+
+  desk.info().then((info) => {
+    sysInfo = info;
+    $('verTxt').textContent = info.version;
+    document.title = '在线VWI服务端 v' + info.version;
+  });
+
+  // 主进程每 5 秒推一次状态给托盘用。界面这边刻意不接：
+  // pollLoop() 的长轮询本来就在实时刷新在线数，再叠一路只会互相覆盖状态。
+}
+
 // ---------- 启动 ----------
 (async function boot() {
   try {

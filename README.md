@@ -116,21 +116,43 @@ npm start          # kiosk 全屏；npm run dev 为调试模式
 
 完整说明见 [`terminal/README.md`](terminal/README.md)。
 
-### 服务端（绿色免安装包）
+### 服务端（桌面程序，双击即用）
 
-服务端不用装 Node.js。`release/online-vwi-server-1.4.0-win-x64.zip` 解压到
-任意目录（建议 `D:\VWI-Server`）就能用：
+**现场用这个**：`server-gui/dist/online-vwi-server-gui-1.5.0-x64.exe`，单文件免安装。
+双击它就同时干两件事：把 HTTP 服务跑起来、把管理界面开成一个独立窗口——**全程不用浏览器、不用装 Node**。
 
-| 脚本 | 作用 |
+| 场景 | 做法 |
 |---|---|
-| `启动服务端.bat` | 启动（窗口里会打印终端要填的局域网地址） |
-| `停止服务端.bat` | 停止（重复启动会提示端口已占用，不会开出两个服务） |
-| `设置开机自启.bat` | 登录 Windows 自动启动（当前用户级，免管理员） |
-| `取消开机自启.bat` | 取消自动启动 |
+| 日常使用 | 双击 exe，等窗口出来即可 |
+| 关窗口 | **服务不会停**，缩到右下角托盘继续为 5 台终端服务；双击托盘图标能重新打开 |
+| 真退出 | 右键托盘图标 →「退出服务端」（有终端在线时会二次确认） |
+| 开机自启 | 系统面板里打开开关，或托盘菜单勾选 |
+| 终端装机地址 | 系统面板里直接列出局域网地址并可复制，不用去翻 ipconfig |
 
-包里自带 `runtime/node.exe`，只供本包使用，不往系统里装东西。
-数据全在 `data\`（数据库 + 媒体），备份就备份这个文件夹。
-英文版 Windows 另有 `start-server.bat` 等同名英文脚本。
+界面顶栏的「系统」按钮里能看到：版本、服务端口、终端要填的服务端地址、数据目录、日志文件。
+数据在 exe 同级的 `data\`，备份就备份它；日志在 `data\server.log`，出问题先看它。
+
+<details>
+<summary>另附：无图形界面的机器用绿色免安装包</summary>
+
+服务器如果是远程桌面、或者不方便用图形界面，仍可用绿色包：
+`release/online-vwi-server-1.4.0-win-x64.zip` 解压到任意目录（建议 `D:\VWI-Server`），
+双击 `启动服务端.bat`，再用浏览器开 `http://服务器IP:8092/`。
+包里自带 `runtime\node.exe`（不往系统里装东西），另外提供
+`停止服务端.bat` / `设置开机自启.bat` / `取消开机自启.bat`，英文版 Windows 另有 `start-server.bat` 等英文脚本。
+**桌面版与绿色包共用同一份服务端代码**（`src/server-core.js`），功能完全一致，只是入口不同。
+</details>
+
+<details>
+<summary>源码方式运行</summary>
+
+```bash
+npm start            # 等价于 node server.js，监听 8092
+npm run gui          # 以桌面程序方式启动（开发调试）
+npm run gui:dist     # 打包 portable exe
+```
+
+</details>
 
 ### 日常操作
 

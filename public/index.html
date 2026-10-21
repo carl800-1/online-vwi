@@ -27,6 +27,10 @@
     <span>在线 <b id="onlineTxt">0</b></span>
   </div>
   <div class="stat">当前 <b id="curTxt">未指定</b></div>
+
+  <!-- 下面两个只在桌面程序里出现；网页版打开时 body 没有 is-desktop，整块隐藏 -->
+  <div class="stat desk-only">v<b id="verTxt">—</b></div>
+  <button class="btn on-dark sm desk-only" id="sysBtn" title="版本、端口、终端装机地址、数据目录、开机自启">系统</button>
 </header>
 
 <div class="wrap">
@@ -137,6 +141,49 @@
 </aside>
 
 <div id="toasts"></div>
+
+<!-- ========== 系统面板（仅桌面程序） ==========
+     现场装机最费时间的两件事：找服务器 IP、记数据存在哪 —— 都放这里 -->
+<div class="modal desk-only" id="sysModal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h3>服务端</h3>
+      <div class="spacer"></div>
+      <button class="iconbtn" id="sysClose" title="关闭">✕</button>
+    </div>
+
+    <div class="modal-body">
+      <div class="kv"><span>版本</span><b id="sysVer">—</b></div>
+      <div class="kv"><span>运行方式</span><b>桌面程序 · 无需浏览器</b></div>
+      <div class="kv"><span>服务端口</span><b id="sysPort">—</b></div>
+
+      <div class="sys-block">
+        <div class="sys-label">终端装机要填的服务端地址<em>装 5 台时逐台粘贴，不要填 127.0.0.1</em></div>
+        <div id="sysLan"></div>
+      </div>
+
+      <div class="kv"><span>数据目录</span><b id="sysData" class="path">—</b>
+        <button class="btn sm" id="sysOpenData">打开</button></div>
+      <div class="kv"><span>运行日志</span><b id="sysLog" class="path">—</b>
+        <button class="btn sm" id="sysOpenLog">定位</button></div>
+
+      <div class="kv">
+        <span>开机自动启动</span>
+        <label class="switch"><input type="checkbox" id="sysAuto"><i></i></label>
+        <b id="sysAutoTxt" class="switch-txt">—</b>
+      </div>
+
+      <p class="sys-tip">关掉这个窗口服务<strong>不会停</strong>，它会缩到右下角托盘继续为 5 台终端服务。
+        双击托盘图标能重新打开；要真退出请用下面的「退出服务端」。</p>
+    </div>
+
+    <div class="modal-foot">
+      <button class="btn" id="sysHide">收进托盘</button>
+      <div class="spacer"></div>
+      <button class="btn danger" id="sysQuit">退出服务端</button>
+    </div>
+  </div>
+</div>
 
 <script src="/app.js"></script>
 </body>

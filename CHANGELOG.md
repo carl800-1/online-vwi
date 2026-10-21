@@ -15,6 +15,68 @@
 
 ---
 
+## [1.5.0] — 2026-10-21 · 服务端桌面程序（双击即用，不用浏览器）
+
+用户提出"服务端要有程序界面，不用网页访问"。向后兼容地新增一种交付形态：
+**同一个 exe 里既有服务又有界面**。终端 exe 不受影响（仍是 1.3.0）。
+
+### 新增
+
+- **服务端桌面程序** `server-gui/dist/online-vwi-server-gui-1.5.0-x64.exe`（85.6 MB，单文件免安装）
+  - 双击即同时完成"起服务"和"开界面"，**不需要浏览器、不需要装 Node、不需要管理员权限**
+  - 界面顶栏「系统」面板：版本、服务端口、**终端装机要填的局域网地址（可一键复制）**、
+    数据目录（可打开）、日志文件（可定位）、开机自启开关
+  - **关窗口不停服务**：点 X 只收进右下角托盘，5 台终端照常工作；
+    双击托盘图标重新打开，右键菜单才真退出（有终端在线会二次确认）
+  - 单实例锁：重复双击不会开出第二个服务，而是把已有窗口唤回来
+  - 开机自启走 `PORTABLE_EXECUTABLE_FILE`，注册的是**用户手上那个 exe**，
+    不是 `%TEMP%` 里的自解压副本（后者会被系统清理，开机就失效）
+  - 日志写 `data\server.log`，带 UTF-8 BOM，中文记事本直接双击可读；超 2 MB 自动轮转
+  - 端口被陌生程序占用时弹窗提示并给出可用的空闲端口，不静默改端口
+
+### 重构（对外行为不变）
+
+- 抽出 `src/server-core.js`：把"起 HTTP 服务"从 `server.js` 的命令行外壳里剥出来，
+  让 `node server.js`、绿色免装包、Electron 桌面版**复用同一份服务逻辑**，
+  不存在两套实现分叉的可能。`startServer()` 幂等，`listen()` 支持端口占用后换端口重试。
+- `server.js` 变成薄壳：调核心、打印横幅、处理 Ctrl+C。
+
+### 修复
+
+- `/api/status` 的 `version` 原本硬编码 `'2.0.0'`（一个根本不存在的版本）。
+  现在统一从新增的 `src/version.js` 读 `package.json`，与服务端横幅、EXE 文件名一致。
+- 日志文件补 UTF-8 BOM：中文 Windows 记事本默认按 ANSI 解码，没有 BOM 会整篇乱码，
+  而现场排障第一步就是双击这个日志。
+
+### 实测
+
+- 打包版全新目录双击：exe 同级自动建 `data\`、监听 8092、自动生成 10 型号 × 5 工序
+- 收进托盘后：窗口 `visibilityState=hidden`，8092 仍在监听，`/api/status` 仍 200
+- 重复双击：第二实例自行退出，PID 不变（服务没重启，终端不断线），窗口被唤回
+- 开机自启：注册表写入 `electron.app.在线VWI服务端` =
+  `"D:\tmp\vwi-gui-test\online-vwi-server-gui-1.5.0-x64.exe" --autostart`；关开关后无残留
+- 端到端：终端 OP30 连上桌面版服务端 → 遥控切 X210 → `prepare → idle`，终端落地切换后内容
+- 回归：服务端 47/47
+
+### 踩坑记录（这次最花时间的地方）
+
+**Electron 的 app 参数必须用绝对路径。** 传 `.` 时 `require('electron')` 返回的是
+**字符串**（npm 包 `electron/index.js` 导出的是 exe 路径），不是 API 对象 ——
+于是 `app` / `BrowserWindow` / `ipcMain` 全是 undefined，而且**报错信息完全不指向真正原因**。
+`process.getBuiltinModule('electron')` 同样 undefined，`electron/main` 子路径也不存在。
+项目里的 `terminal/tools/run-term.cjs` 一直用绝对路径，所以终端端从来没踩到。
+> 凡是"require('electron') 拿到的东西没有 app"，第一反应就查 app 参数是不是相对路径。
+
+**Electron 31 不行、40 才行。** 终端端用的 Electron 31 内置 Node 20.18，**没有 `node:sqlite`**，
+而服务端数据层重度依赖它。Electron 40 内置 Node 24.15，`node:sqlite` 稳定可用且无需 flag，
+所以桌面版用的是 Electron 40.10.3，与终端端的 31.7.7 并存互不影响。
+
+**ESM 主进程拿不到 electron API。** 具名导入报错、`default` 导入是空对象、
+`createRequire` 会掉到 npm 包。最后用 `createRequire` + 在 `app.whenReady()` 之后再取
+`BrowserWindow` 等成员，两边都避开。
+
+---
+
 ## [1.4.0] — 2026-10-21 · 服务端绿色免安装包
 
 向后兼容地新增"服务端免安装交付"这一形态。**接口、数据模型、切换逻辑一律没动**，

@@ -1,16 +1,60 @@
 {
   "name": "online-vwi",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
-  "description": "在线VWI发布项目 —— 型号 → 工序 → 播放清单，服务端遥控换型",
+  "description": "在线VWI发布系统 —— 型号 → 工序 → 播放清单，服务端遥控换型",
   "type": "module",
+  "main": "server-gui/main.js",
+  "author": "Frank",
+  "license": "UNLICENSED",
   "engines": {
     "node": ">=22.5.0"
   },
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node test/run.mjs"
+    "test": "node test/run.mjs",
+    "gui": "electron .",
+    "gui:dev": "electron . --dev",
+    "gui:dist": "electron-builder --win portable --x64"
   },
-  "dependencies": {}
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "40.10.3",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.frank.online-vwi-server",
+    "productName": "在线VWI服务端",
+    "asar": false,
+    "directories": {
+      "output": "server-gui/dist",
+      "buildResources": "server-gui/assets"
+    },
+    "files": [
+      "package.json",
+      "server-gui/main.js",
+      "server-gui/preload.cjs",
+      "server-gui/assets/**",
+      "src/**",
+      "public/**",
+      "!data/**"
+    ],
+    "win": {
+      "icon": "server-gui/assets/icon.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "online-vwi-server-gui-${version}-x64.exe",
+      "requestExecutionLevel": "user",
+      "unpackDirName": "online-vwi-server-gui"
+    }
+  }
 }
