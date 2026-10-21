@@ -7,12 +7,18 @@
 <style>
   /* 预览时不要 cursor:none，方便在浏览器里看清元素位置 */
   body { cursor: default; }
+  /* 折叠式场景切换：收起时只占右上角一个小标签，不挡顶栏状态 */
   .scen {
-    position: fixed; right: 10px; top: 10px; z-index: 99;
-    font: 12px/1.6 Consolas, monospace; color: #9fb2c9;
-    background: rgba(0,0,0,.7); padding: 8px 12px; border-radius: 8px;
-    white-space: pre; pointer-events: none;
+    position: fixed; right: 8px; bottom: 8px; z-index: 99;
+    font: 11px/1.7 Consolas, monospace;
+    background: rgba(0,0,0,.8); border-radius: 7px; padding: 3px 6px;
+    max-width: 420px;
   }
+  .scen summary { color: #8fb4dd; cursor: pointer; outline: none; padding: 1px 4px; }
+  .scen .list { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 4px; }
+  .scen a { color: #8fb4dd; text-decoration: none; padding: 2px 7px; border-radius: 4px; white-space: nowrap; }
+  .scen a:hover { background: #1b2634; }
+  .scen a.cur { background: #2f7fe0; color: #fff; }
 </style>
 </head>
 <body>
@@ -58,7 +64,7 @@
 
 </div>
 
-<div class="scen" id="scen"></div>
+<details class="scen" id="scen"><summary>切换场景 ▾</summary><div class="list" id="scenlist"></div></details>
 
 <script>
 'use strict';
@@ -110,15 +116,26 @@ function pushStatus(patch) {
 }
 
 const TITLES = {
-  1: 'S1 正常播放：3 项，第 1 张',
-  2: 'S2 自动翻页：1 秒后应到第 2 项',
-  3: 'S3 整屏切换：X200(3项) → X210(2项)',
-  4: 'S4 掉队告警：顶栏红字「内容未就绪」',
-  5: 'S5 内容不全：空清单不黑屏',
-  6: 'S6 准备中：画面照旧播，只挂角标',
-  7: 'S7 离线：画面照常，顶栏转灰'
+  1: '正常播放',
+  2: '自动翻页',
+  3: '整屏切换',
+  4: '掉队告警',
+  5: '内容不全',
+  6: '准备中',
+  7: '离线'
 };
-document.getElementById('scen').textContent = TITLES[SCN] || ('场景 ' + SCN);
+
+// 场景切换条：直接点就能看各个状态，不用改地址栏
+(function buildNav() {
+  const list = document.getElementById('scenlist');
+  for (const [k, label] of Object.entries(TITLES)) {
+    const a = document.createElement('a');
+    a.href = '?s=' + k;
+    a.textContent = k + ' ' + label;
+    if (k === SCN) a.className = 'cur';
+    list.appendChild(a);
+  }
+})();
 
 (async function run() {
   await wait(120);   // 等 player.js 的 boot() 把回调注册好
