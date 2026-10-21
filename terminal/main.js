@@ -23,15 +23,19 @@ process.on('unhandledRejection', (e) => {
   console.error('[main] 未处理的 Promise 拒绝：', e);
 });
 
+app.setAppUserModelId('com.frank.online-vwi-terminal');
+
+// userData 必须在抢单实例锁之前定下来：Electron 的锁文件就放在 userData 里。
+// 顺序反了会出现两种毛病——缓存/lib 落到默认的 %APPDATA%\Electron，
+// 以及用 VWI_TERMINAL_ROOT 起测试实例时互相抢同一把锁、第二台直接退出。
+config.ensureDirs();                                 // setPath 前先建好，避免首启找不到目录
+app.setPath('userData', config.PATHS.root);          // %LOCALAPPDATA%\online-vwi-terminal
+
 // 单实例：双击第二次不再开一个窗口，而是把已有窗口顶出来
 if (!app.requestSingleInstanceLock()) {
   app.quit();
   process.exit(0);
 }
-
-app.setAppUserModelId('com.frank.online-vwi-terminal');
-config.ensureDirs();                                 // setPath 前先建好，避免首启找不到目录
-app.setPath('userData', config.PATHS.root);          // %LOCALAPPDATA%\online-vwi-terminal
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion'); // 防被判定为遮挡而降帧
 
@@ -49,6 +53,8 @@ let watchdogFails = 0;
 // ───────────────────────── 日志 ─────────────────────────
 
 function installLogger() {
+  if (installLogger.done) return;          // 被调用两次会把 console 包两层，日志里每行都重复
+  installLogger.done = true;
   config.ensureDirs();
   const orig = { log: console.log, warn: console.warn, error: console.error };
   const write = (level, args) => {
@@ -264,6 +270,7 @@ function createTray() {
   const img = nativeImage.createFromPath(path.join(__dirname, 'assets', 'tray.png'));
   tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img);
   tray.setToolTip(`在线VWI终端 · ${cfg.op}`);
+  console.log(`[tray] 托盘已创建${img.isEmpty() ? '（图标缺失，使用空图标）' : ''}`);
   refreshTrayMenu(syncer ? syncer.snapshot() : null);
   tray.on('double-click', () => {
     if (win && !win.isDestroyed()) { win.show(); win.focus(); }

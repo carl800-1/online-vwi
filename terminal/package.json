@@ -1,6 +1,6 @@
 {
   "name": "online-vwi-terminal",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "productName": "在线VWI终端",
   "description": "在线 VWI 发布系统 · 工作台接收端（kiosk 全屏播放）",
   "main": "main.js",

@@ -36,6 +36,7 @@ class Syncer extends EventEmitter {
     this.failCount = 0;
     this.prepared = new Map();     // modelId -> { modelCode, items, at }
     this.inflight = null;          // { modelId, controller }
+    this.serverCurrentId = '';     // 服务端当前该播的型号（最近一次轮询结果）
     this.flipping = false;
     this.lastView = null;
     this.startedAt = Date.now();
@@ -149,13 +150,17 @@ class Syncer extends EventEmitter {
   async apply(st) {
     const curId = st.currentModelId || '';
     const curCode = st.modelCode || '';
+    this.serverCurrentId = curId;
 
     // ① prepare：先把内容备好，画面不动
     if (st.phase === 'prepare' && st.pendingModelId && st.pendingModelId !== this.appliedModelId) {
       this.pendingModelId = st.pendingModelId;
       this.pendingCode = st.pendingModelCode || '';
-      await this.ensurePrepared(st.pendingModelId, this.pendingCode);
-      return;                                   // 准备期间绝不动画面
+      // 不能 await 下载：弱网下一套内容要下好几分钟，主循环被它堵住的话，
+      // 服务器五分钟后强翻，这台永远收不到"已经翻了"的通知，
+      // 只会一直停在"准备中"，工人看不出自己掉队了（A10 验收就是卡在这里）。
+      this.startPrepare(st.pendingModelId, this.pendingCode);
+      return;
     }
     this.pendingModelId = '';
     this.pendingCode = '';
@@ -187,14 +192,23 @@ class Syncer extends EventEmitter {
     //      · 掉队（盘上还是上一个型号）—— 服务器等不及强翻了，必须亮红字让人知道不能作业
     const firstLoad = !this.appliedModelId;
     this.status = firstLoad ? 'preparing' : 'stale';
+    this.emitStatus(true);
     if (!firstLoad) {
-      this.emitStatus(true);
+      // 红字已经亮了，下载继续在后台跑；下完下一轮轮询会自己翻过去（自愈）
       console.warn(`[sync] 掉队：本地无 ${curCode} 内容，开始补下载`);
     }
-    const ok = await this.ensurePrepared(curId, curCode);
-    if (ok && this.prepared.get(curId)) {
-      await this.flipTo(this.prepared.get(curId), curCode, curId);
-    }
+    this.startPrepare(curId, curCode);
+  }
+
+  /**
+   * 后台准备，不阻塞主循环。
+   * 长轮询是终端的耳朵：一旦被下载堵住，就听不到服务端的强制切换，
+   * 掉队那台会一直显示"准备中"，等于把故障藏起来了。
+   */
+  startPrepare(modelId, modelCode) {
+    if (this.prepared.has(modelId)) return;
+    if (this.inflight && this.inflight.modelId === modelId) return;
+    this.ensurePrepared(modelId, modelCode).catch(() => { /* 失败由下一轮轮询重试 */ });
   }
 
   /** 下载并校验某个（型号 × 本工序），完成即举手。返回是否可用。 */
@@ -253,6 +267,13 @@ class Syncer extends EventEmitter {
 
         await this.reportReady(modelId);
         this.emitStatus(true);
+
+        // 掉队自愈：服务端可能早就不等它、已经强翻过了。
+        // 内容一到就立刻补上，别让红字白亮 25 秒等下一次长轮询。
+        if (this.running && this.serverCurrentId === modelId && this.appliedModelId !== modelId) {
+          const prep = this.prepared.get(modelId);
+          if (prep) await this.flipTo(prep, code, modelId);
+        }
         return true;
       } catch (e) {
         if (e.message === 'aborted' || controller.signal.aborted) {

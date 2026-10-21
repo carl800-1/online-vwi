@@ -14,7 +14,11 @@ import { tx, getSetting, setSetting, delSetting } from './db.js';
 
 const WAIT_TIMEOUT_MS = 25_000;      // 长轮询挂起上限
 const ONLINE_TTL_MS = 60_000;        // 多久没请求算离线
-export const SWITCH_TIMEOUT_MS = 5 * 60_000;  // 切换总超时（需求 5 分钟）
+// 切换总超时：需求定的是 5 分钟。现场调试或用例验证时可以用环境变量改小，
+// 否则每验证一次"掉队告警"都得干等五分钟。
+export const SWITCH_TIMEOUT_MS = Number(process.env.VWI_SWITCH_TIMEOUT_MS) > 0
+  ? Number(process.env.VWI_SWITCH_TIMEOUT_MS)
+  : 5 * 60_000;
 
 const online = new Map();   // op -> lastSeen 毫秒
 const ready = new Map();    // op -> { modelId, at }
