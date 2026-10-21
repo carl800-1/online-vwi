@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>终端设置</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Microsoft YaHei", "微软雅黑", system-ui, sans-serif;
+    background: #f6f8fb;
+    color: #1e2733;
+    padding: 34px 40px;
+    font-size: 14px;
+  }
+  h1 { font-size: 20px; font-weight: 700; margin-bottom: 6px; }
+  .sub { color: #6b7a8d; font-size: 13px; margin-bottom: 26px; line-height: 1.6; }
+  .field { margin-bottom: 20px; }
+  label { display: block; font-weight: 600; margin-bottom: 8px; font-size: 13px; }
+  label small { font-weight: 400; color: #8494a8; margin-left: 6px; }
+  input[type=text] {
+    width: 100%;
+    height: 44px;
+    padding: 0 14px;
+    border: 1px solid #d5deea;
+    border-radius: 8px;
+    font-size: 15px;
+    font-family: "Consolas", monospace;
+    background: #fff;
+    outline: none;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  input[type=text]:focus { border-color: #2f7fe0; box-shadow: 0 0 0 3px rgba(47,127,224,.13); }
+
+  .row { display: flex; gap: 10px; }
+  .row input { flex: 1; }
+
+  button {
+    height: 44px;
+    padding: 0 20px;
+    border: 0;
+    border-radius: 8px;
+    background: #2f7fe0;
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background .15s, opacity .15s;
+    white-space: nowrap;
+  }
+  button:hover { background: #276fc9; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.ghost { background: #fff; color: #33445c; border: 1px solid #d5deea; }
+  button.ghost:hover { background: #eef3fa; }
+
+  .msg { margin-top: 12px; font-size: 13px; min-height: 20px; line-height: 1.6; }
+  .msg.ok { color: #1a8f4c; }
+  .msg.err { color: #c62d24; }
+
+  .procs { display: none; margin-top: 22px; }
+  .procs.show { display: block; }
+  .procgrid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 12px; }
+  .proc {
+    border: 1px solid #d5deea;
+    border-radius: 9px;
+    background: #fff;
+    padding: 12px 14px;
+    cursor: pointer;
+    text-align: left;
+    height: auto;
+    color: #1e2733;
+    font-weight: 400;
+    transition: border-color .12s, background .12s;
+  }
+  .proc:hover { border-color: #2f7fe0; background: #f4f9ff; }
+  .proc.sel { border-color: #2f7fe0; background: #e8f2ff; box-shadow: inset 0 0 0 1px #2f7fe0; }
+  .proc b { display: block; font-size: 15px; font-weight: 700; font-family: Consolas, monospace; }
+  .proc span { display: block; font-size: 12px; color: #6b7a8d; margin-top: 3px; }
+
+  footer {
+    margin-top: 30px;
+    padding-top: 20px;
+    border-top: 1px solid #e2e9f2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .note { font-size: 12px; color: #8494a8; line-height: 1.6; }
+  .ver { font-size: 12px; color: #8494a8; }
+</style>
+</head>
+<body>
+
+<h1>终端设置</h1>
+<p class="sub">
+  每台屏只需填两项：这台屏是哪道工序，服务器在哪。<br>
+  填错会导致屏上显示别的工序的指导书 —— 装机时核对一次。
+</p>
+
+<div class="field">
+  <label>服务器地址<small>形如 http://192.168.1.100:8092</small></label>
+  <div class="row">
+    <input type="text" id="server" placeholder="http://192.168.1.100:8092" spellcheck="false">
+    <button id="probe" class="ghost">检测</button>
+  </div>
+  <div class="msg" id="probeMsg"></div>
+</div>
+
+<div class="procs" id="procs">
+  <label>这台屏是哪道工序？</label>
+  <div class="procgrid" id="procgrid"></div>
+</div>
+
+<footer>
+  <div>
+    <div class="note" id="cacheNote"></div>
+    <div class="ver" id="verNote"></div>
+  </div>
+  <div class="row">
+    <button class="ghost" id="openDir">打开内容目录</button>
+    <button id="save" disabled>保存并开始</button>
+  </div>
+</footer>
+
+<script>
+'use strict';
+const $ = (id) => document.getElementById(id);
+let picked = '';
+let probed = false;
+
+$('probe').addEventListener('click', doProbe);
+$('server').addEventListener('keydown', (e) => { if (e.key === 'Enter') doProbe(); });
+$('openDir').addEventListener('click', () => window.vwi.openContentDir());
+$('save').addEventListener('click', doSave);
+
+async function doProbe() {
+  const server = $('server').value.trim();
+  if (!server) { setMsg('err', '请先填服务器地址'); return; }
+
+  $('probe').disabled = true;
+  setMsg('', '正在连接…');
+  try {
+    const r = await window.vwi.probe(server);
+    if (!r.ok) {
+      setMsg('err', '连不上：' + r.error + '<br>检查服务器是否开机、防火墙是否放行 8092 端口');
+      probed = false;
+      $('procs').classList.remove('show');
+      $('save').disabled = true;
+      return;
+    }
+    $('server').value = r.server;
+    probed = true;
+    setMsg('ok', `已连接　服务器版本 ${r.version || '—'}　当前生产型号 <b>${r.modelCode || '未指定'}</b>`);
+
+    const grid = $('procgrid');
+    grid.textContent = '';
+    for (const p of r.processes) {
+      const b = document.createElement('button');
+      b.className = 'proc';
+      b.dataset.code = p.code;
+      const t = document.createElement('b');
+      t.textContent = p.code;
+      const s = document.createElement('span');
+      s.textContent = p.name;
+      b.appendChild(t);
+      b.appendChild(s);
+      b.addEventListener('click', () => {
+        picked = p.code;
+        for (const el of grid.querySelectorAll('.proc')) el.classList.toggle('sel', el === b);
+        $('save').disabled = false;
+      });
+      grid.appendChild(b);
+    }
+    $('procs').classList.add('show');
+    $('save').disabled = !picked;
+  } catch (e) {
+    setMsg('err', '检测失败：' + e.message);
+  } finally {
+    $('probe').disabled = false;
+  }
+}
+
+async function doSave() {
+  if (!picked) { setMsg('err', '请选择工序'); return; }
+  if (!probed) { setMsg('err', '请先点"检测"确认服务器可达'); return; }
+  $('save').disabled = true;
+  setMsg('', '正在保存…');
+  const r = await window.vwi.saveConfig({ op: picked, server: $('server').value.trim() });
+  if (!r.ok) {
+    setMsg('err', r.error || '保存失败');
+    $('save').disabled = false;
+  }
+}
+
+function setMsg(cls, html) {
+  const el = $('probeMsg');
+  el.className = 'msg ' + cls;
+  el.innerHTML = html || '';
+}
+
+(async function init() {
+  try {
+    const snap = await window.vwi.snapshot();
+    if (snap.op) $('server').value = (snap.status && snap.status.server) || '';
+  } catch { /* ignore */ }
+  try {
+    const c = await window.vwi.cacheStats();
+    $('cacheNote').textContent = c.modelCode
+      ? `本机已缓存：${c.modelCode}　${c.files} 个文件 / ${(c.bytes / 1048576).toFixed(1)}MB`
+      : '本机还没有缓存内容';
+    $('verNote').textContent = '内容目录 ' + c.currentDir;
+  } catch { /* ignore */ }
+})();
+</script>
+</body>
+</html>

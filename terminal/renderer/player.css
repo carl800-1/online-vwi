@@ -1,0 +1,266 @@
+/* 终端画面 · 1280×1024 固定设计稿，靠 transform:scale 适配实际分辨率。
+   为什么不做响应式：19 寸是 5:4，遇上 1366×768 的 16:9 屏时，响应式会把字号和间距全打乱；
+   整体缩放至少保证"1 米处看得清"这个结论对任何屏都成立。 */
+:root {
+  --w: 1280px;
+  --h: 1024px;
+  --ink: #eef3fa;
+  --ink2: #a9b6c8;
+  --bg: #0f1319;
+  --bar: #161c25;
+  --brand: #2f7fe0;
+  --ok: #35c46a;
+  --warn: #f0a029;
+  --bad: #d6342c;
+  --off: #6b7686;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #000;
+  color: var(--ink);
+  font-family: "Microsoft YaHei", "微软雅黑", "PingFang SC", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: none;             /* 车间触摸/鼠标都别露出指针 */
+}
+
+#screen {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--w);
+  height: var(--h);
+  transform-origin: top left;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ───────── 顶栏 88px ───────── */
+header {
+  flex: 0 0 88px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 32px;
+  background: var(--bar);
+  border-bottom: 1px solid #222b38;
+  transition: background .18s;
+}
+
+.model {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  min-width: 0;
+}
+.model .code {
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.model .nm {
+  font-size: 20px;
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 420px;
+}
+.model .op {
+  font-size: 24px;
+  font-weight: 600;
+  color: #cfdcee;
+  padding-left: 16px;
+  border-left: 1px solid #2c3644;
+  white-space: nowrap;
+}
+
+.right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 22px;
+  color: var(--ink2);
+  white-space: nowrap;
+}
+.dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 4px rgba(53, 196, 106, .16);
+  flex: 0 0 auto;
+}
+.right.off .dot { background: var(--off); box-shadow: 0 0 0 4px rgba(107, 118, 134, .16); }
+.right.warn .dot { background: var(--warn); box-shadow: 0 0 0 4px rgba(240, 160, 41, .16); }
+.right.bad .dot { background: #fff; box-shadow: 0 0 0 4px rgba(255, 255, 255, .25); }
+
+/* 未就绪：整条顶栏变红，1 米外也能一眼看出"这批不能干" */
+body.stale header {
+  background: var(--bad);
+  border-bottom-color: #ff6b5e;
+  animation: alertPulse 1.1s ease-in-out infinite;
+}
+body.stale .right { color: #fff; font-weight: 700; font-size: 32px; }
+body.stale .right .dot { display: none; }
+body.stale .model .code, body.stale .model .op { color: #fff; }
+body.stale .model .nm { color: rgba(255, 255, 255, .82); }
+body.stale .model .op { border-left-color: rgba(255, 255, 255, .4); }
+
+@keyframes alertPulse {
+  0%, 100% { box-shadow: inset 0 0 0 0 rgba(255, 255, 255, 0); }
+  50% { box-shadow: inset 0 0 0 6px rgba(255, 255, 255, .55); }
+}
+
+/* ───────── 内容区 ───────── */
+.stage {
+  position: relative;
+  flex: 1 1 auto;
+  background: #0b0e13;
+  overflow: hidden;
+}
+
+.layer {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  visibility: hidden;
+}
+.layer.on { visibility: visible; }
+
+.layer img,
+.layer video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;      /* 指导书不能裁：宁可留黑边，不可切掉半张图 */
+  display: block;
+}
+.layer [hidden] { display: none !important; }
+
+/* 等待 / 空内容页：绝不允许纯黑 */
+.wait {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 22px;
+  background: radial-gradient(circle at 50% 42%, #18202c 0%, #0b0e13 72%);
+  text-align: center;
+  padding: 0 80px;
+  z-index: 5;
+}
+.wait[hidden] { display: none; }
+.wait h1 { font-size: 40px; font-weight: 700; letter-spacing: 1px; }
+.wait p { font-size: 24px; color: var(--ink2); line-height: 1.6; }
+.wait .hint { font-size: 20px; color: #7d8b9e; }
+.wait .bar {
+  width: 420px;
+  height: 8px;
+  border-radius: 999px;
+  background: #1d2634;
+  overflow: hidden;
+}
+.wait .bar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--brand);
+  transition: width .25s;
+}
+
+/* 左下角小提示条：准备中/离线这类信息放这里，**不遮挡内容**。
+   不能做成全屏遮罩——那会把工人正在看的旧指导书挡住，等于黑屏。 */
+#hint {
+  position: absolute;
+  left: 24px;
+  bottom: 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 18px;
+  border-radius: 10px;
+  background: rgba(22, 28, 37, .92);
+  border: 1px solid #2b3646;
+  font-size: 20px;
+  color: var(--ink2);
+  z-index: 6;
+  transition: opacity .2s;
+}
+#hint[hidden] { display: none; }
+#hint .spin {
+  width: 16px;
+  height: 16px;
+  border: 3px solid #33415a;
+  border-top-color: var(--brand);
+  border-radius: 50%;
+  animation: spin .9s linear infinite;
+  flex: 0 0 auto;
+}
+#hint.blue { color: #9dc4f5; border-color: #2c4a72; }
+#hint.warn { color: #ffce85; border-color: #5c4520; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ───────── 底栏 120px ───────── */
+footer {
+  flex: 0 0 120px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 32px;
+  background: var(--bar);
+  border-top: 1px solid #222b38;
+}
+
+.foot-left {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 28px;
+  color: var(--ink2);
+  font-variant-numeric: tabular-nums;
+}
+.foot-left b { color: var(--ink); font-size: 32px; font-weight: 700; }
+
+.dots {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex: 1 1 auto;
+  justify-content: center;
+  overflow: hidden;
+  padding: 0 24px;
+}
+.dots i {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #2b3646;
+  flex: 0 0 auto;
+  transition: background .18s, transform .18s;
+}
+.dots i.on { background: var(--brand); transform: scale(1.25); }
+.dots.bar { display: block; }
+.dots.bar i { display: none; }
+
+.foot-right {
+  font-size: 24px;
+  color: #6f7d90;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 离线时整屏不要变暗，画面必须保持原样可读；只在底栏给一个字 */
+footer .offmark { color: var(--off); }

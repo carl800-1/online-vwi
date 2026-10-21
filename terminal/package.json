@@ -1,0 +1,52 @@
+{
+  "name": "online-vwi-terminal",
+  "version": "1.1.0",
+  "productName": "在线VWI终端",
+  "description": "在线 VWI 发布系统 · 工作台接收端（kiosk 全屏播放）",
+  "main": "main.js",
+  "type": "commonjs",
+  "private": true,
+  "author": "Frank",
+  "license": "UNLICENSED",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "test": "node test/sync-test.cjs",
+    "preview": "node test/serve.cjs",
+    "dist": "electron-builder --win portable --x64"
+  },
+  "devDependencies": {
+    "electron": "31.7.7"
+  },
+  "build": {
+    "appId": "com.frank.online-vwi-terminal",
+    "productName": "在线VWI终端",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "renderer/**/*",
+      "assets/**/*",
+      "!test/**",
+      "!tools/**"
+    ],
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "portable": {
+      "artifactName": "online-vwi-terminal-${version}-x64.exe",
+      "requestExecutionLevel": "user",
+      "unpackDirName": "online-vwi-terminal"
+    }
+  }
+}

@@ -53,6 +53,8 @@ export function register(router) {
         name: r.name,
         dwellSec: r.dwell_sec,
         mime: r.mime,
+        // ext 必须给：终端按 <mediaId>.<ext> 存盘，扩展名错了 <video> 可能解不出来
+        ext: r.ext,
         url: `/m/${r.media_id}`
       })),
       // 空清单 = 这道工序这个型号还没有内容。终端要显式告警，不能静默播空白

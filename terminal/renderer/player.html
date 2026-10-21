@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src file: data:; media-src file:; style-src 'self' file: 'unsafe-inline'; script-src 'self' file:; connect-src 'none'">
+<title>在线VWI终端</title>
+<link rel="stylesheet" href="player.css">
+</head>
+<body>
+<div id="screen">
+
+  <header>
+    <div class="model">
+      <span class="code" id="mCode">——</span>
+      <span class="nm" id="mName"></span>
+      <span class="op" id="pCode">——</span>
+    </div>
+    <div class="right" id="right">
+      <span class="dot"></span>
+      <span id="stateText">连接中</span>
+    </div>
+  </header>
+
+  <div class="stage">
+    <!-- 双缓冲：新内容先在隐藏层加载完，再一次性切换可见性。
+         单层直接换 src 会闪一帧白，A2 就是死在这半帧上。 -->
+    <div class="layer" id="layerA">
+      <img alt="" hidden>
+      <video playsinline preload="auto" hidden></video>
+    </div>
+    <div class="layer" id="layerB">
+      <img alt="" hidden>
+      <video playsinline preload="auto" hidden></video>
+    </div>
+
+    <!-- 等待/空内容页：任何时候都不能让屏是纯黑的（现场会以为机器坏了） -->
+    <div class="wait" id="wait">
+      <h1 id="waitTitle">正在获取内容</h1>
+      <p id="waitText">正在连接服务器…</p>
+      <div class="bar"><i id="waitBar"></i></div>
+      <div class="hint" id="waitHint"></div>
+    </div>
+
+    <!-- 准备中/离线这类信息只放这一条，绝不遮住正在播的旧内容 -->
+    <div id="hint" hidden><span class="spin"></span><span id="hintText"></span></div>
+  </div>
+
+  <footer>
+    <div class="foot-left"><b id="cur">0</b><span>/</span><span id="total">0</span></div>
+    <div class="dots" id="dots"></div>
+    <div class="foot-right" id="clock"></div>
+  </footer>
+
+</div>
+<script src="player.js"></script>
+</body>
+</html>
