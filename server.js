@@ -1,76 +1,41 @@
-// 在线VWI发布项目 · 服务端入口
+// 在线 VWI 发布系统 · 服务端入口
+// 层级：型号 → 工序 → 播放清单，到此为止（没有工位）
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { openDb, seed, q } from './src/db.js';
-import { initSecret, findMedia, serveMedia, verifyUrl, signUrl, mediaStats } from './src/media.js';
-import { createRouter, sendJson } from './src/router.js';
-import { buildSnapshot, preflight } from './src/model.js';
-import { now, uid, int } from './src/util.js';
+import { findMedia, serveMedia, mediaStats } from './src/media.js';
+import { createRouter } from './src/router.js';
+import { initSwitch } from './src/switch.js';
+import { int } from './src/util.js';
 
-import { register as registerContent } from './src/api/content.js';
+import { register as registerCatalog } from './src/api/catalog.js';
+import { register as registerPlaylist } from './src/api/playlist.js';
 import { register as registerMediaApi } from './src/api/mediaApi.js';
-import { register as registerRelease } from './src/api/release.js';
+import { register as registerState } from './src/api/state.js';
 import { register as registerDisplay } from './src/api/display.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
-const DATA = path.join(ROOT, 'data');
+const DATA = process.env.VWI_DATA || path.join(ROOT, 'data');
 const PUBLIC = path.join(ROOT, 'public');
-const VERSION = '1.0.0';
+// 版本号只认 package.json 一处，避免服务端横幅和包版本各说各话
+const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
 
 // ---------- 初始化 ----------
 fs.mkdirSync(DATA, { recursive: true });
 openDb(DATA);
-initSecret(DATA);
 const seeded = seed();
+initSwitch();
 
 const router = createRouter();
-registerContent(router);
+registerCatalog(router);
+registerPlaylist(router);
 registerMediaApi(router);
-registerRelease(router);
+registerState(router);
 registerDisplay(router);
-
-router.get('/api/health', (req, res) => {
-  const ms = mediaStats();
-  const online = q.get('SELECT COUNT(*) n FROM station WHERE last_seen > ?', now() - 90 * 1000).n;
-  const stations = q.get('SELECT COUNT(*) n FROM station').n;
-  sendJson(res, 200, {
-    ok: true, version: VERSION, uptime: Math.round(process.uptime()),
-    stations, online, media: ms,
-    disk: diskFree()
-  });
-});
-
-router.get('/api/system/info', (req, res) => {
-  const lines = q.all('SELECT * FROM line').map((l) => ({
-    id: l.id, code: l.code, name: l.name,
-    activeSeq: l.active_release_id ? (q.get('SELECT seq FROM release WHERE id = ?', l.active_release_id) || {}).seq || 0 : 0
-  }));
-  sendJson(res, 200, { version: VERSION, lines, seeded: !!seeded.created });
-});
-
-// 首次启动自动发一版，让演示工位能立刻拉到内容
-if (seeded.created) {
-  for (const line of q.all('SELECT * FROM line')) {
-    const problems = preflight(line.id);
-    if (problems.length) {
-      console.log(`[bootstrap] 产线 ${line.code} 预检未通过，跳过自动发布：`, problems);
-      continue;
-    }
-    const snap = buildSnapshot(line.id);
-    const id = uid('rl');
-    snap.releaseId = id;
-    snap.seq = 1;
-    q.run(`INSERT INTO release(id,line_id,seq,title,note,manifest,digest,media_count,byte_size,created_at,created_by)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-      id, line.id, 1, `${line.name} · 初始版本`, '首次启动自动生成',
-      JSON.stringify(snap), snap.digest, Object.keys(snap.media).length, 0, now(), '');
-    q.run('UPDATE line SET active_release_id = ? WHERE id = ?', id, line.id);
-    console.log(`[bootstrap] 产线 ${line.code} 已自动发布 v1`);
-  }
-}
 
 // ---------- HTTP ----------
 const MIME = {
@@ -94,18 +59,13 @@ const server = http.createServer(async (req, res) => {
   }
   const pathname = decodeURIComponent(url.pathname);
 
-  // 媒体：签名校验 + Range
+  // 媒体文件：支持 Range，视频拖动与断点续传都靠它
   if (pathname.startsWith('/m/')) {
-    const id = pathname.slice(3);
-    const m = findMedia(id);
-    if (!m) return res.writeHead(404).end('媒体不存在');
-    if (!verifyUrl(id, url.searchParams.get('e'), url.searchParams.get('s'))) {
-      return res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' }).end('链接已过期或签名不正确');
-    }
+    const m = findMedia(pathname.slice(3));
+    if (!m) return res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('媒体不存在');
     return serveMedia(req, res, m);
   }
 
-  // API
   const handled = await router.handle(req, res, {});
   if (handled || res.headersSent) return;
 
@@ -113,7 +73,7 @@ const server = http.createServer(async (req, res) => {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     return res.writeHead(405).end('method not allowed');
   }
-  let rel = pathname === '/' ? '/index.html' : pathname;
+  const rel = pathname === '/' ? '/index.html' : pathname;
   const file = path.join(PUBLIC, rel);
   if (!file.startsWith(PUBLIC)) return res.writeHead(403).end('forbidden');
 
@@ -126,41 +86,51 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, {
       'Content-Type': MIME[ext] || 'application/octet-stream',
       'Content-Length': st.size,
-      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=300'
+      'Cache-Control': ext === '.html' ? 'no-cache' : 'no-cache'
     });
     if (req.method === 'HEAD') return res.end();
     fs.createReadStream(file).pipe(res);
   });
 });
 
-const PORT = int(process.env.VWI_PORT || process.argv.find((a) => a.startsWith('--port='))?.split('=')[1], 8091);
+const PORT = int(process.env.VWI_PORT || process.argv.find((a) => a.startsWith('--port='))?.split('=')[1], 8092);
 
 server.listen(PORT, () => {
+  const ms = mediaStats();
+  const cov = q.get('SELECT COUNT(*) n FROM item').n;
+  const lan = lanAddresses();
+
   console.log('');
-  console.log('  在线VWI发布项目 v' + VERSION);
-  console.log('  ────────────────────────────────');
-  console.log('  管理端   http://127.0.0.1:' + PORT + '/');
-  console.log('  终端画面 http://127.0.0.1:' + PORT + '/display?code=工位编码&token=令牌');
-  console.log('  数据目录 ' + DATA);
+  console.log('  在线 VWI 发布系统 v' + VERSION);
+  console.log('  ────────────────────────────────────────────');
+  console.log('  管理端    http://127.0.0.1:' + PORT + '/');
+  console.log('  终端画面  http://127.0.0.1:' + PORT + '/player.html?op=OP30');
+  console.log('  数据目录  ' + DATA);
+  console.log('  内容      ' + cov + ' 条清单项，媒体 ' + ms.count + ' 个 / ' + (ms.bytes / 1048576).toFixed(1) + 'MB');
   if (seeded.created) {
     console.log('');
-    console.log('  已生成演示数据：总装一线 L01，工位 L01-OP10 / OP30 / OP50');
-    console.log('  到「终端管理」生成令牌即可打开画面。');
+    console.log('  已生成：' + seeded.models + ' 个型号 × ' + seeded.processes + ' 道工序（内容为空，等工程部填）');
+  }
+  if (lan.length) {
+    console.log('');
+    console.log('  局域网访问（终端装机器上填这个）：');
+    for (const a of lan) console.log('    http://' + a + ':' + PORT);
   }
   console.log('');
 });
+
+// 局域网 IPv4：终端要填服务器地址，装的时候省得去 ipconfig 里翻
+function lanAddresses() {
+  const out = [];
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const ni of list || []) {
+      if (ni.family === 'IPv4' && !ni.internal) out.push(ni.address);
+    }
+  }
+  return out;
+}
 
 process.on('SIGINT', () => {
   console.log('\n正在关闭…');
   server.close(() => process.exit(0));
 });
-
-function diskFree() {
-  try {
-    if (typeof fs.statfsSync === 'function') {
-      const st = fs.statfsSync(DATA);
-      return { freeGB: +(Number(st.bavail) * Number(st.bsize) / 1e9).toFixed(1) };
-    }
-  } catch { /* 忽略 */ }
-  return null;
-}

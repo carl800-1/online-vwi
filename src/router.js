@@ -1,11 +1,12 @@
-// 极简路由：路径参数匹配 + 终端令牌校验 + 错误兜底
+// 极简路由：路径参数匹配 + 终端 op 校验 + 错误兜底
 import { q } from './db.js';
 
 /**
- * 鉴权说明（本期）：
+ * 鉴权说明（一期）：
  *   管理端接口一律不鉴权 —— 用户已明确「先不考虑权限管理」。
- *   唯一保留的是终端令牌，它不是权限，而是让终端能证明「我是哪台工位」。
- * 二期加回权限时，只需在 handle() 里 auth 分支前插入一次会话校验，
+ *   终端也不鉴权，只带一个 ?op=OP30。op 不是权限，而是「我是哪道工序」这个身份本身。
+ *   代价是内网任何人能拉到内容：可接受，但服务器绝不能暴露到办公网或外网。
+ * 二期加回权限时，只需在 handle() 里 route.opts.op 分支前插入一次会话校验，
  * 业务 handler 不需要任何改动。
  */
 
@@ -54,19 +55,31 @@ export function createRouter() {
       ctx.params = params;
       ctx.query = Object.fromEntries(url.searchParams.entries());
 
-      if (route.opts.station) {
-        ctx.station = stationAuth(req, url);
-        if (!ctx.station) {
-          sendError(res, 401, '终端未授权：工位编码或令牌不正确');
+      // 终端身份：只认 op。没带就 400，带了但库里没有也 400——
+      // 这两种都是装机时配错了，早报错比后面播不出来好查。
+      if (route.opts.op) {
+        const code = String(ctx.query.op || req.headers['x-vwi-op'] || '').trim();
+        if (!code) {
+          sendError(res, 400, '缺少 op 参数（例如 ?op=OP30）');
           return true;
         }
+        const proc = q.get('SELECT * FROM process WHERE code = ?', code);
+        if (!proc) {
+          sendError(res, 404, `工序 ${code} 不存在，请检查终端配置`);
+          return true;
+        }
+        ctx.process = proc;
       }
 
       try {
         await route.handler(req, res, ctx);
       } catch (e) {
-        console.error(`[${req.method} ${url.pathname}]`, e);
-        if (!res.headersSent) sendError(res, e.status || 500, e.message || '服务器内部错误');
+        const code = e.status || 500;
+        // 4xx 是"调用方传错了"，属于预期内的拒绝，只记一行；
+        // 5xx 才是自己的 bug，打完整堆栈。
+        if (code >= 500) console.error(`[${req.method} ${url.pathname}]`, e);
+        else console.warn(`[${req.method} ${url.pathname}] ${code} ${e.message}`);
+        if (!res.headersSent) sendError(res, code, e.message || '服务器内部错误');
         else res.end();
       }
       return true;
@@ -74,18 +87,6 @@ export function createRouter() {
   };
 
   return router;
-}
-
-// 终端鉴权：?code=XX&token=YY，令牌由管理端生成后写进终端配置
-function stationAuth(req, url) {
-  const code = url.searchParams.get('code') || req.headers['x-vwi-station'];
-  const token = url.searchParams.get('token') || req.headers['x-vwi-station-token'];
-  if (!code || !token) return null;
-  return q.get(
-    `SELECT s.* FROM station s JOIN station_token t ON t.station_id = s.id
-      WHERE s.code = ? AND t.token = ?`,
-    code, token
-  ) || null;
 }
 
 export function sendJson(res, code, obj, headers = {}) {
@@ -108,7 +109,7 @@ export async function readJsonBody(req, limit = 8 * 1024 * 1024) {
   let size = 0;
   for await (const c of req) {
     size += c.length;
-    if (size > limit) throw new Error('请求体过大');
+    if (size > limit) throw badRequest('请求体过大');
     chunks.push(c);
   }
   if (!chunks.length) return {};
@@ -117,7 +118,7 @@ export async function readJsonBody(req, limit = 8 * 1024 * 1024) {
   try {
     return JSON.parse(text);
   } catch {
-    throw new Error('请求体不是合法 JSON');
+    throw badRequest('请求体不是合法 JSON');
   }
 }
 

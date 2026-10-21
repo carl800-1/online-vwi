@@ -1,0 +1,664 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VWI 终端</title>
+<style>
+  /* 固定 1280×1024 设计稿（19 寸 5:4），整体缩放适配实际屏。
+     为什么不用响应式：工位屏只有一种尺寸，缩放能保证 1 米处看到的字就是设计的字，
+     不会因为浏览器 zoom 或 DPI 让顶栏那行型号忽大忽小。 */
+  html, body {
+    margin: 0; height: 100%;
+    background: #000; overflow: hidden;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  body.idle { cursor: none; }
+
+  #stage {
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 1280px; height: 1024px;
+    transform-origin: center center;
+    background: #0a0e14;
+    color: #e9f1fa;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ---------- 顶栏：一眼确认"我播的是不是这批货" ---------- */
+  #topbar {
+    flex: none;
+    height: 86px;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 0 34px;
+    background: linear-gradient(180deg, #111a26, #0d151f);
+    border-bottom: 3px solid #1d4ed8;
+  }
+  #model {
+    font-size: 44px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+  }
+  .sep {
+    width: 2px; height: 40px;
+    background: #26374d;
+  }
+  #proc {
+    font-size: 34px;
+    color: #a8c0d8;
+    line-height: 1;
+    white-space: nowrap;
+  }
+  #proc b { color: #e9f1fa; font-weight: 600; }
+  #topbar .spacer { flex: 1; }
+
+  .badge {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 18px;
+    border-radius: 999px;
+    font-size: 22px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .badge.show { display: inline-flex; }
+  .badge.blue { background: rgba(37, 99, 235, .18); border: 1px solid #2f6fe0; color: #9dc0ff; }
+  .badge.warn { background: rgba(217, 119, 6, .18); border: 1px solid #b66509; color: #ffcf80; }
+  .badge.gray { background: rgba(120, 132, 150, .16); border: 1px solid #44536a; color: #a9b6c8; }
+  .badge.red {
+    background: #c0392b; border: 1px solid #ff6a58; color: #fff;
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255, 90, 70, .55); }
+    50% { box-shadow: 0 0 0 10px rgba(255, 90, 70, 0); }
+  }
+
+  /* ---------- 内容区 ---------- */
+  #content {
+    flex: 1;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #05080c;
+    min-height: 0;
+  }
+  #img {
+    display: none;
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+  }
+  #video {
+    display: none;
+    max-width: 100%;
+    max-height: 100%;
+    background: #000;
+  }
+
+  /* 左下角小提示条：不遮挡画面。
+     准备阶段可能持续几分钟，这期间必须继续播旧内容（A2 不黑屏 / 需求 5.2），
+     所以进度只能挂在角上，不能用全屏遮罩。 */
+  #hint {
+    position: absolute;
+    left: 24px;
+    bottom: 20px;
+    max-width: 780px;
+    padding: 10px 18px;
+    border-radius: 999px;
+    background: rgba(13, 21, 31, .92);
+    border: 1px solid #24374f;
+    color: #9dc0ff;
+    font-size: 21px;
+    display: none;
+    align-items: center;
+    gap: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  #hint.show { display: flex; }
+  #hint.red { border-color: #c0392b; color: #ffb3a8; background: rgba(60, 12, 8, .94); }
+  #hint.warn { border-color: #b66509; color: #ffcf80; background: rgba(48, 30, 4, .94); }
+  #hint .mini-spin {
+    width: 18px; height: 18px;
+    border: 3px solid #24374f;
+    border-top-color: #2f6fe0;
+    border-radius: 50%;
+    animation: rot 1s linear infinite;
+    flex: none;
+  }
+
+  .notice {
+    position: absolute;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    text-align: center;
+    padding: 40px;
+    font-size: 30px;
+    color: #8fa3ba;
+    background: rgba(6, 10, 15, .82);
+  }
+  .notice.show { display: flex; }
+  .notice small { font-size: 20px; color: #64758c; line-height: 1.6; }
+  .notice.blue { color: #9dc0ff; }
+  .notice.red { color: #ffb3a8; }
+  .notice b { color: #e9f1fa; font-size: 38px; }
+  .spin {
+    width: 44px; height: 44px;
+    border: 4px solid #1e2c3d;
+    border-top-color: #2f6fe0;
+    border-radius: 50%;
+    animation: rot 1s linear infinite;
+  }
+  @keyframes rot { to { transform: rotate(360deg); } }
+
+  /* ---------- 底栏计数 ---------- */
+  #footer {
+    flex: none;
+    height: 56px;
+    display: flex;
+    align-items: center;
+    padding: 0 34px;
+    gap: 16px;
+    background: #0d151f;
+    border-top: 1px solid #16202e;
+    font-size: 20px;
+    color: #64758c;
+  }
+  #footer .spacer { flex: 1; }
+  #counter { font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <header id="topbar">
+    <div id="model">—</div>
+    <div class="sep"></div>
+    <div id="proc">—</div>
+    <div class="spacer"></div>
+    <div id="badge" class="badge"></div>
+  </header>
+
+  <main id="content">
+    <img id="img" alt="">
+    <video id="video" playsinline></video>
+    <div id="hint"></div>
+    <div id="notice" class="notice"></div>
+  </main>
+
+  <footer id="footer">
+    <span id="opTag"></span>
+    <div class="spacer"></div>
+    <span id="counter"></span>
+  </footer>
+</div>
+
+<script>
+// ============ 终端播放器 ============
+// 身份只有一个：?op=OP30（这道工序）。没有工位、没有登录。
+//
+// 与 exe 接收端的对应关系：
+//   exe：磁盘双目录 + 同步 rename 翻页 + 删旧目录
+//   这里：内存 Blob + 同步换队列 + revokeObjectURL
+// 两者遵循同一套协议（prepare / ready / activate），所以这个页面能当验收集的参考实现对拍。
+
+const OP = (new URLSearchParams(location.search).get('op') || 'OP10').trim();
+const $ = (id) => document.getElementById(id);
+
+const S = {
+  op: OP,
+  procName: '',
+  modelId: '',
+  modelCode: '',
+  queue: [],
+  idx: 0,
+  timer: null,
+  rev: 0,
+  seq: 0,
+  prepared: null,
+  preparing: false,
+  stale: false,
+  online: false,
+  phase: 'idle',
+  pendingModelId: '',
+  pendingModelCode: '',
+  empty: true,
+  emptyRetryAt: 0,
+  contentSig: '',
+  booted: false
+};
+
+// ---------- 基础 ----------
+async function api(path, opt, timeoutMs = 30000) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const r = await fetch(path, { ...(opt || {}), signal: ctl.signal });
+    const text = await r.text();
+    let d = null;
+    try { d = text ? JSON.parse(text) : null; } catch { d = { error: text }; }
+    if (!r.ok) {
+      const e = new Error((d && d.error) || ('HTTP ' + r.status));
+      e.status = r.status;
+      e.body = d;
+      throw e;
+    }
+    return d;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function fit() {
+  const k = Math.min(window.innerWidth / 1280, window.innerHeight / 1024);
+  $('stage').style.transform = `translate(-50%, -50%) scale(${k})`;
+}
+window.addEventListener('resize', fit);
+
+// 双击全屏：现场调试时好用；正式部署由 exe / kiosk 参数直接全屏
+document.addEventListener('dblclick', () => {
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {});
+  else document.exitFullscreen?.();
+});
+
+// 空闲隐藏鼠标
+let idleTimer = null;
+function poke() {
+  document.body.classList.remove('idle');
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => document.body.classList.add('idle'), 3000);
+}
+['mousemove', 'mousedown', 'touchstart'].forEach((ev) => window.addEventListener(ev, poke));
+
+// ---------- 界面 ----------
+function setBadge(kind, text) {
+  const b = $('badge');
+  if (!kind) { b.className = 'badge'; b.textContent = ''; return; }
+  b.className = 'badge show ' + kind;
+  b.textContent = text;
+}
+
+function showNotice(html, kind) {
+  const n = $('notice');
+  n.className = 'notice show' + (kind ? ' ' + kind : '');
+  n.innerHTML = html;
+}
+function hideNotice() {
+  $('notice').className = 'notice';
+  $('notice').innerHTML = '';
+}
+
+function setHint(kind, text) {
+  const h = $('hint');
+  if (!kind) { h.className = ''; h.textContent = ''; return; }
+  h.className = 'show ' + kind;
+  h.innerHTML = (kind === 'blue' ? '<span class="mini-spin"></span>' : '') + escapeHtml(text);
+}
+function clearHint() { setHint(null, ''); }
+
+function updateCounter() {
+  const n = S.queue.length;
+  $('counter').textContent = n ? `第 ${S.idx + 1} 张 / 共 ${n} 项` : '';
+  $('opTag').textContent = OP;
+}
+
+function renderChrome() {
+  $('model').textContent = S.modelCode || '—';
+  $('proc').innerHTML = S.procName ? `<b>${escapeHtml(OP)}</b>　${escapeHtml(S.procName)}` : escapeHtml(OP);
+  updateCounter();
+
+  if (S.stale) {
+    setBadge('red', '内容未就绪 · 请勿作业');
+    return;
+  }
+  if (S.preparing) return;                    // 准备中的徽标由下载进度自己写
+  if (!S.online) {
+    setBadge('gray', '离线播放');
+    return;
+  }
+  if (S.phase === 'prepare' && S.pendingModelCode && S.pendingModelId !== S.modelId) {
+    setBadge('blue', `待切换 ${S.pendingModelCode}`);
+    return;
+  }
+  if (S.empty) {
+    setBadge('warn', '内容不全 0 项');
+    return;
+  }
+  setBadge(null);
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ---------- 播放 ----------
+function stopPlay() {
+  clearTimeout(S.timer);
+  S.timer = null;
+  const v = $('video');
+  try { v.pause(); } catch (e) { /* 未加载时 pause 会抛，忽略 */ }
+  // 必须先断开 src 才能释放解码器对 Blob 的占用，否则下面 revoke 之后
+  // 元素还攥着句柄，内存不会真正回收（Windows 上对应"删不掉旧目录"）
+  v.removeAttribute('src');
+  try { v.load(); } catch (e) { /* ignore */ }
+  $('img').removeAttribute('src');
+}
+
+function playCurrent() {
+  clearTimeout(S.timer);
+  S.timer = null;
+  const img = $('img');
+  const vid = $('video');
+
+  if (!S.queue.length) {
+    img.style.display = 'none';
+    vid.style.display = 'none';
+    showNotice(
+      '<b>本工序还没有内容</b><small>工程部在服务器上给「当前型号 × ' +
+      escapeHtml(OP) + '」配置播放清单后，这里会自动出现。</small>'
+    );
+    S.empty = true;
+    renderChrome();
+    return;
+  }
+
+  S.empty = false;
+  hideNotice();
+  const it = S.queue[S.idx];
+
+  if (it.kind === 'image') {
+    vid.style.display = 'none';
+    if (vid.src) { try { vid.pause(); } catch (e) {} vid.removeAttribute('src'); vid.load(); }
+    img.style.display = 'block';
+    img.src = it.url;
+    const sec = Math.max(1, Number(it.dwellSec) || 10);
+    S.timer = setTimeout(next, sec * 1000);
+  } else {
+    img.style.display = 'none';
+    img.removeAttribute('src');
+    vid.style.display = 'block';
+    vid.src = it.url;
+    vid.onended = next;
+    // 单条视频坏了不能卡死整个循环——跳过，下一项
+    vid.onerror = () => { S.timer = setTimeout(next, 800); };
+    const p = vid.play();
+    if (p && p.catch) p.catch(() => { S.timer = setTimeout(next, 3000); });
+  }
+  updateCounter();
+  renderChrome();
+}
+
+function next() {
+  if (!S.queue.length) return;
+  S.idx = (S.idx + 1) % S.queue.length;
+  playCurrent();
+}
+
+// 翻页：整段同步，中间不许有 await —— 否则会出现"队列已换、画面还是旧的"的半新半旧
+function flip(queue, modelCode, modelId, sig) {
+  S.stale = false;
+  const old = S.queue;
+
+  stopPlay();
+  clearHint();
+  S.queue = queue;
+  S.idx = 0;
+  S.modelCode = modelCode || '';
+  S.modelId = modelId || '';
+  S.contentSig = sig || '';
+  S.empty = queue.length === 0;
+
+  playCurrent();                       // 同步开始渲染第一项
+  purge(old);                          // 旧内容立即释放（对应 exe 删旧目录）
+  console.log(`[switch] flipped -> ${modelCode} ${queue.length} 项`);
+}
+
+// 浏览器里的"删旧文件"：断开引用后立刻释放 Blob。
+// 放到 setTimeout(0) 是为了不阻塞翻页那一帧——同步释放几十兆会让画面卡一下（A2）。
+function purge(oldQueue) {
+  if (!oldQueue || !oldQueue.length) return;
+  setTimeout(() => {
+    let n = 0;
+    for (const it of oldQueue) {
+      if (it.url && it.url.startsWith('blob:')) { URL.revokeObjectURL(it.url); n++; }
+    }
+    if (n) console.log('[switch] 已释放旧内容 ' + n + ' 项');
+  }, 0);
+}
+
+// ---------- 下载 ----------
+async function fetchBlob(url, retry = 2) {
+  let lastErr;
+  for (let i = 0; i <= retry; i++) {
+    try {
+      const r = await fetch(url, { cache: 'force-cache' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return await r.blob();
+    } catch (e) {
+      lastErr = e;
+      if (i < retry) await new Promise((r) => setTimeout(r, 600 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+// 清单指纹：用来判断"我这套内容是不是变了"，不用比对文件字节
+function sigOf(items) {
+  return (items || []).map((i) => i.mediaId + ':' + (i.dwellSec || 0)).join('|');
+}
+
+// 下载一整套（型号 × 本工序）到内存。进度写顶栏，画面继续播旧内容。
+async function buildQueue(modelId, onProgress) {
+  const d = await api(
+    `/display/playlist?op=${encodeURIComponent(OP)}&model=${encodeURIComponent(modelId)}`
+  );
+  const items = d.items || [];
+  const out = [];
+  try {
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (onProgress) onProgress(i, items.length, it.name);
+      const blob = await fetchBlob(it.url);
+      out.push({
+        kind: it.kind,
+        url: URL.createObjectURL(blob),
+        dwellSec: it.dwellSec,
+        name: it.name,
+        bytes: it.bytes
+      });
+      if (onProgress) onProgress(i + 1, items.length, it.name);
+    }
+  } catch (e) {
+    for (const it of out) URL.revokeObjectURL(it.url);   // 半截的下场：全丢，不留残渣
+    throw e;
+  }
+  return { queue: out, info: d, sig: sigOf(items) };
+}
+
+// 清单被工程部改过（同一个型号）：重下一遍再翻。
+// 目的很具体——发现指导书写错了，改完立刻生效，不用等下次换型。
+async function syncContent() {
+  if (S.preparing || !S.modelId) return;
+  let d;
+  try {
+    d = await api(`/display/playlist?op=${encodeURIComponent(OP)}&model=${encodeURIComponent(S.modelId)}`);
+  } catch (e) { return; }
+  if (sigOf(d.items) === S.contentSig) return;
+
+  S.preparing = true;
+  try {
+    setHint('blue', '内容更新中 …');
+    const r = await buildQueue(S.modelId, (done, total) => setHint('blue', `内容更新中 ${done}/${total}`));
+    flip(r.queue, S.modelCode, S.modelId, r.sig);
+  } catch (e) {
+    setHint('red', `内容更新失败：${e.message}`);
+  } finally {
+    S.preparing = false;
+  }
+}
+
+async function prepare(modelId, modelCode) {
+  if (S.preparing) return null;
+  S.preparing = true;
+  if (S.prepared) { purge(S.prepared.queue); S.prepared = null; }
+
+  setBadge('blue', `准备中 ${modelCode} …`);
+  setHint('blue', `正在准备 ${modelCode}　0/…`);
+
+  try {
+    const r = await buildQueue(modelId, (done, total, name) => {
+      setBadge('blue', `准备中 ${modelCode} ${done}/${total}`);
+      setHint('blue', `正在准备 ${modelCode}　${done}/${total}　${name || ''}`);
+    });
+
+    S.prepared = { modelId, modelCode, queue: r.queue, sig: r.sig };
+
+    // 备齐了才举手：这是"先备齐后翻"的关键一步
+    try {
+      await api('/api/ready', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ op: OP, modelId })
+      }, 8000);
+    } catch (e) {
+      // 409 = 目标已变更，留着这轮的工作等下一次轮询重来
+      console.warn('[ready]', e.message);
+    }
+
+    clearHint();
+    S.preparing = false;
+    renderChrome();
+    return S.prepared;
+  } catch (e) {
+    S.preparing = false;
+    setBadge('red', '内容下载失败');
+    // 不盖住画面：旧内容继续播，只在角上告警
+    setHint('red', `无法下载 ${modelCode} 的内容：${e.message}（网络恢复后自动重试）`);
+    return null;
+  }
+}
+
+// ---------- 状态协商 ----------
+async function poll() {
+  let delay = 150;
+  try {
+    const st = await api(
+      `/api/state?op=${encodeURIComponent(OP)}&since=${S.rev}`,
+      null,
+      32000
+    );
+    const revChanged = st.rev !== S.rev;
+    S.rev = st.rev;
+    S.online = true;
+    S.phase = st.phase;
+    S.pendingModelId = st.pendingModelId || '';
+    S.pendingModelCode = st.pendingModelCode || '';
+    S.seq = st.seq;
+
+    // ① 有准备任务：下载 + 校验 + 举手（画面不动）
+    if (S.phase === 'prepare' && S.pendingModelId && S.pendingModelId !== S.modelId) {
+      if (!S.prepared || S.prepared.modelId !== S.pendingModelId) {
+        await prepare(S.pendingModelId, S.pendingModelCode);
+      }
+    }
+
+    // ② 服务器已激活：整屏翻
+    if (st.currentModelId && st.currentModelId !== S.modelId) {
+      if (S.prepared && S.prepared.modelId === st.currentModelId) {
+        const p = S.prepared;
+        S.prepared = null;
+        flip(p.queue, p.modelCode, p.modelId, p.sig);
+      } else if (!S.preparing) {
+        // 超时强切：服务器不等了，只能现场备，备完立刻翻
+        const p = await prepare(st.currentModelId, st.modelCode || '');
+        if (p) { S.prepared = null; flip(p.queue, p.modelCode, p.modelId, p.sig); }
+        else {
+          // 备不下来 → 红字警告，画面仍是旧型号。宁可让人看见，不能混批。
+          S.stale = true;
+          setHint('red', '内容未就绪 · 请勿作业　本工序未能下载新型号内容');
+        }
+      }
+    }
+
+    if (st.currentModelId === S.modelId) S.stale = false;
+
+    // ③ 当前型号内容为空（工程部还没做）→ 橙色告警；
+    //    并且每 10 秒自动重试一次：工程部在服务器上配好内容后，屏上应当自动出现，
+    //    不该让班长为了"刷新一下"再切一次型号。节流是怕空清单时把服务器问爆。
+    if (st.currentModelId && st.currentModelId === S.modelId && S.empty && !S.preparing) {
+      if (Date.now() - S.emptyRetryAt > 10000) {
+        S.emptyRetryAt = Date.now();
+        try {
+          const r = await buildQueue(S.modelId);
+          if (r.queue.length) flip(r.queue, S.modelCode, S.modelId, r.sig);
+          else playCurrent();
+        } catch (e) { playCurrent(); }
+      }
+    }
+
+    // ④ 清单被改过（同一个型号）：rev 变了就核对指纹，变了就重下重翻
+    if (revChanged && st.phase === 'idle' && st.currentModelId === S.modelId && !S.empty && !S.preparing) {
+      await syncContent();
+    }
+
+    renderChrome();
+  } catch (e) {
+    S.online = false;
+    delay = 2000;
+    renderChrome();
+  }
+  setTimeout(poll, delay);
+}
+
+// ---------- 启动 ----------
+(async function boot() {
+  fit();
+  poke();
+
+  try {
+    const b = await api(`/display/boot?op=${encodeURIComponent(OP)}`, null, 8000);
+    S.procName = b.processName || '';
+    S.rev = b.rev || 0;
+    S.seq = b.seq || 0;
+    S.online = true;
+    S.phase = b.phase || 'idle';
+
+    if (!b.modelCode) {
+      showNotice(
+        '<b>等待服务端指定型号</b><small>服务器上还没有点「切换」。' +
+        '班长换型后，这里会自动开始播放。</small>'
+      );
+      renderChrome();
+    } else {
+      showNotice('<div class="spin"></div><b>正在下载本工序内容…</b><small>首次开机需要一点时间</small>', 'blue');
+      const r = await buildQueue(b.modelId || b.modelCode, (done, total) => {
+        showNotice(`<div class="spin"></div><b>正在下载 ${escapeHtml(b.modelCode)}</b><small>${done} / ${total}</small>`, 'blue');
+      });
+      flip(r.queue, b.modelCode, b.modelId || '', r.sig);
+    }
+  } catch (e) {
+    showNotice(
+      `<b>无法连接服务器</b><small>${escapeHtml(e.message)}<br>` +
+      `请检查这台机器是否接入了车间无线网络。</small>`,
+      'red'
+    );
+  }
+
+  poll();
+})();
+</script>
+</body>
+</html>

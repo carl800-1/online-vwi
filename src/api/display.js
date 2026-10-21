@@ -1,111 +1,89 @@
-// 终端接口：拉清单、心跳。终端只读，不改任何内容。
+// 终端接口：只靠 op 认身份，不鉴权（内网 + 一期不做权限）
 import { q } from '../db.js';
-import { now, str, int, parseJson } from '../util.js';
-import { sendJson, readJsonBody } from '../router.js';
-import { sliceForStation } from '../model.js';
-import { signUrl } from '../media.js';
+import { sendJson, badRequest } from '../router.js';
+import { touch, getState } from '../switch.js';
 
-export function register(r) {
-  const auth = { station: true };
-
+export function register(router) {
   /**
-   * 拉清单。终端带上本地 seq 与 digest：
-   *   一致 -> 只回 { unchanged: true }，几十字节
-   *   不一致 -> 回完整清单，媒体带签名地址
-   * 这条路径是终端内容的唯一真相来源，SSE 只是加速。
+   * 拉清单：GET /display/playlist?op=OP30&model=X300
+   * model 可给 code 也可给 id；不给就用服务端当前型号。
+   * 终端用这个接口既做"切换下载"，也做"首次装机补内容"——同一套代码，两条路径。
    */
-  r.get('/display/manifest', (req, res, ctx) => {
-    const s = ctx.station;
-    const rel = resolveRelease(s);
+  router.get('/display/playlist', (req, res, ctx) => {
+    const process = ctx.process;
+    touch(process.code);
 
-    if (!rel) {
-      return sendJson(res, 200, {
-        empty: true,
-        reason: '该产线尚未发布任何版本，请联系工艺员在管理端点击发布',
-        station: { code: s.code, name: s.name }
-      });
+    const want = String(ctx.query.model || '').trim();
+    let model;
+    if (want) {
+      model = q.get('SELECT * FROM model WHERE code = ? OR id = ?', want, want);
+      if (!model) throw badRequest(`型号 ${want} 不存在`);
+    } else {
+      const cur = getState().currentModelId;
+      model = cur ? q.get('SELECT * FROM model WHERE id = ?', cur) : null;
+      if (!model) {
+        return sendJson(res, 200, {
+          modelCode: '', modelId: '', processCode: process.code, processName: process.name,
+          items: [], empty: true, count: 0, totalBytes: 0, message: '服务端还没有指定当前型号'
+        });
+      }
     }
 
-    const seq = int(ctx.query.seq, -1);
-    const digest = String(ctx.query.digest || '');
-    if (seq === rel.seq && digest === rel.digest) {
-      return sendJson(res, 200, { unchanged: true, seq: rel.seq, digest: rel.digest });
-    }
-
-    const snap = parseJson(rel.manifest, null);
-    if (!snap) return sendJson(res, 500, { error: '发布单数据损坏' });
-
-    const sliced = sliceForStation({ ...snap, releaseId: rel.id, seq: rel.seq }, s, signUrl);
-    if (!sliced) {
-      return sendJson(res, 200, {
-        empty: true,
-        reason: '本工位不在当前发布快照中（可能是发布后新增的工位），请重新发布一次',
-        station: { code: s.code, name: s.name }
-      });
-    }
-
-    logEvent('sync', s.id, `工位拉取版本 v${rel.seq}`);
-    sendJson(res, 200, { ...sliced, serverTime: now() });
-  }, auth);
-
-  // 心跳：顺带把终端当前版本、屏幕、磁盘余量报上来
-  r.post('/display/heartbeat', async (req, res, ctx) => {
-    const s = ctx.station;
-    const body = await readJsonBody(req).catch(() => ({}));
-    const ip = clientIp(req);
-    const prev = s.last_seq || 0;
-    const cur = int(body.seq, prev);
-
-    q.run(`UPDATE station SET last_seen = ?, last_ip = ?, last_seq = ?, app_version = ? WHERE id = ?`,
-      now(), ip, cur, str(body.appVersion, 40), s.id);
-
-    if (prev !== cur) {
-      logEvent('version', s.id, `工位版本 v${prev} -> v${cur}`);
-    }
-
-    // 顺带取走待执行指令（P1 用，本期返回空数组占位）
-    const cmds = q.all(
-      'SELECT id,type,payload FROM command WHERE station_id = ? AND picked_at = 0 ORDER BY id LIMIT 10', s.id);
-    if (cmds.length) q.run(`UPDATE command SET picked_at = ? WHERE station_id = ? AND picked_at = 0`, now(), s.id);
+    const rows = q.all(
+      `SELECT i.ord, i.kind, i.dwell_sec, i.media_id,
+              m.sha256, m.ext, m.mime, m.bytes, m.name
+         FROM item i JOIN media m ON m.id = i.media_id
+        WHERE i.model_id = ? AND i.process_id = ?
+        ORDER BY i.ord`,
+      model.id, process.id
+    );
 
     sendJson(res, 200, {
-      ok: true,
-      serverTime: now(),
-      commands: cmds.map((c) => ({ id: c.id, type: c.type, payload: parseJson(c.payload, {}) })),
-      hasNewRelease: !!resolveRelease(s) && resolveRelease(s).seq > cur
+      modelCode: model.code,
+      modelId: model.id,
+      modelName: model.name,
+      processCode: process.code,
+      processName: process.name,
+      items: rows.map((r) => ({
+        mediaId: r.media_id,
+        kind: r.kind,
+        // 终端拿 sha256 校验用；下载地址稳定，可断点续传
+        sha256: r.sha256,
+        bytes: r.bytes,
+        name: r.name,
+        dwellSec: r.dwell_sec,
+        mime: r.mime,
+        url: `/m/${r.media_id}`
+      })),
+      // 空清单 = 这道工序这个型号还没有内容。终端要显式告警，不能静默播空白
+      empty: rows.length === 0,
+      count: rows.length,
+      // 终端算下载进度用（准备中 3/11）
+      totalBytes: rows.reduce((s, r) => s + r.bytes, 0)
     });
-  }, auth);
-}
+  }, { op: true });
 
-/** 取该工位当前应使用的发布单：灰度覆盖 > 产线当前版本；被吊销则回退到上一个可用版本 */
-function resolveRelease(station) {
-  let releaseId = station.override_release_id || '';
-  if (!releaseId) {
-    const l = q.get('SELECT active_release_id FROM line WHERE id = ?', station.line_id);
-    releaseId = l ? l.active_release_id || '' : '';
-  }
-  if (!releaseId) return null;
-
-  let rel = q.get('SELECT * FROM release WHERE id = ?', releaseId);
-  if (rel && !rel.revoked_at) return rel;
-
-  // 覆盖版本被吊销：退回产线当前版本
-  const l = q.get('SELECT active_release_id FROM line WHERE id = ?', station.line_id);
-  if (l && l.active_release_id && l.active_release_id !== releaseId) {
-    const fallback = q.get('SELECT * FROM release WHERE id = ?', l.active_release_id);
-    if (fallback && !fallback.revoked_at) return fallback;
-  }
-  return null;
-}
-
-function clientIp(req) {
-  const raw = (req.socket && req.socket.remoteAddress) || '';
-  return raw.replace(/^::ffff:/, '');
-}
-
-function logEvent(kind, stationId, msg, data) {
-  try {
-    q.run('INSERT INTO event_log(at,kind,station_id,msg,data) VALUES(?,?,?,?,?)',
-      now(), kind, stationId, msg, data ? JSON.stringify(data) : '');
-  } catch { /* 日志失败不影响主流程 */ }
+  // 终端启动自检：确认 op 有效、拿到当前型号，避免一开机就黑屏摸索
+  router.get('/display/boot', (req, res, ctx) => {
+    const process = ctx.process;
+    touch(process.code);
+    const st = getState();
+    const cur = st.currentModelId ? q.get('SELECT code, name FROM model WHERE id = ?', st.currentModelId) : null;
+    const have = q.get(
+      'SELECT COUNT(*) n FROM item WHERE model_id = ? AND process_id = ?',
+      st.currentModelId || '', process.id
+    ).n;
+    sendJson(res, 200, {
+      processCode: process.code,
+      processName: process.name,
+      modelId: st.currentModelId || '',
+      modelCode: cur?.code || '',
+      modelName: cur?.name || '',
+      seq: st.seq,
+      rev: st.rev,
+      phase: st.phase,
+      itemCount: have,
+      online: st.online
+    });
+  }, { op: true });
 }

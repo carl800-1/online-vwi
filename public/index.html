@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>在线 VWI 发布 · 管理端</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <strong>在线 VWI 发布</strong>
+    <span>型号 → 工序 → 播放清单</span>
+  </div>
+
+  <div class="switcher">
+    <label for="switchSel">换型到</label>
+    <select id="switchSel"></select>
+    <button class="btn on-dark sm" id="switchBtn">切换</button>
+  </div>
+
+  <div class="spacer"></div>
+
+  <div class="stat">
+    <span class="dot" id="dot"></span>
+    <span>在线 <b id="onlineTxt">0</b></span>
+  </div>
+  <div class="stat">当前 <b id="curTxt">未指定</b></div>
+</header>
+
+<div class="wrap">
+  <div class="phasebar" id="phasebar">
+    <span id="phaseText">正在切换…</span>
+    <div class="chips" id="phaseChips"></div>
+    <div class="grow"></div>
+    <button class="btn sm danger" id="cancelSwitchBtn">放弃本次切换</button>
+  </div>
+
+  <div class="tabs">
+    <button data-tab="matrix" class="on">内容矩阵</button>
+    <button data-tab="media">媒体库</button>
+  </div>
+
+  <!-- ========== 内容矩阵 ========== -->
+  <section id="view-matrix">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>型号 × 工序</h2>
+        <span class="sub" id="covTxt">—</span>
+        <div class="bar"><i id="covBar"></i></div>
+        <div class="spacer"></div>
+        <button class="btn sm" id="addModelBtn">+ 新型号</button>
+        <button class="btn sm" id="refreshBtn">刷新</button>
+      </div>
+      <div style="overflow:auto">
+        <table class="matrix" id="matrix">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+    <p class="sub" style="color:#8b96a8;font-size:12px;margin:12px 4px 0">
+      一个格子 = 一个型号在某道工序下的播放清单。点格子进编辑；表头工序名可直接点开改。
+    </p>
+  </section>
+
+  <!-- ========== 媒体库 ========== -->
+  <section id="view-media" class="hide">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>媒体库</h2>
+        <span class="sub" id="mediaTxt">—</span>
+        <div class="spacer"></div>
+        <button class="btn sm" id="uploadBtn">上传文件</button>
+        <button class="btn sm" id="adviceBtn">规格体检</button>
+        <button class="btn sm danger" id="gcBtn">清理未引用</button>
+      </div>
+      <div class="toolbar">
+        <input type="search" id="mediaSearch" placeholder="按文件名搜索">
+        <select id="mediaKind" class="btn sm" style="padding:6px 10px">
+          <option value="">全部类型</option>
+          <option value="image">只看图片</option>
+          <option value="video">只看视频</option>
+        </select>
+      </div>
+      <div class="mediagrid" id="mediagrid"></div>
+    </div>
+  </section>
+</div>
+
+<!-- ========== 清单编辑抽屉 ========== -->
+<div class="overlay" id="overlay"></div>
+<aside class="drawer" id="drawer">
+  <div class="drawer-head">
+    <div>
+      <h3 id="drawerTitle">—</h3>
+      <div class="sub" id="drawerSub"></div>
+    </div>
+    <div class="spacer"></div>
+    <button class="iconbtn" id="drawerClose" title="关闭">✕</button>
+  </div>
+
+  <div class="drawer-body">
+    <div class="drop" id="drop">
+      <div><b>把图片或视频拖到这里</b>　或　<button class="btn sm" id="pickBtn">选择文件</button></div>
+      <div class="hint">图片按 19 寸屏做 1280×1024（5:4）；视频建议 720p、单段 60 秒内</div>
+    </div>
+    <input type="file" id="fileInput" multiple accept="image/*,video/*" style="display:none">
+
+    <div style="display:flex;align-items:center;gap:8px;margin-top:14px">
+      <strong style="font-size:13px">播放顺序</strong>
+      <span class="hint" style="font-size:12px;color:#8b96a8" id="playHint"></span>
+      <div style="flex:1"></div>
+      <button class="btn sm" id="pickFromLib">从媒体库选取</button>
+    </div>
+
+    <div class="panel hide" id="libPicker" style="margin-top:10px">
+      <div class="toolbar" style="border-bottom:1px solid #eef1f6">
+        <input type="search" id="objSearch" placeholder="搜索媒体库">
+        <div style="flex:1"></div>
+        <button class="btn sm" id="objCancel">取消</button>
+        <button class="btn sm primary" id="objAdd">加入清单</button>
+      </div>
+      <div id="objList" style="max-height:260px;overflow:auto;padding:8px 12px"></div>
+    </div>
+
+    <div class="items" id="items"></div>
+  </div>
+
+  <div class="drawer-foot">
+    <span class="dirty-tag" id="dirtyTag">有改动未保存</span>
+    <div class="spacer"></div>
+    <button class="btn" id="drawerCancel">关闭</button>
+    <button class="btn primary" id="saveBtn">保存清单</button>
+  </div>
+</aside>
+
+<div id="toasts"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
