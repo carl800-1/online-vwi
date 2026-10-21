@@ -7,6 +7,7 @@
 *.css  text eol=lf
 *.html text eol=lf
 *.bat  text eol=crlf
+*.py   text eol=lf
 
 # 二进制
 *.png  binary

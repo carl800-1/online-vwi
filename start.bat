@@ -1,17 +1,46 @@
 @echo off
-chcp 65001 >nul
-title åœ¨çº¿ VWI å‘å¸ƒç³»ç»Ÿ
+chcp 936 >nul
+title VWI-SERVER-8092
 cd /d "%~dp0"
 
 where node >nul 2>nul
 if errorlevel 1 (
   echo.
-  echo   æ²¡æœ‰æ‰¾åˆ° Node.jsã€‚è¯·å…ˆå®‰è£… Node.js 22.5 æˆ–æ›´é«˜ç‰ˆæœ¬ã€‚
-  echo   ä¸‹è½½ï¼šhttps://nodejs.org/
+  echo   Ã»ÓÐÕÒµ½ Node.js¡£ÇëÏÈ°²×° Node.js 22.5 »ò¸ü¸ß°æ±¾¡£
+  echo   ÏÂÔØ£ºhttps://nodejs.org/
+  echo.
+  echo   ²»Ïë×° Node µÄ»°£¬Ö±½ÓÓÃ release Ä¿Â¼ÀïµÄÂÌÉ«Ãâ°²×°°ü£º
+  echo     release\online-vwi-server-1.4.0-win-x64.zip
   echo.
   pause
   exit /b 1
 )
 
-node server.js %*
+netstat -ano | findstr ":8092" | findstr "LISTENING" >nul 2>&1
+if not errorlevel 1 (
+  echo.
+  echo   ¶Ë¿Ú 8092 ÒÑ±»Õ¼ÓÃ£¬·þÎñ¿ÉÄÜÒÑ¾­ÔÚÔËÐÐ£¨ÖØ¸´Æô¶¯»á¿ªÁ½¸ö·þÎñ£©¡£
+  echo.
+  pause
+  exit /b 0
+)
+
+echo.
+echo   ============================================================
+echo     ÔÚÏß VWI ·¢²¼ÏµÍ³ ¡¤ ·þÎñ¶Ë£¨Ô´ÂëÔËÐÐ£©
+echo   ============================================================
+echo     Æô¶¯Íê³Éºó£¬ÏÂ·½»áÁÐ³ö¡¸¾ÖÓòÍø·ÃÎÊ¡¹µØÖ·£¬
+echo       °ÑËüÌîµ½ 5 Ì¨ÖÕ¶ËµÄ×°»úÏòµ¼Àï¡£
+echo.
+echo   ------------------------------------------------------------
+echo.
+
+chcp 65001 >nul
+node --no-warnings server.js %*
+chcp 936 >nul
+
+echo.
+echo   ------------------------------------------------------------
+echo   ·þÎñÒÑÍ£Ö¹¡£ÈôÉÏ·½ÓÐºì×Ö±¨´í£¬Çë½ØÍ¼¸øÎ¬»¤ÈËÔ±¡£
+echo.
 pause

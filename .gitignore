@@ -7,6 +7,10 @@ dist/
 build/
 *.log
 
+# 服务端绿色免安装包：构建产物（内含 84MB 的 node.exe），用
+# tools/build-server-package.py 重新生成，不入库
+release/
+
 # 编辑器 / 系统
 .idea/
 .vscode/
