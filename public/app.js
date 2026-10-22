@@ -58,6 +58,20 @@ function fmtBytes(n) {
   return (n / 1073741824).toFixed(2) + ' GB';
 }
 
+/**
+ * 型号的显示名。
+ * 种子数据把 name 写成「X200 型」，直接拼 code 就成了「X200 X200 型」，
+ * 下拉框和抽屉标题里都是这副德性 —— 现场看着像系统出错了。
+ * 所以：name 里已经含 code 就只显示 name，否则拼起来。
+ */
+function modelLabel(m) {
+  const code = (m.code || '').trim();
+  const name = (m.name || '').trim();
+  if (!name) return code;
+  if (!code) return name;
+  return name.toLowerCase().includes(code.toLowerCase()) ? name : code + ' ' + name;
+}
+
 function mmss(ms) {
   if (ms <= 0) return '0:00';
   const s = Math.ceil(ms / 1000);
@@ -150,7 +164,8 @@ function renderMatrix() {
     return `<tr class="${m.id === S.currentId ? 'row-cur' : ''}">
       <td class="model">
         <span class="code">${H(m.code)}</span>
-        <span class="nm">${H(m.name)}</span>
+        ${m.name && !m.name.toLowerCase().includes((m.code || '').toLowerCase())
+          ? '<span class="nm">' + H(m.name) + '</span>' : ''}
         ${m.id === S.currentId ? '<span class="now-tag">当前</span>' : ''}
         ${m.enabled ? '' : '<span class="off">停用</span>'}
       </td>
@@ -172,7 +187,7 @@ function renderSwitchOptions() {
   const sel = $('switchSel');
   const enabled = S.models.filter((m) => m.enabled);
   sel.innerHTML = enabled.map((m) =>
-    `<option value="${H(m.code)}">${H(m.code)} ${H(m.name)}${m.id === S.currentId ? ' · 当前' : ''}</option>`
+    `<option value="${H(m.code)}">${H(modelLabel(m))}${m.id === S.currentId ? ' · 当前' : ''}</option>`
   ).join('');
   if (S.pendingCode) sel.value = S.pendingCode;
   else if (S.currentCode) sel.value = S.currentCode;
@@ -292,7 +307,7 @@ async function openDrawer(modelId, processId) {
 
   S.editing = { modelId, processId };
   $('drawerTitle').textContent = `${m.code}　/　${p.code} ${p.name}`;
-  $('drawerSub').textContent = `${m.name}　这道工序要循环播放的内容`;
+  $('drawerSub').textContent = `${modelLabel(m)}　这道工序要循环播放的内容`;
   S.items = [];
   S.dirty = false;
   $('items').innerHTML = '<div class="empty">载入中…</div>';
@@ -666,12 +681,18 @@ if (desk) {
 
       // 终端装机要填的地址。这里把 127.0.0.1 单独拎出来提醒别填错 ——
       // 那是服务端自己看到的地址，填到别的机器上必然连不上。
+      // 服务端已经把虚拟网卡（Hyper-V / VMware / WSL）排到后面了，界面再把网卡名
+      // 标出来，现场照着「以太网 3」这种名字核对，比对着纯 IP 猜靠谱。
       const lan = info.lan || [];
       $('sysLan').innerHTML = lan.length
-        ? '<div class="lan-list">' + lan.map((u) => (
-            '<div class="lan-item"><b>' + H(u) + '</b><div class="spacer"></div>' +
-            '<button class="btn" data-copy="' + H(u) + '">复制</button></div>'
-          )).join('') + '</div>'
+        ? '<div class="lan-list">' + lan.map((it) => (
+            '<div class="lan-item"><b>' + H(it.url) + '</b>' +
+            '<span class="nic">' + H(it.name) + '</span>' +
+            '<div class="spacer"></div>' +
+            '<button class="btn" data-copy="' + H(it.url) + '">复制</button></div>'
+          )).join('') + '</div>' +
+          (lan.length > 1 ? '<div class="lan-tip">有多张网卡时，选名字对得上现场网线的那张。' +
+            '带 vEthernet / VMnet / WSL 的是虚拟网卡，填了终端连不上。</div>' : '')
         : '<div class="lan-item">没有检测到局域网地址，请确认网线已插、IP 已配置</div>';
     });
   };

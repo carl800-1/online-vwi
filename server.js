@@ -24,7 +24,8 @@ if (inst.seeded.created) {
 if (s.lan.length) {
   console.log('');
   console.log('  局域网访问（终端装机器上填这个）：');
-  for (const a of s.lan) console.log('    http://' + a + ':' + PORT);
+  // s.lan 是 [{ name, address }]，已按「真网卡优先」排好序，虚拟网卡排后面
+  for (const a of s.lan) console.log('    http://' + a.address + ':' + PORT + '   ← ' + a.name);
 }
 console.log('');
 

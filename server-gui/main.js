@@ -394,7 +394,7 @@ function registerIpc() {
     port,
     dataDir,
     logFile,
-    lan: lanAddresses().map((ip) => 'http://' + ip + ':' + port),
+    lan: lanAddresses().map((x) => ({ url: 'http://' + x.address + ':' + port, name: x.name })),
     packaged: app.isPackaged,
     dev: DEV,
     autoStart: isAutoStartOn(),
@@ -420,6 +420,10 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(async () => {
     // ready 之后这些才真的挂在 electron 导出对象上
     ({ BrowserWindow, Tray, Menu, dialog, shell, nativeImage, ipcMain } = electron);
+    // 干掉 Electron 自带的英文菜单（File / Edit / View / Window / Help）。
+    // 这是中文产线工具，误按 Alt 弹出一排英文菜单既没用又显得不像个正经程序；
+    // 它提供的功能全部在界面「系统」面板和托盘里。开发模式保留，方便开 DevTools。
+    if (!DEV) Menu.setApplicationMenu(null);
     registerIpc();
     await boot();
   }).catch((err) => fatal(err, '启动失败'));

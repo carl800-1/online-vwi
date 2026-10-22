@@ -644,6 +644,18 @@ body.is-desktop .modal.desk-only.on { display: flex; }
 .lan-item b { font-weight: 600; }
 .lan-item .spacer { flex: 1; }
 .lan-item button { padding: 3px 10px; font-size: 12px; }
+/* 网卡名：现场靠这个名字确认「是不是插网线的那张网卡」，
+   纯 IP 记不住，写上「以太网 3」就好对 */
+.lan-item .nic {
+  flex: none; padding: 1px 7px; border-radius: 10px;
+  background: #e8eefb; color: #3d5b9e;
+  font-family: inherit; font-size: 11px; white-space: nowrap;
+}
+.lan-tip {
+  margin-top: 8px; font-size: 12px; line-height: 1.6; color: #7a6320;
+  padding: 8px 10px; background: #fff8e6; border: 1px solid #ffe3a3;
+  border-radius: var(--r);
+}
 
 .switch { position: relative; display: inline-block; width: 40px; height: 22px; flex: none; }
 .switch input { opacity: 0; width: 0; height: 0; }

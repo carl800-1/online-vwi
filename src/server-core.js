@@ -47,14 +47,50 @@ const MIME = {
 // 都是单例，重复初始化会直接把状态搅乱，所以这里做成幂等。
 let instance = null;
 
+// 虚拟网卡的名字特征。这些网卡也有 IPv4、也不是 internal，但**终端连不上**：
+//   - Hyper-V 的 vEthernet (Default Switch) 常见 172.x，而且往往排在真网卡前面
+//   - VMware / VirtualBox 的仅主机网卡、WSL / Docker 的桥
+//   - 各类 VPN 与蓝牙 PAN
+// 现场最典型的翻车：运维照着列表第一条地址填进 5 台终端，5 台全连不上，
+// 还以为是网络或服务端问题，排查半天。所以这里必须过滤 + 排序，不能只判 internal。
+const VIRTUAL_NIC_HINTS = [
+  'vethernet', 'hyper-v', 'vmware', 'virtualbox', 'vbox',
+  'wsl', 'docker', 'loopback', 'bluetooth', '蓝牙',
+  'vpn', 'tap-', 'tun', 'zerotier', 'tailscale', 'hamachi', 'npcap'
+];
+
+function isVirtualNic(name, address) {
+  const n = (name || '').toLowerCase();
+  if (VIRTUAL_NIC_HINTS.some((h) => n.includes(h))) return true;
+  // 169.254.x.x 是 DHCP 失败后的自动地址（APIPA），同网段终端根本 ping 不到
+  if (address.startsWith('169.254.')) return true;
+  return false;
+}
+
+/**
+ * 列出终端能用来连服务端的地址，按「最可能可用」排前面。
+ * 返回 [{ name, address }]，name 是网卡名，界面上标出来便于现场核对。
+ */
 export function lanAddresses() {
   const out = [];
-  for (const list of Object.values(os.networkInterfaces())) {
+  for (const [name, list] of Object.entries(os.networkInterfaces())) {
     for (const ni of list || []) {
-      if (ni.family === 'IPv4' && !ni.internal) out.push(ni.address);
+      if (ni.family !== 'IPv4' || ni.internal) continue;
+      out.push({ name, address: ni.address, virtual: isVirtualNic(name, ni.address) });
     }
   }
-  return out;
+  // 真网卡优先；同类里按常见内网段排序（192.168 > 10 > 172.16-31 > 其它）
+  const rank = (x) => {
+    const a = x.address;
+    let seg = 3;
+    if (a.startsWith('192.168.')) seg = 0;
+    else if (a.startsWith('10.')) seg = 1;
+    else if (/^172\.(1[6-9]|2\d|3[01])\./.test(a)) seg = 2;
+    return (x.virtual ? 10 : 0) + seg;
+  };
+  return out
+    .sort((a, b) => rank(a) - rank(b))
+    .map(({ name, address }) => ({ name, address }));
 }
 
 // 命令行里的 --port=8080
