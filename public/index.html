@@ -28,69 +28,87 @@
   </div>
   <div class="stat">当前 <b id="curTxt">未指定</b></div>
 
-  <!-- 下面两个只在桌面程序里出现；网页版打开时 body 没有 is-desktop，整块隐藏 -->
+  <!-- 只在桌面程序里出现；网页版打开时 body 没有 is-desktop，整块隐藏 -->
   <div class="stat desk-only">v<b id="verTxt">—</b></div>
-  <button class="btn on-dark sm desk-only" id="sysBtn" title="版本、端口、终端装机地址、数据目录、开机自启">系统</button>
 </header>
 
-<div class="wrap">
-  <div class="phasebar" id="phasebar">
-    <span id="phaseText">正在切换…</span>
-    <div class="chips" id="phaseChips"></div>
-    <div class="grow"></div>
-    <button class="btn sm danger" id="cancelSwitchBtn">放弃本次切换</button>
-  </div>
+<div class="shell">
+  <!-- ========== 左侧：功能模块 ==========
+       一共就两个真正干活的模块（填内容、管素材），加一个系统信息。
+       做成固定竖排而不是顶部标签：切来切去时位置不变，手不用重新找。 -->
+  <nav class="side">
+    <button class="side-item on" data-view="matrix">
+      <span class="ico">▦</span>
+      <span>内容矩阵</span>
+    </button>
+    <button class="side-item" data-view="media">
+      <span class="ico">▤</span>
+      <span>媒体库</span>
+    </button>
 
-  <div class="tabs">
-    <button data-tab="matrix" class="on">内容矩阵</button>
-    <button data-tab="media">媒体库</button>
-  </div>
+    <div class="side-fill"></div>
 
-  <!-- ========== 内容矩阵 ========== -->
-  <section id="view-matrix">
-    <div class="panel">
-      <div class="panel-head">
-        <h2>型号 × 工序</h2>
-        <span class="sub" id="covTxt">—</span>
-        <div class="bar"><i id="covBar"></i></div>
-        <div class="spacer"></div>
-        <button class="btn sm" id="addModelBtn">+ 新型号</button>
-        <button class="btn sm" id="refreshBtn">刷新</button>
-      </div>
-      <div style="overflow:auto">
-        <table class="matrix" id="matrix">
-          <thead></thead>
-          <tbody></tbody>
-        </table>
-      </div>
+    <button class="side-item desk-only" id="sysBtn" title="版本、端口、终端装机地址、数据目录、开机自启">
+      <span class="ico">⚙</span>
+      <span>系统</span>
+    </button>
+  </nav>
+
+  <!-- ========== 右侧：内容区 ========== -->
+  <main class="main">
+    <div class="phasebar" id="phasebar">
+      <span id="phaseText">正在切换…</span>
+      <div class="chips" id="phaseChips"></div>
+      <div class="grow"></div>
+      <button class="btn sm danger" id="cancelSwitchBtn">放弃本次切换</button>
     </div>
-    <p class="sub" style="color:#8b96a8;font-size:12px;margin:12px 4px 0">
-      一个格子 = 一个型号在某道工序下的播放清单。点格子进编辑；表头工序名可直接点开改。
-    </p>
-  </section>
 
-  <!-- ========== 媒体库 ========== -->
-  <section id="view-media" class="hide">
-    <div class="panel">
-      <div class="panel-head">
-        <h2>媒体库</h2>
-        <span class="sub" id="mediaTxt">—</span>
-        <div class="spacer"></div>
-        <button class="btn sm" id="uploadBtn">上传文件</button>
-        <button class="btn sm" id="adviceBtn">规格体检</button>
-        <button class="btn sm danger" id="gcBtn">清理未引用</button>
+    <!-- ========== 内容矩阵 ========== -->
+    <section id="view-matrix" class="view">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>型号 × 工序</h2>
+          <span class="sub" id="covTxt">—</span>
+          <div class="bar"><i id="covBar"></i></div>
+          <div class="spacer"></div>
+          <button class="btn sm" id="addModelBtn">+ 新型号</button>
+          <button class="btn sm" id="refreshBtn">刷新</button>
+        </div>
+        <div class="matrix-scroll">
+          <table class="matrix" id="matrix">
+            <thead></thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
-      <div class="toolbar">
-        <input type="search" id="mediaSearch" placeholder="按文件名搜索">
-        <select id="mediaKind" class="btn sm" style="padding:6px 10px">
-          <option value="">全部类型</option>
-          <option value="image">只看图片</option>
-          <option value="video">只看视频</option>
-        </select>
+      <p class="foot-hint">
+        一个格子 = 一个型号在某道工序下的播放清单。点格子进编辑；表头工序名可直接点开改。
+      </p>
+    </section>
+
+    <!-- ========== 媒体库 ========== -->
+    <section id="view-media" class="view hide">
+      <div class="panel">
+        <div class="panel-head">
+          <h2>媒体库</h2>
+          <span class="sub" id="mediaTxt">—</span>
+          <div class="spacer"></div>
+          <button class="btn sm" id="uploadBtn">上传文件</button>
+          <button class="btn sm" id="adviceBtn">规格体检</button>
+          <button class="btn sm danger" id="gcBtn">清理未引用</button>
+        </div>
+        <div class="toolbar">
+          <input type="search" id="mediaSearch" placeholder="按文件名搜索">
+          <select id="mediaKind" class="btn sm" style="padding:6px 10px">
+            <option value="">全部类型</option>
+            <option value="image">只看图片</option>
+            <option value="video">只看视频</option>
+          </select>
+        </div>
+        <div class="mediagrid" id="mediagrid"></div>
       </div>
-      <div class="mediagrid" id="mediagrid"></div>
-    </div>
-  </section>
+    </section>
+  </main>
 </div>
 
 <!-- ========== 清单编辑抽屉 ========== -->
@@ -107,17 +125,22 @@
 
   <div class="drawer-body">
     <div class="drop" id="drop">
-      <div><b>把图片或视频拖到这里</b>　或　<button class="btn sm" id="pickBtn">选择文件</button></div>
-      <div class="hint">图片按 19 寸屏做 1280×1024（5:4）；视频建议 720p、单段 60 秒内</div>
+      <div><b>把图片、视频或 PDF 拖到这里</b>　或　<button class="btn sm" id="pickBtn">选择文件</button></div>
+      <div class="hint">
+        PDF 会自动按页拆成图片（一份 10 页的指导书 = 10 张图）；视频时长不限，播完自动下一项
+      </div>
     </div>
-    <input type="file" id="fileInput" multiple accept="image/*,video/*" style="display:none">
+    <input type="file" id="fileInput" multiple accept="image/*,video/*,application/pdf,.pdf" style="display:none">
 
-    <div style="display:flex;align-items:center;gap:8px;margin-top:14px">
-      <strong style="font-size:13px">播放顺序</strong>
-      <span class="hint" style="font-size:12px;color:#8b96a8" id="playHint"></span>
-      <div style="flex:1"></div>
+    <div class="list-head">
+      <strong>播放顺序</strong>
+      <span class="hint" id="playHint"></span>
+      <div class="spacer"></div>
       <button class="btn sm" id="pickFromLib">从媒体库选取</button>
     </div>
+
+    <!-- 容量预算：换型时 5 台要一起下这套内容，体积直接决定换型要多久 -->
+    <div class="budget" id="budget"></div>
 
     <div class="panel hide" id="libPicker" style="margin-top:10px">
       <div class="toolbar" style="border-bottom:1px solid #eef1f6">
@@ -139,6 +162,25 @@
     <button class="btn primary" id="saveBtn">保存清单</button>
   </div>
 </aside>
+
+<!-- ========== 通用对话框 ==========
+     Electron 里 window.prompt() 是直接抛异常的（"prompt() is and will not be supported"），
+     confirm 也是英文按钮的原生框。全部换成这一个自己画的，顺便能一次问多个字段。 -->
+<div class="modal" id="dialog">
+  <div class="modal-card dlg-card">
+    <div class="modal-head">
+      <h3 id="dlgTitle">—</h3>
+      <div class="spacer"></div>
+      <button class="iconbtn" id="dlgX" title="关闭">✕</button>
+    </div>
+    <div class="modal-body" id="dlgBody"></div>
+    <div class="modal-foot">
+      <button class="btn" id="dlgCancel">取消</button>
+      <div class="spacer"></div>
+      <button class="btn primary" id="dlgOk">确定</button>
+    </div>
+  </div>
+</div>
 
 <div id="toasts"></div>
 

@@ -9,7 +9,7 @@ import { notifyContentChanged } from '../switch.js';
 
 function loadItems(modelId, processId) {
   return q.all(
-    `SELECT i.id, i.ord, i.kind, i.media_id, i.dwell_sec,
+    `SELECT i.id, i.ord, i.kind, i.media_id, i.dwell_sec, i.fit, i.zoom,
             m.name, m.ext, m.mime, m.bytes, m.width, m.height, m.duration_ms
        FROM item i JOIN media m ON m.id = i.media_id
       WHERE i.model_id = ? AND i.process_id = ?
@@ -21,6 +21,8 @@ function loadItems(modelId, processId) {
     kind: r.kind,
     mediaId: r.media_id,
     dwellSec: r.dwell_sec,
+    fit: r.fit || 'contain',
+    zoom: r.zoom || 100,
     name: r.name,
     ext: r.ext,
     mime: r.mime,
@@ -81,7 +83,11 @@ export function register(router) {
         kind: media.kind,
         ord: i,
         // 图片停留 1–120 秒；视频不看这个值，播完就下一项
-        dwellSec: clamp(it.dwellSec ?? 10, 1, 120)
+        dwellSec: clamp(it.dwellSec ?? 10, 1, 120),
+        // 显示方式只对图片有意义：contain 不裁切、cover 铺满。zoom 是百分比，
+        // 超过 100 就是放大后裁掉两边 —— 指导书上的小字看不清时用得上。
+        fit: it.fit === 'cover' ? 'cover' : 'contain',
+        zoom: clamp(it.zoom ?? 100, 50, 200)
       };
     });
 
@@ -89,8 +95,9 @@ export function register(router) {
       q.run('DELETE FROM item WHERE model_id = ? AND process_id = ?', modelId, processId);
       for (const r of rows) {
         q.run(
-          'INSERT INTO item(id,model_id,process_id,ord,kind,media_id,dwell_sec) VALUES(?,?,?,?,?,?,?)',
-          uid('it'), modelId, processId, r.ord, r.kind, r.mediaId, r.dwellSec
+          `INSERT INTO item(id,model_id,process_id,ord,kind,media_id,dwell_sec,fit,zoom)
+           VALUES(?,?,?,?,?,?,?,?,?)`,
+          uid('it'), modelId, processId, r.ord, r.kind, r.mediaId, r.dwellSec, r.fit, r.zoom
         );
       }
     });

@@ -79,6 +79,8 @@ function localItems() {
       mediaId: it.mediaId,
       kind: it.kind,
       dwellSec: it.dwellSec,
+      fit: it.fit || 'contain',
+      zoom: it.zoom || 100,
       name: it.name,
       file: p,
       url: toFileUrl(p)
@@ -157,6 +159,11 @@ function pack(it, file) {
     ext: it.ext,
     kind: it.kind,
     dwellSec: it.dwellSec,
+    // 显示方式必须跟着内容一起落到本地：断网时冷启动只能靠索引重建播放队列，
+    // 少了这两个字段，一断电重启所有图就退回默认的"适应"，
+    // 工程部放大的那张关键局部图会悄悄缩回去。
+    fit: it.fit || 'contain',
+    zoom: it.zoom || 100,
     name: it.name,
     bytes: it.bytes,
     file,
@@ -176,6 +183,8 @@ function commit({ modelCode, modelId, seq }, items) {
       ext: it.ext,
       kind: it.kind,
       dwellSec: it.dwellSec,
+      fit: it.fit || 'contain',
+      zoom: it.zoom || 100,
       name: it.name,
       bytes: it.bytes
     }))

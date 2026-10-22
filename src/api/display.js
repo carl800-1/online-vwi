@@ -30,7 +30,7 @@ export function register(router) {
     }
 
     const rows = q.all(
-      `SELECT i.ord, i.kind, i.dwell_sec, i.media_id,
+      `SELECT i.ord, i.kind, i.dwell_sec, i.fit, i.zoom, i.media_id,
               m.sha256, m.ext, m.mime, m.bytes, m.name
          FROM item i JOIN media m ON m.id = i.media_id
         WHERE i.model_id = ? AND i.process_id = ?
@@ -52,6 +52,10 @@ export function register(router) {
         bytes: r.bytes,
         name: r.name,
         dwellSec: r.dwell_sec,
+        // 显示方式随内容一起下发：换型时和清单同时生效，不做单独设置项，
+        // 否则"换了型号但尺寸还是上一套的"会成为新的半新半旧。
+        fit: r.fit || 'contain',
+        zoom: r.zoom || 100,
         mime: r.mime,
         // ext 必须给：终端按 <mediaId>.<ext> 存盘，扩展名错了 <video> 可能解不出来
         ext: r.ext,

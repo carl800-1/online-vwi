@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS media (
   height      INTEGER NOT NULL DEFAULT 0,
   duration_ms INTEGER NOT NULL DEFAULT 0,
   name        TEXT NOT NULL DEFAULT '',
+  src_sha     TEXT NOT NULL DEFAULT '',  -- PDF 拆出来的页：记住来自哪个 PDF 的 sha
+  page_no     INTEGER NOT NULL DEFAULT 0, -- 第几页（从 1 起）；普通图片是 0
   created_at  INTEGER NOT NULL
 );
 
@@ -54,6 +56,8 @@ CREATE TABLE IF NOT EXISTS item (
   kind        TEXT NOT NULL,            -- image | video，冗余存一份便于直接查
   media_id    TEXT NOT NULL REFERENCES media(id),
   dwell_sec   INTEGER NOT NULL DEFAULT 10,
+  fit         TEXT NOT NULL DEFAULT 'contain', -- contain | cover
+  zoom        INTEGER NOT NULL DEFAULT 100,    -- 百分比，50–200
   UNIQUE(model_id, process_id, media_id)
 );
 CREATE INDEX IF NOT EXISTS idx_item_mp ON item(model_id, process_id, ord);
@@ -78,8 +82,28 @@ export function openDb(dir) {
   fs.mkdirSync(path.join(dir, 'media'), { recursive: true });
   db = new DatabaseSync(path.join(dir, 'vwi.db'));
   db.exec(SCHEMA);
+  migrate();
   ensureSettings();
   return db;
+}
+
+/**
+ * 增量迁移：给老库补新列。
+ *
+ * 为什么不靠 SCHEMA 里那句 CREATE TABLE IF NOT EXISTS —— 它只在表不存在时建表，
+ * 已经在跑的现场库里表是旧的，新列永远加不上，报到"no such column"就直接白屏。
+ * 所以每个新列都要在这里补一次，用 PRAGMA table_info 判断，幂等，跑多少遍都一样。
+ */
+function migrate() {
+  const colsOf = (table) => new Set(q.all(`PRAGMA table_info(${table})`).map((r) => r.name));
+
+  const media = colsOf('media');
+  if (!media.has('src_sha')) db.exec("ALTER TABLE media ADD COLUMN src_sha TEXT NOT NULL DEFAULT ''");
+  if (!media.has('page_no')) db.exec('ALTER TABLE media ADD COLUMN page_no INTEGER NOT NULL DEFAULT 0');
+
+  const item = colsOf('item');
+  if (!item.has('fit')) db.exec("ALTER TABLE item ADD COLUMN fit TEXT NOT NULL DEFAULT 'contain'");
+  if (!item.has('zoom')) db.exec('ALTER TABLE item ADD COLUMN zoom INTEGER NOT NULL DEFAULT 100');
 }
 
 export function getDb() {

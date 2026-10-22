@@ -58,6 +58,73 @@ function fmtBytes(n) {
   return (n / 1073741824).toFixed(2) + ' GB';
 }
 
+// ---------- 对话框 ----------
+/**
+ * 自己画的输入/确认框。
+ *
+ * 起因很实际：Electron 里 window.prompt() 是**直接抛异常**的
+ * （"prompt() is and will not be supported"），点「+ 新型号」毫无反应就是这么来的；
+ * confirm() 虽然还能用，但弹的是英文 OK/Cancel 的原生框，中文产线工具上很跳。
+ * 所以一律走这里，输入框和确认框用同一套。
+ *
+ * @returns {Promise<null|true|Object>} 取消返回 null；无字段返回 true；有字段返回 { key: 值 }
+ */
+function dialog({ title, message = '', fields = [], okText = '确定', danger = false }) {
+  return new Promise((resolve) => {
+    $('dlgTitle').textContent = title;
+    $('dlgBody').innerHTML =
+      (message ? `<div class="dlg-msg" style="margin-bottom:14px">${H(message)}</div>` : '') +
+      fields.map((f, i) => `
+        <div class="dlg-row">
+          ${f.label ? `<label for="dlgF${i}">${H(f.label)}</label>` : ''}
+          <input type="text" id="dlgF${i}" data-fk="${H(f.key)}"
+                 value="${H(f.value || '')}" placeholder="${H(f.placeholder || '')}">
+          ${f.tip ? `<div class="tip">${H(f.tip)}</div>` : ''}
+        </div>`).join('');
+
+    const ok = $('dlgOk');
+    ok.textContent = okText;
+    ok.className = 'btn ' + (danger ? 'danger' : 'primary');
+    $('dialog').classList.add('show');
+
+    const inputs = [...$('dlgBody').querySelectorAll('[data-fk]')];
+    const finish = (val) => {
+      $('dialog').classList.remove('show');
+      ok.onclick = null;
+      $('dlgCancel').onclick = null;
+      $('dlgX').onclick = null;
+      $('dialog').onclick = null;
+      document.removeEventListener('keydown', onKey);
+      resolve(val);
+    };
+    const submit = () => {
+      if (!inputs.length) return finish(true);
+      const out = {};
+      for (const el of inputs) out[el.dataset.fk] = el.value.trim();
+      finish(out);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); finish(null); }
+      if (e.key === 'Enter' && e.target.tagName === 'INPUT') { e.preventDefault(); submit(); }
+    };
+
+    ok.onclick = submit;
+    $('dlgCancel').onclick = () => finish(null);
+    $('dlgX').onclick = () => finish(null);
+    $('dialog').onclick = (e) => { if (e.target === $('dialog')) finish(null); };
+    document.addEventListener('keydown', onKey);
+
+    const first = inputs[0];
+    if (first) { first.focus(); first.select(); } else ok.focus();
+  });
+}
+
+/** confirm 的替身，语义一致：确定 true，取消 null */
+async function ask(title, message, okText = '确定', danger = false) {
+  const r = await dialog({ title, message, okText, danger });
+  return r === true ? true : null;
+}
+
 /**
  * 型号的显示名。
  * 种子数据把 name 写成「X200 型」，直接拼 code 就成了「X200 X200 型」，
@@ -193,14 +260,15 @@ function renderSwitchOptions() {
   else if (S.currentCode) sel.value = S.currentCode;
 }
 
-// ---------- 标签页 ----------
-document.querySelectorAll('.tabs button').forEach((b) => {
+// ---------- 左侧模块切换 ----------
+document.querySelectorAll('.side-item[data-view]').forEach((b) => {
   b.addEventListener('click', () => {
-    S.tab = b.dataset.tab;
-    document.querySelectorAll('.tabs button').forEach((x) => x.classList.toggle('on', x === b));
-    $('view-matrix').classList.toggle('hide', S.tab !== 'matrix');
-    $('view-media').classList.toggle('hide', S.tab !== 'media');
-    if (S.tab === 'media') loadMedia();
+    const v = b.dataset.view;
+    S.tab = v;
+    document.querySelectorAll('.side-item[data-view]').forEach((x) => x.classList.toggle('on', x === b));
+    $('view-matrix').classList.toggle('hide', v !== 'matrix');
+    $('view-media').classList.toggle('hide', v !== 'media');
+    if (v === 'media') loadMedia();
   });
 });
 
@@ -216,9 +284,14 @@ $('matrix').addEventListener('click', (e) => {
 async function renameProcess(pid) {
   const p = S.processes.find((x) => x.id === pid);
   if (!p) return;
-  const name = prompt(`步骤 ${p.code} 的名称（会显示在终端顶栏）`, p.name);
-  if (name == null) return;
-  const v = name.trim();
+  const r = await dialog({
+    title: '改工序名称',
+    message: `工序 ${p.code} 的名称会显示在终端顶栏上，工人靠它确认自己在哪道工序。`,
+    fields: [{ key: 'name', label: '名称', value: p.name, placeholder: '例如：上料' }],
+    okText: '保存'
+  });
+  if (!r) return;
+  const v = r.name;
   if (!v || v === p.name) return;
   try {
     await api('/api/processes/' + pid, {
@@ -233,17 +306,29 @@ async function renameProcess(pid) {
 }
 
 $('addModelBtn').addEventListener('click', async () => {
-  const code = prompt('新型号编码（字母数字，如 X300）');
-  if (!code) return;
-  const name = prompt('型号名称（可留空）', code.trim() + ' 型') || code.trim();
+  const r = await dialog({
+    title: '新增型号',
+    message: '型号编码是终端的换型依据，建好之后就能在矩阵里给它配内容。',
+    fields: [
+      { key: 'code', label: '型号编码', placeholder: 'X300', tip: '建议字母+数字，与工艺文件一致' },
+      { key: 'name', label: '显示名称', placeholder: '留空则用「X300 型」' }
+    ],
+    okText: '创建'
+  });
+  if (!r) return;
+
+  const code = r.code;
+  if (!code) return toast('型号编码不能为空', 'err');
+  const name = r.name || code + ' 型';
+
   try {
     await api('/api/models', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: code.trim(), name: name.trim() })
+      body: JSON.stringify({ code, name })
     });
     await loadAll();
-    toast('已新增型号 ' + code.trim(), 'ok');
+    toast('已新增型号 ' + code, 'ok');
   } catch (err) { toast(err.message, 'err'); }
 });
 
@@ -319,7 +404,9 @@ async function openDrawer(modelId, processId) {
     const d = await api(`/api/playlist?modelId=${encodeURIComponent(modelId)}&processId=${encodeURIComponent(processId)}`);
     S.items = d.items.map((it) => ({
       mediaId: it.mediaId, kind: it.kind, name: it.name,
-      bytes: it.bytes, url: it.url, dwellSec: it.dwellSec
+      bytes: it.bytes, url: it.url, dwellSec: it.dwellSec,
+      fit: it.fit || 'contain', zoom: it.zoom || 100,
+      width: it.width, height: it.height
     }));
     renderItems();
   } catch (err) {
@@ -327,9 +414,10 @@ async function openDrawer(modelId, processId) {
   }
 }
 
-function closeDrawer(force) {
+async function closeDrawer(force) {
   if (S.dirty && !force) {
-    if (!confirm('清单还没保存，确定关闭？')) return;
+    const ok = await ask('清单还没保存', '这个工序的改动还没保存，关掉就丢了。确定关闭？', '丢弃改动', true);
+    if (!ok) return;
   }
   $('drawer').classList.remove('show');
   $('overlay').classList.remove('show');
@@ -352,39 +440,97 @@ function updateDirty() {
   $('saveBtn').disabled = !S.dirty;
 }
 
+// ---------- 容量预算 ----------
+/**
+ * 为什么按"体积"管而不是按"时长"管：
+ *   换型时 5 台终端要同时把这一套内容整个下完才开始播（本地没备齐就不许翻画面），
+ *   所以决定换型快慢的是**字节数**，不是视频多长。同样 3 分钟的视频，
+ *   1Mbps 和 8Mbps 差 8 倍体积，按时长限制等于什么都没管住。
+ *
+ * 单套 120MB 这个线是这么倒推出来的：
+ *   5 台 × 120MB = 600MB，千兆内网实测 25MB/s 共享 → 24 秒；
+ *   车间 WiFi 20Mbps（2.5MB/s）→ 4 分钟，仍在 5 分钟窗口内。
+ *   超过 120MB 不是不能存，是弱网现场换型可能被 5 分钟强翻。
+ */
+const BUDGET_BYTES = 120 * 1024 * 1024;
+const LINK_FAST = 25 * 1024 * 1024;    // 千兆内网，5 台共享后的实测吞吐
+const LINK_SLOW = 2.5 * 1024 * 1024;   // 车间 WiFi 20Mbps，最差但能用的那档
+
+function secsText(bytes, link) {
+  const s = Math.ceil((bytes * 5) / link);
+  if (s < 60) return s + ' 秒';
+  return Math.floor(s / 60) + ' 分 ' + (s % 60) + ' 秒';
+}
+
+function renderBudget() {
+  const box = $('budget');
+  if (!S.items.length) { box.innerHTML = ''; return; }
+
+  const bytes = S.items.reduce((s, i) => s + i.bytes, 0);
+  const pct = Math.round((bytes / BUDGET_BYTES) * 100);
+  const cls = bytes > BUDGET_BYTES * 2 ? 'bad' : (bytes > BUDGET_BYTES ? 'warn' : '');
+  const tagText = cls === 'bad' ? '体积过大' : (cls === 'warn' ? '超出建议值' : '容量合适');
+
+  box.innerHTML =
+    `<span class="nums">合计 <b>${fmtBytes(bytes)}</b>（建议 ≤${fmtBytes(BUDGET_BYTES)}，当前 ${pct}%）</span>
+     <span class="nums">预计换型：内网 ${secsText(bytes, LINK_FAST)} / WiFi ${secsText(bytes, LINK_SLOW)}</span>
+     <span class="tag ${cls}">${tagText}</span>`;
+}
+
 function renderItems() {
   updateDirty();
+  renderBudget();
   if (!S.items.length) {
-    $('items').innerHTML = '<div class="empty">这套内容还是空的。<br>把作业指导书图片拖进上面的框里。</div>';
+    $('items').innerHTML = '<div class="empty">这套内容还是空的。<br>把作业指导书图片、PDF 或视频拖进上面的框里。</div>';
     $('playHint').textContent = '';
     return;
   }
   const imgs = S.items.filter((i) => i.kind === 'image').length;
   const vids = S.items.filter((i) => i.kind === 'video').length;
-  const bytes = S.items.reduce((s, i) => s + i.bytes, 0);
-  $('playHint').textContent = `共 ${S.items.length} 项（${imgs} 图 / ${vids} 视频）${fmtBytes(bytes)}，循环播放`;
+  $('playHint').textContent = `共 ${S.items.length} 项（${imgs} 图 / ${vids} 视频），循环播放`;
 
-  $('items').innerHTML = S.items.map((it, i) => `
+  $('items').innerHTML = S.items.map((it, i) => {
+    const isImg = it.kind === 'image';
+    const fit = it.fit === 'cover' ? 'cover' : 'contain';
+    const zoom = it.zoom || 100;
+    return `
     <div class="item">
       <span class="idx">${i + 1}</span>
-      <span class="pic">${it.kind === 'image'
+      <span class="pic">${isImg
         ? `<img src="${H(it.url)}" alt="">`
-        : '视频'}</span>
+        : '<span class="vtxt">视频</span>'}</span>
       <div class="info">
         <div class="n">${H(it.name)}</div>
-        <div class="m">${it.kind === 'image' ? '图片' : '视频'} · ${fmtBytes(it.bytes)}</div>
+        <div class="m">${isImg ? '图片' : '视频'} · ${fmtBytes(it.bytes)}${
+          isImg && it.width ? ` · ${it.width}×${it.height}` : ''}</div>
+
+        <div class="ctrls">
+          ${isImg
+            ? `<label class="dwell" title="这张图停留多少秒">停留
+                 <input type="number" min="1" max="120" value="${it.dwellSec}" data-dwell="${i}"> 秒</label>
+               <select class="minisel" data-fit="${i}" title="铺满会裁掉超出屏幕的部分">
+                 <option value="contain"${fit === 'contain' ? ' selected' : ''}>适应 · 不裁</option>
+                 <option value="cover"${fit === 'cover' ? ' selected' : ''}>铺满 · 裁边</option>
+               </select>
+               <label class="dwell" title="放大看小字；超过 100% 会裁掉四周">
+                 缩放 <input type="range" min="50" max="200" step="5" value="${zoom}" data-zoom="${i}"
+                             style="width:92px;padding:0">
+                 <b class="zoomval">${zoom}%</b>
+               </label>`
+            : `<span class="dwell" style="color:var(--ink3)">播完自动下一项（时长不限）</span>
+               <select class="minisel" data-fit="${i}" title="铺满会裁掉超出屏幕的部分">
+                 <option value="contain"${fit === 'contain' ? ' selected' : ''}>适应 · 不裁</option>
+                 <option value="cover"${fit === 'cover' ? ' selected' : ''}>铺满 · 裁边</option>
+               </select>`}
+        </div>
       </div>
-      ${it.kind === 'image'
-        ? `<label class="dwell" title="这张图停留多少秒">停留
-             <input type="number" min="1" max="120" value="${it.dwellSec}" data-dwell="${i}"> 秒</label>`
-        : '<span class="dwell" style="color:#8b96a8">播完即下一项</span>'}
       <div class="acts">
         <button class="iconbtn" data-up="${i}" ${i === 0 ? 'disabled' : ''} title="上移">↑</button>
         <button class="iconbtn" data-down="${i}" ${i === S.items.length - 1 ? 'disabled' : ''} title="下移">↓</button>
         <button class="iconbtn" data-del="${i}" title="移除">✕</button>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 $('items').addEventListener('click', (e) => {
@@ -403,7 +549,27 @@ $('items').addEventListener('click', (e) => {
   renderItems();
 });
 
+// 缩放滑块是连续拖的：只改数字和状态，不整行重绘 —— 重绘会把手指底下的滑块换掉
+$('items').addEventListener('input', (e) => {
+  const el = e.target.closest('[data-zoom]');
+  if (!el) return;
+  const i = +el.dataset.zoom;
+  const v = Math.min(200, Math.max(50, parseInt(el.value, 10) || 100));
+  S.items[i].zoom = v;
+  const label = el.parentElement.querySelector('.zoomval');
+  if (label) label.textContent = v + '%';
+  S.dirty = true;
+  updateDirty();
+});
+
 $('items').addEventListener('change', (e) => {
+  const fitEl = e.target.closest('[data-fit]');
+  if (fitEl) {
+    S.items[+fitEl.dataset.fit].fit = fitEl.value === 'cover' ? 'cover' : 'contain';
+    S.dirty = true;
+    updateDirty();
+    return;
+  }
   const el = e.target.closest('[data-dwell]');
   if (!el) return;
   const i = +el.dataset.dwell;
@@ -429,30 +595,53 @@ async function uploadFile(file) {
   return d;
 }
 
+/** 往清单尾部加一项。PDF 拆出来的页也走这里，保证 fit/zoom 默认值一致。 */
+function pushItem(m, extra) {
+  if (S.items.some((x) => x.mediaId === m.id)) return false;
+  S.items.push({
+    mediaId: m.id,
+    kind: m.kind,
+    name: m.name,
+    bytes: m.bytes,
+    url: m.url,
+    dwellSec: m.kind === 'image' ? 10 : 0,
+    fit: 'contain',
+    zoom: 100,
+    ...extra
+  });
+  return true;
+}
+
 async function handleFiles(files) {
   if (!S.editing) return;
   const list = [...files];
   if (!list.length) return;
   const drop = $('drop');
   const old = drop.innerHTML;
+
   for (let i = 0; i < list.length; i++) {
     drop.innerHTML = `<div><b>正在上传 ${i + 1}/${list.length}</b>　${H(list[i].name)}</div>
-      <div class="hint">大视频会比较慢，别关页面</div>`;
+      <div class="hint">PDF 要按页渲染，大视频会比较慢 —— 都别关页面</div>`;
     try {
       const d = await uploadFile(list[i]);
-      if (d.kind === 'file') { toast(`不是图片也不是视频，已跳过：${list[i].name}`, 'err'); continue; }
-      if (S.items.some((x) => x.mediaId === d.id)) {
-        toast(`已在清单里：${d.name}`);
+
+      // PDF：服务端已经把每一页渲染成 PNG，这里一次把整份按顺序加进清单
+      if (d.kind === 'pdf') {
+        let added = 0;
+        for (const p of d.pages || []) if (pushItem(p)) added++;
+        if (!added) {
+          toast(`这一整份 PDF 的 ${d.pageCount} 页都已在清单里`);
+        } else {
+          S.dirty = true;
+          renderItems();
+          toast(`PDF 已拆成 ${d.pageCount} 页，加入 ${added} 页`, 'ok');
+        }
         continue;
       }
-      S.items.push({
-        mediaId: d.id,
-        kind: d.kind,
-        name: d.name,
-        bytes: d.bytes,
-        url: d.url,
-        dwellSec: d.kind === 'image' ? 10 : 0
-      });
+
+      if (d.kind === 'file') { toast(`不是图片、视频或 PDF，已跳过：${list[i].name}`, 'err'); continue; }
+      if (!pushItem(d)) { toast(`已在清单里：${d.name}`); continue; }
+
       S.dirty = true;
       renderItems();
       if (d.duplicated) toast('库里已有同一文件，直接复用', 'ok');
@@ -520,12 +709,7 @@ $('objAdd').addEventListener('click', () => {
   let added = 0;
   for (const id of S.objPick) {
     const m = (S.libAll || []).find((x) => x.id === id);
-    if (!m || S.items.some((x) => x.mediaId === id)) continue;
-    S.items.push({
-      mediaId: m.id, kind: m.kind, name: m.name, bytes: m.bytes,
-      url: m.url, dwellSec: m.kind === 'image' ? 10 : 0
-    });
-    added++;
+    if (m && pushItem(m)) added++;
   }
   S.dirty = true;
   S.objPick = [];
@@ -547,7 +731,12 @@ $('saveBtn').addEventListener('click', async () => {
       body: JSON.stringify({
         modelId: S.editing.modelId,
         processId: S.editing.processId,
-        items: S.items.map((it) => ({ mediaId: it.mediaId, dwellSec: it.dwellSec }))
+        items: S.items.map((it) => ({
+          mediaId: it.mediaId,
+          dwellSec: it.dwellSec,
+          fit: it.fit || 'contain',
+          zoom: it.zoom || 100
+        }))
       })
     });
     S.dirty = false;
@@ -625,7 +814,14 @@ $('gcBtn').addEventListener('click', async () => {
     });
     if (!dry.total) return toast('没有未引用的文件，不用清理', 'ok');
     const names = dry.list.slice(0, 8).map((x) => x.name).join('、');
-    if (!confirm(`有 ${dry.total} 个文件没有被任何清单引用，共 ${fmtBytes(dry.bytes)}：\n${names}${dry.total > 8 ? ' …' : ''}\n\n确定删除？`)) return;
+    const ok = await ask(
+      '清理未引用文件',
+      `有 ${dry.total} 个文件没有被任何清单引用，共 ${fmtBytes(dry.bytes)}：\n` +
+      `${names}${dry.total > 8 ? ' …' : ''}\n\n删除后不可恢复，确定删除？`,
+      '删除',
+      true
+    );
+    if (!ok) return;
     const r = await api('/api/media/gc', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ dryRun: false })
@@ -729,9 +925,12 @@ if (desk) {
     const n = S.online.length;
     closeSys();
     if (n > 0) {
-      const ok = confirm(
+      const ok = await ask(
+        '终端还在线',
         '还有 ' + n + ' 台终端在线（' + S.online.join('、') + '）。\n\n' +
-        '退出会中断它们的播放，等于整线停产。确定要退出吗？'
+        '退出会中断它们的播放，等于整线停产。确定要退出吗？',
+        '仍然退出',
+        true
       );
       if (!ok) return;
     }

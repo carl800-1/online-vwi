@@ -128,11 +128,69 @@ button, input, select { font: inherit; color: inherit; }
 .btn.on-dark { background: #2a3c63; border-color: #3a4f7d; color: #eaf0fa; }
 .btn.on-dark:hover { background: #34496f; }
 
-/* ---------- 布局 ---------- */
-.wrap {
-  max-width: 1400px;
-  margin: 0 auto;
-  padding: 20px 20px 60px;
+/* ---------- 布局：左侧模块导航 + 右侧内容 ---------- */
+.shell {
+  display: flex;
+  align-items: stretch;
+  min-height: calc(100vh - 60px);
+}
+
+.side {
+  flex: 0 0 176px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 14px 10px 16px;
+  background: #f7f9fc;
+  border-right: 1px solid var(--line);
+}
+
+.side-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink2);
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.side-item .ico {
+  font-size: 15px;
+  width: 18px;
+  text-align: center;
+  color: var(--ink3);
+}
+.side-item:hover { background: #e8eef8; }
+.side-item.on {
+  background: #fff;
+  border-color: var(--line);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(23, 32, 46, .05);
+}
+.side-item.on .ico { color: var(--brand); }
+.side-fill { flex: 1; }
+
+.main {
+  flex: 1 1 auto;
+  min-width: 0;              /* 让内部表格自己出横向滚动，不要把整页撑宽 */
+  padding: 18px 20px 48px;
+}
+
+.view { display: block; }
+.view.hide { display: none; }
+
+.matrix-scroll { overflow: auto; }
+
+.foot-hint {
+  color: var(--ink3);
+  font-size: 12px;
+  margin: 12px 4px 0;
 }
 
 /* 切换进行中的提示条 */
@@ -414,7 +472,7 @@ tr.row-cur td.model { box-shadow: inset 3px 0 0 var(--brand); }
 
 .item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;   /* 信息区有两三行，缩略图跟着顶对齐才不飘 */
   gap: 10px;
   padding: 8px;
   border: 1px solid var(--line);
@@ -450,6 +508,31 @@ tr.row-cur td.model { box-shadow: inset 3px 0 0 var(--brand); }
   text-overflow: ellipsis;
 }
 .item .info .m { font-size: 11px; color: var(--ink3); margin-top: 2px; }
+
+/* 每项的显示设置（停留/裁切/缩放）跟在名字下面一行，抽屉窄也要放得下 */
+.item .ctrls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.item .minisel {
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 12px;
+  color: var(--ink2);
+}
+.item .zoomval {
+  font-size: 11.5px;
+  color: var(--ink2);
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+  display: inline-block;
+}
+.item .pic .vtxt { font-size: 11px; color: var(--ink3); }
 .item .dwell {
   display: flex;
   align-items: center;
@@ -538,28 +621,63 @@ tr.row-cur td.model { box-shadow: inset 3px 0 0 var(--brand); }
   to { opacity: 1; transform: none; }
 }
 
-.tabs {
+/* ---------- 抽屉里的清单头与容量预算 ---------- */
+.list-head {
   display: flex;
-  gap: 4px;
-  margin-bottom: 16px;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
 }
-.tabs button {
-  padding: 7px 14px;
-  border: 1px solid transparent;
+.list-head strong { font-size: 13px; }
+.list-head .spacer { flex: 1; }
+.list-head .hint { font-size: 12px; color: var(--ink3); }
+
+.budget {
+  margin-top: 8px;
+  padding: 8px 12px;
   border-radius: 8px;
-  background: transparent;
+  border: 1px solid var(--line2);
+  background: #f8fafd;
+  font-size: 12px;
   color: var(--ink2);
-  cursor: pointer;
-  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 }
-.tabs button:hover { background: #e4eaf4; }
-.tabs button.on {
+.budget .nums { font-variant-numeric: tabular-nums; }
+.budget .tag {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid #b9e3cc;
+  background: #f2fbf6;
+  color: var(--ok);
+}
+.budget .tag.warn { border-color: #f0d3a8; background: var(--warn-bg); color: #7a4406; }
+.budget .tag.bad { border-color: #f3c9c5; background: var(--danger-bg); color: var(--danger); }
+
+/* 通用对话框：替代 Electron 里不可用的 prompt/confirm */
+.dlg-card { width: 460px; max-width: calc(100vw - 48px); }
+.dlg-row { margin-bottom: 14px; }
+.dlg-row:last-child { margin-bottom: 0; }
+.dlg-row label {
+  display: block;
+  font-size: 12.5px;
+  color: var(--ink2);
+  margin-bottom: 5px;
+}
+.dlg-row input[type=text] {
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
   background: #fff;
-  border-color: var(--line);
-  color: var(--ink);
-  font-weight: 600;
-  box-shadow: 0 1px 2px rgba(23, 32, 46, .05);
+  outline: none;
 }
+.dlg-row input[type=text]:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-bg); }
+.dlg-row .tip { font-size: 11.5px; color: var(--ink3); margin-top: 4px; }
+.dlg-msg { font-size: 13.5px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
 
 .toolbar {
   display: flex;
@@ -584,6 +702,8 @@ tr.row-cur td.model { box-shadow: inset 3px 0 0 var(--brand); }
 .desk-only { display: none; }
 body.is-desktop .topbar .stat.desk-only { display: flex; }
 body.is-desktop .topbar button.desk-only { display: inline-flex; }
+/* 系统入口搬到了左侧导航：网页版没有托盘/自启这些概念，整项隐藏 */
+body.is-desktop .side-item.desk-only { display: flex; }
 
 .modal {
   position: fixed; inset: 0;
@@ -593,6 +713,9 @@ body.is-desktop .topbar button.desk-only { display: inline-flex; }
 }
 body.is-desktop .modal.desk-only { display: none; }
 body.is-desktop .modal.desk-only.on { display: flex; }
+
+/* 通用对话框（网页版和桌面版都要） */
+.modal.show { display: flex; }
 
 .modal-card {
   width: 560px; max-width: calc(100vw - 48px);

@@ -45,7 +45,20 @@ window.__vwiBeat = Date.now();
 
 // ───────────────────────── 媒体层 ─────────────────────────
 
+/**
+ * 按项设置显示方式。必须在**预载阶段**就设好，不能等翻到可见层再设 ——
+ * 后设会出现"先按 contain 显示一下再缩放到目标尺寸"的跳动，看着像加载失败。
+ */
+function applyFit(L, item) {
+  const fit = item.fit === 'cover' ? 'cover' : 'contain';
+  const zoom = Math.min(200, Math.max(50, Number(item.zoom) || 100)) / 100;
+  const box = item.kind === 'video' ? L.video : L.img;
+  box.style.objectFit = fit;
+  box.style.transform = zoom === 1 ? '' : `scale(${zoom})`;
+}
+
 function setSrcReady(L, item) {
+  applyFit(L, item);
   if (item.kind === 'video') {
     L.img.hidden = true;
     L.video.hidden = false;
@@ -76,6 +89,7 @@ function preload(li, item) {
     };
     const timer = setTimeout(() => done(false), PRELOAD_TIMEOUT);
 
+    applyFit(L, item);
     if (item.kind === 'video') {
       const v = L.video;
       L.img.hidden = true;
@@ -124,6 +138,7 @@ function startPlaying(li, item) {
   clearTimeout(S.timer);
   S.timer = null;
   const L = LAYERS[li];
+  applyFit(L, item);
 
   if (item.kind === 'video') {
     L.img.hidden = true;
@@ -198,7 +213,12 @@ async function goto(i) {
  */
 async function applyView(view) {
   const items = (view.items || []).filter((it) => it && it.url);
-  const key = (view.modelId || '') + '|' + items.map((it) => it.url).join(',');
+  // 内容标识必须把显示方式也算进去。
+  // 只按 url 比的话，"工程部把这张图从适应改成铺满+放大 150% 保存了，屏上没反应" ——
+  // 清单确实变了，终端却认为是同一套内容直接 ack 跳过，现场会以为设置没保存。
+  const key = (view.modelId || '') + '|' + items
+    .map((it) => it.url + ':' + (it.fit === 'cover' ? 'c' : 'n') + ':' + (Number(it.zoom) || 100))
+    .join(',');
   if (key && key === S.appliedKey && S.queue.length) {
     ack(view.id, true);                 // 同一套内容重复下发（快照与推送撞车），不必重翻
     return;

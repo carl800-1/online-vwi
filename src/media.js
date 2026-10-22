@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import * as mupdf from 'mupdf';
 import { q, mediaDir } from './db.js';
 import { now, uid } from './util.js';
 
@@ -12,9 +13,12 @@ const MIME_EXT = {
   'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov'
 };
 
+const PDF_MIME = 'application/pdf';
+
 function pickMime(name, given) {
   if (given && given !== 'application/octet-stream') return given;
   const ext = (path.extname(name || '').slice(1) || '').toLowerCase();
+  if (ext === 'pdf') return PDF_MIME;
   for (const [mime, e] of Object.entries(MIME_EXT)) if (e === ext) return mime;
   return given || 'application/octet-stream';
 }
@@ -27,6 +31,79 @@ function kindOf(mime) {
 
 function casPath(sha, ext) {
   return path.join(mediaDir(), sha.slice(0, 2), `${sha}.${ext}`);
+}
+
+// ───────────────────────── PDF 拆页 ─────────────────────────
+
+/** 单页渲染目标框（像素）。1280×1024 的屏，留 1.5 倍余量给"放大看细节"。 */
+const PDF_BOX_W = 1920;
+const PDF_BOX_H = 1536;
+/** 页数上限：200 页 A4 已经远超"一道工序的作业指导书"体量，再多多半是选错文件 */
+const PDF_MAX_PAGES = 200;
+
+/**
+ * 把一份 PDF 逐页渲染成 PNG，每页作为一条独立 image 记录入库。
+ *
+ * 为什么拆页而不是存原 PDF 让终端自己显示：
+ *   终端播放器只有 `<img>` 和 `<video>` 两层，"翻到下一项"是队列驱动的。
+ *   PDF 塞进去就得在内嵌阅读器里另做一套翻页控制，5 台机的浏览器行为还不一致。
+ *   拆成图片后，PDF 和普通图片在终端眼里完全一样 —— 终端一行代码都不用改，
+ *   翻页节奏、缓存、断点续传全部现成。代价只是媒体库里多出 N 条记录。
+ *
+ * 去重分两层：同一页可以跨型号复用（按 PNG 的 sha）；同一个 PDF 重复上传时
+ * 直接按 src_sha 命中已拆好的全部页，不再渲染。
+ */
+function expandPdf(filePath, { name, sha }) {
+  let doc;
+  try {
+    doc = mupdf.Document.openDocument(fs.readFileSync(filePath), PDF_MIME);
+  } catch (e) {
+    throw new Error('这个 PDF 打不开（可能已加密或文件损坏）：' + e.message);
+  }
+
+  const n = doc.countPages();
+  if (!n) throw new Error('PDF 里没有任何页面');
+  if (n > PDF_MAX_PAGES) throw new Error(`PDF 有 ${n} 页，超过单份上限 ${PDF_MAX_PAGES} 页`);
+
+  const base = String(name).replace(/\.pdf$/i, '').slice(0, 170) || 'PDF';
+  const pages = [];
+
+  for (let i = 0; i < n; i++) {
+    const page = doc.loadPage(i);
+    const [x0, y0, x1, y1] = page.getBounds();
+    const w = x1 - x0;
+    const h = y1 - y0;
+    if (!(w > 0) || !(h > 0)) throw new Error(`第 ${i + 1} 页尺寸异常`);
+
+    // 等比缩放塞进目标框：竖版 A4 会按高度封顶，横版按宽度封顶，都不裁切
+    const scale = Math.min(PDF_BOX_W / w, PDF_BOX_H / h);
+    const pix = page.toPixmap(mupdf.Matrix.scale(scale, scale), mupdf.ColorSpace.DeviceRGB, false);
+    const png = Buffer.from(pix.asPNG());
+
+    const pageSha = crypto.createHash('sha256').update(png).digest('hex');
+    const exist = q.get('SELECT * FROM media WHERE sha256 = ?', pageSha);
+    if (exist) {
+      // 同样的页面已经在了（比如另一份 PDF 里有一模一样的页），直接复用
+      pages.push(exist);
+      continue;
+    }
+
+    const pid = pageSha.slice(0, 16);
+    const target = casPath(pageSha, 'png');
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, png);
+
+    q.run(
+      `INSERT INTO media(id,sha256,kind,ext,mime,bytes,width,height,duration_ms,name,src_sha,page_no,created_at)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      pid, pageSha, 'image', 'png', 'image/png', png.length,
+      pix.getWidth(), pix.getHeight(), 0,
+      `${base} · 第 ${i + 1} 页`, sha, i + 1, now()
+    );
+    pages.push(q.get('SELECT * FROM media WHERE id = ?', pid));
+  }
+
+  return { kind: 'pdf', pages, pageCount: n, duplicated: false };
 }
 
 /**
@@ -99,6 +176,19 @@ export function saveStream(readable, { name = '', mime = '' } = {}) {
       try {
         const sha = h.digest('hex');
         const finalMime = pickMime(name, mime);
+
+        // PDF 走另一条路：不把自己存成媒体，而是拆成逐页 PNG 入库
+        if (finalMime === PDF_MIME) {
+          const done = q.all('SELECT * FROM media WHERE src_sha = ? ORDER BY page_no', sha);
+          if (done.length) {
+            fs.rmSync(tmp, { force: true });
+            return resolve({ kind: 'pdf', pages: done, pageCount: done.length, duplicated: true });
+          }
+          const r = expandPdf(tmp, { name, sha });
+          fs.rmSync(tmp, { force: true });
+          return resolve(r);
+        }
+
         const ext = path.extname(name).slice(1).toLowerCase() || MIME_EXT[finalMime] || 'bin';
         const id = sha.slice(0, 16);
 

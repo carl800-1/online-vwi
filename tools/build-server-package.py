@@ -20,7 +20,9 @@ RELEASE = ROOT / "release"
 PKG_NAME = "online-vwi-server-{ver}-win-x64"
 
 # 打包进 zip 的内容
-INCLUDE_DIRS = ["src", "public", "docs", "tools"]
+# node_modules/mupdf 是唯一一个运行时依赖（PDF 拆页要用它的 wasm），不能漏 ——
+# 漏了的表现是"绿色包能启动、上传 PDF 立刻 500"，很难一眼看出是缺包。
+INCLUDE_DIRS = ["src", "public", "docs", "tools", "node_modules/mupdf"]
 INCLUDE_FILES = ["server.js", "package.json", "使用说明.txt"]
 RUNTIME_FILES = [("runtime", "node.exe")]
 

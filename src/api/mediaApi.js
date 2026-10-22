@@ -13,7 +13,23 @@ export function register(router) {
     try { filename = decodeURIComponent(filename); } catch { /* 已经是明文就原样用 */ }
 
     const mime = String(req.headers['content-type'] || '').split(';')[0].trim();
-    const media = await saveStream(req, { name: filename, mime });
+    const r = await saveStream(req, { name: filename, mime });
+
+    // PDF 上传完成的是「一整份拆好的页」，不是单个文件：
+    // 每一页都是独立 media，前端的返回结构也跟着变，让界面一次把整份加进清单。
+    if (r.kind === 'pdf') {
+      return sendJson(res, 200, {
+        kind: 'pdf',
+        pageCount: r.pageCount,
+        duplicated: !!r.duplicated,
+        pages: r.pages.map((p) => ({
+          id: p.id, kind: p.kind, name: p.name, bytes: p.bytes,
+          width: p.width, height: p.height, url: `/m/${p.id}`
+        }))
+      });
+    }
+
+    const media = r;
     sendJson(res, 200, {
       id: media.id,
       sha256: media.sha256,
@@ -53,6 +69,9 @@ export function register(router) {
         name: m.name,
         createdAt: m.created_at,
         used: m.used,
+        // PDF 拆出来的页：界面靠这两个字段把它们归到同一份 PDF 下，不要散成一堆图
+        pageNo: m.page_no,
+        srcSha: m.src_sha,
         url: `/m/${m.id}`
       }))
     });
@@ -67,11 +86,15 @@ export function register(router) {
 
   // 规格体检：19 寸是 5:4，16:9 的图上下各浪费 152px，实得只有 25% 面积
   router.get('/api/media/advice', (req, res) => {
+    // PDF 拆出来的页不算：比例是原 PDF 页面决定的，改不了，报出来只会让人困惑
     const ratio = q.all(`
       SELECT id, name, width, height FROM media
-       WHERE kind = 'image' AND width > 0 AND ABS(width * 1.0 / height - 1.25) > 0.08
+       WHERE kind = 'image' AND width > 0 AND src_sha = ''
+         AND ABS(width * 1.0 / height - 1.25) > 0.08
     `);
-    const oversized = q.all(`SELECT id, name, bytes FROM media WHERE kind = 'image' AND bytes > 400 * 1024`);
+    const oversized = q.all(
+      `SELECT id, name, bytes FROM media WHERE kind = 'image' AND src_sha = '' AND bytes > 400 * 1024`
+    );
     sendJson(res, 200, {
       ratioWarnings: ratio.map((m) => ({ ...m, ratio: +(m.width / m.height).toFixed(2) })),
       sizeWarnings: oversized.map((m) => ({ ...m, kb: Math.round(m.bytes / 1024) }))

@@ -20,8 +20,12 @@ const FLIP_TIMEOUT_MS = 10_000;  // 等渲染层 ack 的上限，超时算翻转
  * 用它判断"服务端说内容变了，但我这套其实没动"——避免别的工序改动把全厂屏都闪一下。
  */
 function fpOf(items) {
+  // 显示方式（fit/zoom）必须进指纹。只算 mediaId+dwell 的话，
+  // 工程部把某张图从"适应"改成"铺满 + 放大 150%"保存后，指纹一样，
+  // 终端会当成"内容没变"不重翻 —— 人以为改生效了，屏上还是老样子。
   return (items || [])
-    .map((it) => `${it.mediaId || it.file || ''}:${it.dwellSec || 0}:${it.kind || ''}`)
+    .map((it) => `${it.mediaId || it.file || ''}:${it.dwellSec || 0}:${it.kind || ''}` +
+                 `:${it.fit || 'contain'}:${it.zoom || 100}`)
     .join('|');
 }
 

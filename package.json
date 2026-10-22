@@ -1,6 +1,6 @@
 {
   "name": "online-vwi",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "private": true,
   "description": "在线VWI发布系统 —— 型号 → 工序 → 播放清单，服务端遥控换型",
   "type": "module",
@@ -18,7 +18,9 @@
     "gui:dev": "electron . --dev",
     "gui:dist": "electron-builder --win portable --x64"
   },
-  "dependencies": {},
+  "dependencies": {
+    "mupdf": "^1.28.1"
+  },
   "devDependencies": {
     "electron": "40.10.3",
     "electron-builder": "^26.15.3"
@@ -38,6 +40,7 @@
       "server-gui/assets/**",
       "src/**",
       "public/**",
+      "node_modules/mupdf/**",
       "!data/**"
     ],
     "win": {

@@ -218,6 +218,10 @@ function startSync() {
           url: it.url,
           kind: it.kind,
           dwellSec: it.dwellSec,
+          // fit/zoom 必须显式透传：这里是白名单式拷贝，漏一个字段渲染层就永远收不到，
+          // 表现为"清单里改了铺满/放大，屏上没反应"（排查过一轮）。
+          fit: it.fit || 'contain',
+          zoom: it.zoom || 100,
           name: it.name,
           mediaId: it.mediaId
         }))

@@ -136,6 +136,7 @@ body.stale .model .op { border-left-color: rgba(255, 255, 255, .4); }
   align-items: center;
   justify-content: center;
   visibility: hidden;
+  overflow: hidden;         /* 放大超过 100% 时只裁在本层内，不能盖到顶栏和状态条 */
 }
 .layer.on { visibility: visible; }
 
@@ -143,8 +144,12 @@ body.stale .model .op { border-left-color: rgba(255, 255, 255, .4); }
 .layer video {
   width: 100%;
   height: 100%;
-  object-fit: contain;      /* 指导书不能裁：宁可留黑边，不可切掉半张图 */
+  /* 默认不裁：指导书少一行字就可能是致命误操作。
+     要裁成铺满、或放大到 2 倍看小字，由清单里每项自己的 fit/zoom 决定，
+     下面两行只是默认值，真正的值由 player.js 按项写进 style。 */
+  object-fit: contain;
   display: block;
+  transform-origin: center center;
 }
 .layer [hidden] { display: none !important; }
 
