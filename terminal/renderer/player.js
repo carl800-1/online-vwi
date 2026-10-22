@@ -340,7 +340,8 @@ function renderStatus(snap) {
     hint.hidden = true;
   }
 
-  $('pCode').textContent = (snap.op || '') ;
+  // 顶栏身份要带线体：一线 OP30 和二线 OP30 是两块屏，工人得能确认自己在哪条线上
+  $('pCode').textContent = (snap.line ? snap.line + ' / ' : '') + (snap.op || '');
   if (snap.modelCode) $('mCode').textContent = snap.modelCode;
   renderWait();
 }

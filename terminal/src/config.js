@@ -1,13 +1,59 @@
-// 配置与路径。终端只有两种身份信息：op（本机是哪道工序）和 server（服务器地址）。
+// 配置与路径。终端只有三种身份信息：line（哪条线体）、op（哪道工序）、server（服务器地址）。
 const path = require('node:path');
 const fs = require('node:fs');
 const os = require('node:os');
 
 // 路径全部用 ASCII，且放在 %LOCALAPPDATA%，避免 Program Files 只读、
 // 也避免中文目录在 file:// 里编码出错（屏幕上的参数只影响显示，不影响磁盘）。
-// VWI_TERMINAL_ROOT 仅用于自动化测试，让它跑到临时目录里，不碰真机数据。
-const ROOT = process.env.VWI_TERMINAL_ROOT ||
-  path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'online-vwi-terminal');
+// ESOP_TERMINAL_ROOT / VWI_TERMINAL_ROOT 仅用于自动化测试，让它跑到临时目录里，不碰真机数据。
+const ROOT_NAME = 'esop-client';          // 1.7.0 起叫这个
+const LEGACY_NAME = 'online-vwi-terminal'; // 1.6.0 及以前
+
+function localAppData() {
+  return process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+}
+
+/**
+ * 定配置目录，并把老目录搬过来。
+ *
+ * 1.7.0 把目录名从 online-vwi-terminal 改成 esop-client。**这一步不能把现场的屏搞成空配置**：
+ * 5 台屏都是装机向导填过地址和工序的，配置丢了就得逐台重装，所以这里自动迁移。
+ *
+ * 迁移顺序：
+ *   ① rename —— 同一个盘符、同一个父目录，瞬间完成，连 content 缓存一起搬，不复制字节
+ *   ② 整目录 cpSync —— rename 失败（被杀软锁、跨卷）时兜底
+ *   ③ 都失败 —— **退回继续用老目录**，宁可名字难看也不能让屏变成"未装机"
+ */
+function resolveRoot() {
+  const forced = process.env.ESOP_TERMINAL_ROOT || process.env.VWI_TERMINAL_ROOT;
+  if (forced) return { root: forced, migrated: false, from: 'env' };
+
+  const base = localAppData();
+  const root = path.join(base, ROOT_NAME);
+  const legacy = path.join(base, LEGACY_NAME);
+
+  if (!fs.existsSync(legacy)) return { root, migrated: false };
+  if (fs.existsSync(path.join(root, 'config.json'))) return { root, migrated: false };
+
+  // rename 的目标必须是"不存在或空"的目录，先把可能残留的空目录清掉
+  try { fs.rmSync(root, { recursive: false, force: true }); } catch { /* 非空就留着，走 copy */ }
+
+  try {
+    fs.renameSync(legacy, root);
+    return { root, migrated: true, how: 'rename', legacy };
+  } catch { /* 继续兜底 */ }
+
+  try {
+    fs.mkdirSync(root, { recursive: true });
+    fs.cpSync(legacy, root, { recursive: true, errorOnExist: false, force: false });
+    return { root, migrated: true, how: 'copy', legacy };
+  } catch (e) {
+    return { root: legacy, migrated: false, error: e.message };
+  }
+}
+
+const RESOLVED = resolveRoot();
+const ROOT = RESOLVED.root;
 
 const PATHS = {
   root: ROOT,
@@ -20,6 +66,7 @@ const PATHS = {
 };
 
 const DEFAULTS = {
+  line: '',                      // 线体编码（L1…）。留空 = 跟随服务端当前启用的线体
   op: '',                        // 必填：OP10..OP50
   server: '',                    // 必填：http://192.168.x.x:8092
   kiosk: true,
@@ -44,6 +91,7 @@ function readJson(file, fallback = null) {
 
 function normalize(raw) {
   const c = { ...DEFAULTS, ...(raw || {}) };
+  c.line = String(c.line || '').trim().toUpperCase();
   c.op = String(c.op || '').trim().toUpperCase();
   c.server = String(c.server || '').trim().replace(/\/+$/, '');
   if (c.server && !/^https?:\/\//i.test(c.server)) c.server = 'http://' + c.server;
@@ -97,4 +145,4 @@ function save(c) {
   return clean;
 }
 
-module.exports = { PATHS, DEFAULTS, load, save, isValid, normalize, ensureDirs, readJson, exeDir };
+module.exports = { PATHS, DEFAULTS, load, save, isValid, normalize, ensureDirs, readJson, exeDir, MIGRATION: RESOLVED };

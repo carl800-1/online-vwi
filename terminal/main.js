@@ -23,13 +23,22 @@ process.on('unhandledRejection', (e) => {
   console.error('[main] 未处理的 Promise 拒绝：', e);
 });
 
-app.setAppUserModelId('com.frank.online-vwi-terminal');
+app.setAppUserModelId('com.frank.esop-client');
 
 // userData 必须在抢单实例锁之前定下来：Electron 的锁文件就放在 userData 里。
 // 顺序反了会出现两种毛病——缓存/lib 落到默认的 %APPDATA%\Electron，
-// 以及用 VWI_TERMINAL_ROOT 起测试实例时互相抢同一把锁、第二台直接退出。
+// 以及用 ESOP_TERMINAL_ROOT 起测试实例时互相抢同一把锁、第二台直接退出。
 config.ensureDirs();                                 // setPath 前先建好，避免首启找不到目录
-app.setPath('userData', config.PATHS.root);          // %LOCALAPPDATA%\online-vwi-terminal
+app.setPath('userData', config.PATHS.root);          // %LOCALAPPDATA%\esop-client（1.7.0 起改名）
+
+// 目录改名是有代价的动作，必须留痕：现场出"配置没了"时，先看这一行。
+// 成功走 INFO，失败才走 ERR —— 成功记成错误会让排查方向上反。
+const mig = config.MIGRATION;
+if (mig.migrated) {
+  console.log('[config] 配置目录已迁移（' + mig.how + '）：' + mig.legacy + ' -> ' + mig.root);
+} else if (mig.error) {
+  console.error('[config] 配置目录迁移失败，继续使用旧目录 ' + mig.root + '：' + mig.error);
+}
 
 // 单实例：双击第二次不再开一个窗口，而是把已有窗口顶出来
 if (!app.requestSingleInstanceLock()) {
@@ -143,7 +152,7 @@ function createPlayerWindow() {
     fullscreen: !DEV && cfg.kiosk !== false,
     autoHideMenuBar: true,
     backgroundColor: '#0f1319',
-    title: `在线VWI终端 · ${cfg.op}`,
+    title: `ESOP 客户端 · ${cfg.line ? cfg.line + ' / ' : ''}${cfg.op}`,
     webPreferences: baseWebPreferences()
   });
 
@@ -180,7 +189,7 @@ function createSetupWindow() {
     resizable: false,
     frame: true,
     backgroundColor: '#f6f8fb',
-    title: '终端设置 · 在线VWI',
+    title: 'ESOP 客户端 · 设置',
     webPreferences: baseWebPreferences()
   });
   setupWin.setMenuBarVisibility(false);
@@ -199,9 +208,36 @@ function createSetupWindow() {
 
 // ───────────────────────── 同步 ─────────────────────────
 
+/**
+ * 采集本机参数给管理端右栏用：分辨率 / 版本 / 磁盘剩余。
+ * 分辨率取主显示器的**物理像素**（size × scaleFactor）——
+ * 现场有 1080p 也有 4K 屏，只报逻辑像素会让人以为两台机器一样。
+ */
+function collectMeta() {
+  let res = '';
+  try {
+    const d = screen.getPrimaryDisplay();
+    const w = Math.round(d.size.width * (d.scaleFactor || 1));
+    const h = Math.round(d.size.height * (d.scaleFactor || 1));
+    res = `${w}x${h}`;
+  } catch { /* 无图形环境（无头测试）就没有分辨率 */ }
+
+  let free = 0;
+  try {
+    // statfs 在 Node 18.15+ 才有；老运行时降级为 0（界面显示"—"）
+    const st = fs.statfsSync(cache.PATHS.root);
+    free = Number(st.bavail) * Number(st.bsize);
+  } catch { /* ignore */ }
+
+  return { res, ver: app.getVersion(), free };
+}
+
 function startSync() {
   if (syncer) return;
-  syncer = new Syncer({ op: cfg.op, server: cfg.server }, { flipHandler });
+  syncer = new Syncer({ line: cfg.line || '', op: cfg.op, server: cfg.server }, { flipHandler });
+  syncer.setMeta(collectMeta());
+  // 磁盘剩余会变，30 秒刷一次就够；分辨率不变但也一起刷，代码简单
+  setInterval(() => syncer && syncer.setMeta(collectMeta()), 30_000).unref?.();
 
   // 主进程 → 渲染层：请求翻转，等渲染层确认后才算生效
   function flipHandler(view) {
@@ -273,7 +309,7 @@ function startWatchdog() {
 function createTray() {
   const img = nativeImage.createFromPath(path.join(__dirname, 'assets', 'tray.png'));
   tray = new Tray(img.isEmpty() ? nativeImage.createEmpty() : img);
-  tray.setToolTip(`在线VWI终端 · ${cfg.op}`);
+  tray.setToolTip(`ESOP 客户端 · ${cfg.line ? cfg.line + ' / ' : ''}${cfg.op}`);
   console.log(`[tray] 托盘已创建${img.isEmpty() ? '（图标缺失，使用空图标）' : ''}`);
   refreshTrayMenu(syncer ? syncer.snapshot() : null);
   tray.on('double-click', () => {
@@ -283,8 +319,10 @@ function createTray() {
 
 function refreshTrayMenu(snap) {
   if (!tray) return;
-  const line = snap ? `${snap.modelCode || '—'} / ${cfg.op}　${statusText(snap)}` : `${cfg.op}　启动中`;
-  tray.setToolTip('在线VWI终端 · ' + line);
+  const line = snap
+    ? `${cfg.line ? cfg.line + ' / ' : ''}${cfg.op} · ${snap.modelCode || '—'}　${statusText(snap)}`
+    : `${cfg.line ? cfg.line + ' / ' : ''}${cfg.op}　启动中`;
+  tray.setToolTip('ESOP 客户端 · ' + line);
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: line, enabled: false },
     { label: `服务器 ${cfg.server}`, enabled: false },
@@ -337,6 +375,7 @@ function openSetupFromTray() {
 function registerIpc() {
   // 渲染层启动时问一次，避免错过第一条 vwi:view（主进程可能已经推过冷启动画面）
   ipcMain.handle('vwi:snapshot', () => ({
+    line: cfg.line || '',
     op: cfg.op,
     kiosk: cfg.kiosk,
     dev: DEV,
@@ -362,18 +401,29 @@ function registerIpc() {
     else console.log('[renderer]', msg);
   });
 
-  // 装机向导：探服务器，拿工序清单
+  // 装机向导：探服务器，拿线体与工序清单
+  // 为什么要拿线体：一台屏属于「某条线的某道工序」，只报 op 在多线现场会串内容。
   ipcMain.handle('vwi:probe', async (_e, server) => {
     const s = String(server || '').trim().replace(/\/+$/, '');
     const url = /^https?:\/\//i.test(s) ? s : 'http://' + s;
     try {
-      const [procs, st] = await Promise.all([
-        net.getJson(url, '/api/processes', { timeoutMs: 8000 }),
+      const [lines, st] = await Promise.all([
+        net.getJson(url, '/api/lines', { timeoutMs: 8000 }),
         net.getJson(url, '/api/status', { timeoutMs: 8000 }).catch(() => null)
       ]);
+      const list = lines.lines || [];
+      const active = list.find((l) => l.enabled) || list[0] || null;
+      const procs = active
+        ? await net.getJson(url, '/api/processes?lineId=' + encodeURIComponent(active.id), { timeoutMs: 8000 })
+        : { processes: [] };
       return {
         ok: true,
         server: url,
+        lines: list.map((l) => ({
+          id: l.id, code: l.code, name: l.name, enabled: !!l.enabled,
+          processes: l.processes, coverage: l.coverage
+        })),
+        activeLineCode: active?.code || '',
         processes: procs.processes || [],
         version: st?.version || '',
         modelCode: st?.modelCode || ''
@@ -383,12 +433,22 @@ function registerIpc() {
     }
   });
 
+  // 换了线体要重新取工序：不同线体的工序数、名字都可能不一样
+  ipcMain.handle('vwi:line-processes', async (_e, { server, lineId }) => {
+    try {
+      const r = await net.getJson(server, '/api/processes?lineId=' + encodeURIComponent(lineId), { timeoutMs: 8000 });
+      return { ok: true, processes: r.processes || [] };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  });
+
   ipcMain.handle('vwi:save-config', (_e, input) => {
     const next = config.save(input);
     if (!config.isValid(next)) return { ok: false, error: '工序或服务器地址不完整' };
     cfg = next;
     applyAutoStart();
-    console.log(`[config] 已保存 op=${cfg.op} server=${cfg.server}`);
+    console.log(`[config] 已保存 line=${cfg.line || '(跟随服务端)'} op=${cfg.op} server=${cfg.server}`);
 
     // 配置变了就重开播放窗口
     stopSync();
@@ -431,7 +491,7 @@ app.whenReady().then(() => {
   installLogger();
   cfg = config.load();
   console.log('──────── 终端启动 ────────');
-  console.log(`op=${cfg.op || '(未配置)'} server=${cfg.server || '(未配置)'} config=${config.PATHS.config}`);
+  console.log(`line=${cfg.line || '(跟随服务端)'} op=${cfg.op || '(未配置)'} server=${cfg.server || '(未配置)'} config=${config.PATHS.config}`);
   console.log(`内容目录 ${cache.PATHS.current}`);
 
   registerIpc();

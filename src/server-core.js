@@ -1,4 +1,4 @@
-// 在线 VWI 发布系统 · 服务端核心
+// ESOP 发布系统 · 服务端核心
 //
 // 原来这段逻辑整个塞在 server.js 里，只有命令行能跑。现在剥出来是为了让同一份
 // 服务被三种入口复用：
@@ -14,7 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { openDb, seed, q } from './db.js';
+import { openDb, seed, ensureDefaultProfile, q } from './db.js';
 import { findMedia, serveMedia, mediaStats } from './media.js';
 import { createRouter } from './router.js';
 import { initSwitch } from './switch.js';
@@ -26,6 +26,7 @@ import { register as registerPlaylist } from './api/playlist.js';
 import { register as registerMediaApi } from './api/mediaApi.js';
 import { register as registerState } from './api/state.js';
 import { register as registerDisplay } from './api/display.js';
+import { register as registerProfiles } from './api/profiles.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -105,20 +106,21 @@ export function portFromArgv(argv = process.argv) {
  * @param {string} opts.root  代码根目录。默认取本文件的上上级（项目根）
  * @param {string} opts.data  数据目录。默认 root/data
  * @param {string} opts.publicDir 静态资源目录。默认 root/public
- * @param {number|string} opts.port 监听端口。默认 VWI_PORT，再默认 8092
+ * @param {number|string} opts.port 监听端口。默认 ESOP_PORT（兼容旧名 VWI_PORT），再默认 8092
  */
 export function startServer(opts = {}) {
   if (instance) return instance;
 
   const ROOT = opts.root || path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-  const DATA = opts.data || process.env.VWI_DATA || path.join(ROOT, 'data');
+  const DATA = opts.data || process.env.ESOP_DATA || process.env.VWI_DATA || path.join(ROOT, 'data');
   const PUBLIC = opts.publicDir || path.join(ROOT, 'public');
   // 版本号统一从 src/version.js 取，只认 package.json 一处。
-  const PORT = int(opts.port || process.env.VWI_PORT || portFromArgv() || 8092, 8092);
+  const PORT = int(opts.port || process.env.ESOP_PORT || process.env.VWI_PORT || portFromArgv() || 8092, 8092);
 
   fs.mkdirSync(DATA, { recursive: true });
   openDb(DATA);
   const seeded = seed();
+  ensureDefaultProfile();
   initSwitch();
 
   const router = createRouter();
@@ -127,6 +129,7 @@ export function startServer(opts = {}) {
   registerMediaApi(router);
   registerState(router);
   registerDisplay(router);
+  registerProfiles(router);
 
   const server = http.createServer(async (req, res) => {
     let url;

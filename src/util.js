@@ -15,8 +15,8 @@ export function now() {
   return Date.now();
 }
 
-/** 人类可读的编码：VWI-7K2M9Q，便于现场口头报读 */
-export function humanCode(prefix = 'VWI') {
+/** 人类可读的编码：ESOP-7K2M9Q，便于现场口头报读 */
+export function humanCode(prefix = 'ESOP') {
   const chars = 'ACDEFGHJKLMNPQRTUVWXY34679';
   let s = '';
   const b = crypto.randomBytes(6);
@@ -81,4 +81,25 @@ export function dayStart(ms) {
   const d = new Date(ms);
   d.setHours(0, 0, 0, 0);
   return d.getTime();
+}
+
+/**
+ * 从终端请求里抠出「这台机器长什么样」。
+ *
+ * 全部走 query：终端主进程拼 URL 最省事，也不用为心跳单独开一个 POST。
+ * 字段都可选 —— 老版本终端只带 op，缺的字段就保留上一次的值，不会把档案冲成空。
+ * 分辨率用 res=1920x1080，版本用 ver=1.6.0，磁盘剩余 MB 用 free，下载进度用 pd/pt。
+ */
+export function termMeta(ctx) {
+  const qy = ctx.query || {};
+  const meta = {};
+  if (ctx.ip) meta.ip = ctx.ip;
+  if (qy.res) meta.res = qy.res;
+  if (qy.ver) meta.ver = qy.ver;
+  if (qy.free !== undefined && qy.free !== '') meta.free = Number(qy.free) * 1024 * 1024;
+  if (qy.pd !== undefined && qy.pd !== '') meta.done = Number(qy.pd);
+  if (qy.pt !== undefined && qy.pt !== '') meta.total = Number(qy.pt);
+  if (qy.model) meta.modelCode = String(qy.model).slice(0, 32);
+  if (qy.st) meta.status = qy.st;
+  return meta;
 }

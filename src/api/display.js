@@ -1,17 +1,22 @@
-// 终端接口：只靠 op 认身份，不鉴权（内网 + 一期不做权限）
+// 终端接口：身份 = 线体 + 工序，不鉴权（内网 + 一期不做权限）
+//
+// 为什么身份要加线体：一线和二线的 OP30 是两块屏、两份内容，
+// 只报 op 的话服务端分不清该给谁。不带 line 时由 router.js 回落到当前启用线体，
+// 这样现场老终端（config.json 里没有 line）升级后照常工作。
 import { q } from '../db.js';
 import { sendJson, badRequest } from '../router.js';
 import { touch, getState } from '../switch.js';
+import { termMeta } from '../util.js';
 
 export function register(router) {
   /**
-   * 拉清单：GET /display/playlist?op=OP30&model=X300
-   * model 可给 code 也可给 id；不给就用服务端当前型号。
+   * 拉清单：GET /display/playlist?line=L1&op=OP30&model=X300
+   * model 可给 code 也可给 id；不给就用这条线的当前型号。
    * 终端用这个接口既做"切换下载"，也做"首次装机补内容"——同一套代码，两条路径。
    */
   router.get('/display/playlist', (req, res, ctx) => {
-    const process = ctx.process;
-    touch(process.code);
+    const { process, line } = ctx;
+    touch(line.id, process.code, termMeta(ctx));
 
     const want = String(ctx.query.model || '').trim();
     let model;
@@ -19,12 +24,14 @@ export function register(router) {
       model = q.get('SELECT * FROM model WHERE code = ? OR id = ?', want, want);
       if (!model) throw badRequest(`型号 ${want} 不存在`);
     } else {
-      const cur = getState().currentModelId;
+      const cur = getState(line.id).currentModelId;
       model = cur ? q.get('SELECT * FROM model WHERE id = ?', cur) : null;
       if (!model) {
         return sendJson(res, 200, {
+          lineCode: line.code, lineName: line.name,
           modelCode: '', modelId: '', processCode: process.code, processName: process.name,
-          items: [], empty: true, count: 0, totalBytes: 0, message: '服务端还没有指定当前型号'
+          items: [], empty: true, count: 0, totalBytes: 0,
+          message: `「${line.name}」还没有指定当前型号`
         });
       }
     }
@@ -39,6 +46,8 @@ export function register(router) {
     );
 
     sendJson(res, 200, {
+      lineCode: line.code,
+      lineName: line.name,
       modelCode: model.code,
       modelId: model.id,
       modelName: model.name,
@@ -69,17 +78,20 @@ export function register(router) {
     });
   }, { op: true });
 
-  // 终端启动自检：确认 op 有效、拿到当前型号，避免一开机就黑屏摸索
+  // 终端启动自检：确认线体/工序有效、拿到当前型号，避免一开机就黑屏摸索
   router.get('/display/boot', (req, res, ctx) => {
-    const process = ctx.process;
-    touch(process.code);
-    const st = getState();
+    const { process, line } = ctx;
+    touch(line.id, process.code, termMeta(ctx));
+    const st = getState(line.id);
     const cur = st.currentModelId ? q.get('SELECT code, name FROM model WHERE id = ?', st.currentModelId) : null;
     const have = q.get(
       'SELECT COUNT(*) n FROM item WHERE model_id = ? AND process_id = ?',
       st.currentModelId || '', process.id
     ).n;
     sendJson(res, 200, {
+      lineId: line.id,
+      lineCode: line.code,
+      lineName: line.name,
       processCode: process.code,
       processName: process.name,
       modelId: st.currentModelId || '',

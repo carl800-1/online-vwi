@@ -43,6 +43,9 @@ class Syncer extends EventEmitter {
     this.pendingCode = '';
     this.status = 'boot';
     this.progress = { done: 0, total: 0 };
+    // 机器参数：分辨率 / 版本 / 磁盘剩余。由 main.js 注入（渲染进程、主进程各有一半信息），
+    // 这里只负责随心跳带上去 —— 管理端右栏靠它显示每台屏的实际情况。
+    this.meta = { res: '', ver: '', free: 0 };
     this.missing = [];
     this.online = [];
     this.serverSeq = 0;
@@ -63,6 +66,7 @@ class Syncer extends EventEmitter {
 
   snapshot() {
     return {
+      line: this.cfg.line || '',
       op: this.cfg.op,
       server: this.cfg.server,
       status: this.status,
@@ -81,9 +85,25 @@ class Syncer extends EventEmitter {
     };
   }
 
+  /** 由 main.js 在启动时和每 30 秒刷新一次（磁盘剩余会变，分辨率一般不变） */
+  setMeta(meta) {
+    if (meta && typeof meta === 'object') this.meta = { ...this.meta, ...meta };
+  }
+
+  /** 拼在 URL 上的机器参数；字段顺序固定，便于抓包看 */
+  metaQuery() {
+    const p = [];
+    if (this.meta.res) p.push('res=' + encodeURIComponent(this.meta.res));
+    if (this.meta.ver) p.push('ver=' + encodeURIComponent(this.meta.ver));
+    if (this.meta.free) p.push('free=' + Math.round(this.meta.free / 1048576));
+    return p.length ? '&' + p.join('&') : '';
+  }
+
   start() {
     if (this.running) return;
     this.running = true;
+    // 换过线体就当成空盘：这条线的内容和上一条线完全是两套，不能拿来顶上
+    cache.setLine(this.cfg.line || '');
     cache.cleanUpOnStart();
 
     // ── 先播本地内容，不等网络 ──
@@ -99,21 +119,69 @@ class Syncer extends EventEmitter {
       this.status = 'boot';
     }
     this.emitStatus(true);
+    this.startTelemetry();
     this.loop();
   }
 
   stop() {
     this.running = false;
+    this.stopTelemetry();
     this.abortInflight();
     if (this._wakeRetry) { clearTimeout(this._wakeRetry); this._wakeRetry = null; }
   }
 
+  // ───────────── 遥测 ─────────────
+
+  /**
+   * 每 5 秒把「机器参数 + 下载进度」推给服务端。
+   *
+   * 为什么不搭在长轮询的 query 上：长轮询是"等变化"的，25 秒才回一次；
+   * 而管理端右栏的进度条要 2 秒级刷新 —— 挂在长轮询上既看不到进度，又白白把耳朵堵住。
+   * 这个请求失败一律静默：遥测丢了不影响生产，下一轮还会再来。
+   */
+  startTelemetry() {
+    this.stopTelemetry();
+    const tick = async () => {
+      if (!this.running) return;
+      try {
+        const body = {
+          op: this.cfg.op,
+          done: this.progress.done,
+          total: this.progress.total,
+          st: this.status
+        };
+        if (this.cfg.line) body.line = this.cfg.line;
+        if (this.meta.res) body.res = this.meta.res;
+        if (this.meta.ver) body.ver = this.meta.ver;
+        if (this.meta.free) body.free = Math.round(this.meta.free / 1048576);
+        const m = this.pendingCode || this.appliedCode;
+        if (m) body.model = m;
+        await net.postJson(this.cfg.server, '/api/telemetry', body, { timeoutMs: 6000 });
+      } catch { /* 遥测失败无所谓，别在屏上留痕迹 */ }
+    };
+    this._telTimer = setInterval(tick, 5000);
+    this._telTimer.unref?.();
+    tick();
+  }
+
+  stopTelemetry() {
+    if (this._telTimer) { clearInterval(this._telTimer); this._telTimer = null; }
+  }
+
   // ───────────── 主循环 ─────────────
+
+  /** 线体参数：配了才带，没配让服务端按"当前启用的线体"回落（老现场就是这么跑的） */
+  lineQuery() {
+    return this.cfg.line ? `&line=${encodeURIComponent(this.cfg.line)}` : '';
+  }
 
   async loop() {
     while (this.running) {
       try {
-        const st = await net.getJson(this.cfg.server, `/api/state?op=${encodeURIComponent(this.cfg.op)}&since=${this.lastRev}`);
+        const st = await net.getJson(
+          this.cfg.server,
+          `/api/state?op=${encodeURIComponent(this.cfg.op)}&since=${this.lastRev}${this.lineQuery()}${this.metaQuery()}`
+        );
         if (!this.running) return;
         this.onLinkUp();
         this.lastRev = Number(st.rev) || this.lastRev;
@@ -263,7 +331,8 @@ class Syncer extends EventEmitter {
       try {
         const list = await net.getJson(
           this.cfg.server,
-          `/display/playlist?op=${encodeURIComponent(this.cfg.op)}&model=${encodeURIComponent(modelCode || modelId)}`
+          `/display/playlist?op=${encodeURIComponent(this.cfg.op)}` +
+          `&model=${encodeURIComponent(modelCode || modelId)}${this.lineQuery()}`
         );
         const items = list.items || [];
         const code = list.modelCode || modelCode || '';
@@ -346,8 +415,10 @@ class Syncer extends EventEmitter {
 
   async reportReady(modelId) {
     try {
-      await net.postJson(this.cfg.server, '/api/ready', { op: this.cfg.op, modelId });
-      console.log(`[sync] 已举手 ${this.cfg.op} / ${modelId}`);
+      const body = { op: this.cfg.op, modelId };
+      if (this.cfg.line) body.line = this.cfg.line;
+      await net.postJson(this.cfg.server, '/api/ready', body);
+      console.log(`[sync] 已举手 ${this.cfg.line || '(当前线体)'} / ${this.cfg.op} / ${modelId}`);
     } catch (e) {
       // 409 = 目标已变更，无所谓，下一轮会按新目标重新来
       // 其它错误（断网）也不致命：服务端会超时强翻，本地照样能自愈
@@ -369,7 +440,7 @@ class Syncer extends EventEmitter {
         return;
       }
 
-      cache.commit({ modelCode, modelId, seq: this.serverSeq }, prep.items);
+      cache.commit({ modelCode, modelId, seq: this.serverSeq, line: this.cfg.line || '' }, prep.items);
       this.appliedModelId = modelId;
       this.appliedCode = modelCode;
       this.appliedFp = fpOf(prep.items);

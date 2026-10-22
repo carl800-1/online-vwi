@@ -1,6 +1,6 @@
 {
   "name": "online-vwi",
-  "version": "1.6.0",
+  "version": "1.9.0",
   "private": true,
   "description": "在线VWI发布系统 —— 型号 → 工序 → 播放清单，服务端遥控换型",
   "type": "module",
@@ -26,8 +26,8 @@
     "electron-builder": "^26.15.3"
   },
   "build": {
-    "appId": "com.frank.online-vwi-server",
-    "productName": "在线VWI服务端",
+    "appId": "com.frank.esop-server",
+    "productName": "ESOP-Server",
     "asar": false,
     "directories": {
       "output": "server-gui/dist",
@@ -55,9 +55,9 @@
       ]
     },
     "portable": {
-      "artifactName": "online-vwi-server-gui-${version}-x64.exe",
+      "artifactName": "ESOP-Server.exe",
       "requestExecutionLevel": "user",
-      "unpackDirName": "online-vwi-server-gui"
+      "unpackDirName": "esop-server"
     }
   }
 }

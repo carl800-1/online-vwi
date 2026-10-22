@@ -3,59 +3,71 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>在线 VWI 发布 · 管理端</title>
+<title>E-SOP 系统 · 管理端</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
+<!-- 顶栏只留系统名。换型、在线数、当前型号都在别处：
+     换型在底栏（一天几次的低频操作），在线/当前/版本在左下角（一眼扫的信息）。
+     顶部是"今天在干什么"的入口，越干净越好找。 -->
 <header class="topbar">
   <div class="brand">
-    <strong>在线 VWI 发布</strong>
-    <span>型号 → 工序 → 播放清单</span>
+    <strong>E-SOP 系统</strong>
+    <span>在线作业指导书发布 · 线体 → 机种 → 工序</span>
   </div>
-
-  <div class="switcher">
-    <label for="switchSel">换型到</label>
-    <select id="switchSel"></select>
-    <button class="btn on-dark sm" id="switchBtn">切换</button>
-  </div>
-
-  <div class="spacer"></div>
-
-  <div class="stat">
-    <span class="dot" id="dot"></span>
-    <span>在线 <b id="onlineTxt">0</b></span>
-  </div>
-  <div class="stat">当前 <b id="curTxt">未指定</b></div>
-
-  <!-- 只在桌面程序里出现；网页版打开时 body 没有 is-desktop，整块隐藏 -->
-  <div class="stat desk-only">v<b id="verTxt">—</b></div>
 </header>
 
 <div class="shell">
-  <!-- ========== 左侧：功能模块 ==========
-       一共就两个真正干活的模块（填内容、管素材），加一个系统信息。
-       做成固定竖排而不是顶部标签：切来切去时位置不变，手不用重新找。 -->
+  <!-- ========== 左侧：线体选择器 + 模块 ==========
+       线体放最上面，因为它是"今天在哪儿干活"的第一层身份：
+       选错线体，后面看的内容全都是另一条线上的，填了也白填。 -->
   <nav class="side">
-    <button class="side-item on" data-view="matrix">
-      <span class="ico">▦</span>
-      <span>内容矩阵</span>
-    </button>
-    <button class="side-item" data-view="media">
-      <span class="ico">▤</span>
-      <span>媒体库</span>
-    </button>
+    <div class="side-block">
+      <div class="side-label">
+        <span>线体</span>
+        <button class="mini" id="addLineBtn" title="新建线体">+</button>
+      </div>
+      <!-- 启用中的那条恒排第一，其余按排序；点一下只是"看这条"，不改启用状态 -->
+      <div class="linelist" id="lineChips"></div>
+      <button class="btn sm block" id="enableLineBtn">启用线体</button>
+    </div>
+
+    <div class="side-block">
+      <div class="side-label"><span>模块</span></div>
+      <button class="side-item on" data-view="matrix">
+        <span class="ico">▦</span><span>线体内容</span>
+      </button>
+      <button class="side-item" data-view="media">
+        <span class="ico">▤</span><span>媒体库</span>
+      </button>
+      <button class="side-item" data-view="profiles">
+        <span class="ico">☰</span><span>配置库</span>
+      </button>
+    </div>
 
     <div class="side-fill"></div>
 
     <button class="side-item desk-only" id="sysBtn" title="版本、端口、终端装机地址、数据目录、开机自启">
-      <span class="ico">⚙</span>
-      <span>系统</span>
+      <span class="ico">⚙</span><span>系统</span>
     </button>
+
+    <!-- 左下角：在线台数 / 当前型号 / 版本号 —— 现场最常问的三个数 -->
+    <div class="side-foot">
+      <div class="foot-line">
+        <span class="dot" id="dot"></span>
+        <span>在线 <b id="onlineTxt">0</b></span>
+      </div>
+      <div class="foot-line">当前 <b id="curTxt">未指定</b></div>
+      <div class="foot-line dim">v<b id="verTxt">—</b></div>
+    </div>
   </nav>
 
   <!-- ========== 右侧：内容区 ========== -->
   <main class="main">
+    <!-- 正在看的这条线今天没启用时，必须马上说清楚，不能等到点了换型才发现没反应 -->
+    <div class="linewarn hide" id="lineWarn"></div>
+
     <div class="phasebar" id="phasebar">
       <span id="phaseText">正在切换…</span>
       <div class="chips" id="phaseChips"></div>
@@ -63,27 +75,47 @@
       <button class="btn sm danger" id="cancelSwitchBtn">放弃本次切换</button>
     </div>
 
-    <!-- ========== 内容矩阵 ========== -->
+    <!-- ========== 线体内容：左矩阵 + 右终端实时 ========== -->
     <section id="view-matrix" class="view">
-      <div class="panel">
-        <div class="panel-head">
-          <h2>型号 × 工序</h2>
-          <span class="sub" id="covTxt">—</span>
-          <div class="bar"><i id="covBar"></i></div>
-          <div class="spacer"></div>
-          <button class="btn sm" id="addModelBtn">+ 新型号</button>
-          <button class="btn sm" id="refreshBtn">刷新</button>
+      <div class="split">
+        <div class="col-main">
+          <div class="panel">
+            <div class="panel-head">
+              <label class="modelsel">
+                <span>机种</span>
+                <select id="modelSel"></select>
+              </label>
+              <span class="sub" id="covTxt">—</span>
+              <div class="bar"><i id="covBar"></i></div>
+              <div class="spacer"></div>
+              <button class="btn sm" id="addModelBtn">+ 新型号</button>
+              <button class="btn sm" id="refreshBtn">刷新</button>
+            </div>
+            <div class="matrix-scroll">
+              <table class="matrix" id="matrix">
+                <thead></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+          <p class="foot-hint" id="matrixHint">
+            一个格子 = 一个机种在某道工序下的播放清单。点格子进编辑；表头工序名可直接点开改。
+          </p>
         </div>
-        <div class="matrix-scroll">
-          <table class="matrix" id="matrix">
-            <thead></thead>
-            <tbody></tbody>
-          </table>
-        </div>
+
+        <!-- 右栏：这台线体上每道工序的屏现在的真实情况。
+             数据 2 秒刷一次，不参与换型判断，纯粹"看现场"。 -->
+        <aside class="col-param">
+          <div class="param-head">
+            <strong>终端实时</strong>
+            <span class="sub" id="paramSub">—</span>
+            <div class="spacer"></div>
+            <button class="iconbtn" id="paramRefresh" title="立即刷新">⟳</button>
+          </div>
+          <div class="param-body" id="termCards"></div>
+          <div class="param-foot" id="paramFoot"></div>
+        </aside>
       </div>
-      <p class="foot-hint">
-        一个格子 = 一个型号在某道工序下的播放清单。点格子进编辑；表头工序名可直接点开改。
-      </p>
     </section>
 
     <!-- ========== 媒体库 ========== -->
@@ -108,8 +140,97 @@
         <div class="mediagrid" id="mediagrid"></div>
       </div>
     </section>
+
+    <!-- ========== 配置库 ==========
+         左边是档案列表，右边是这份档案的工序要求。
+         配置库不改任何正在播的内容，只做两件事：对齐工序清单、检查实际内容缺什么。 -->
+    <section id="view-profiles" class="view hide">
+      <div class="split">
+        <div class="col-main">
+          <div class="panel">
+            <div class="panel-head">
+              <label class="modelsel">
+                <span>配置档案</span>
+                <select id="pfPick"></select>
+              </label>
+              <span class="sub" id="pfSub">按产品定义：在哪条线做、几道工序、每道要交什么</span>
+              <div class="spacer"></div>
+              <button class="btn sm" id="pfNewBtn">+ 新建配置</button>
+              <button class="btn sm primary" id="pfSaveBtn">保存</button>
+            </div>
+
+            <div class="pf-head" id="pfHead">
+              <div class="pf-fields">
+                <label>配置编码<input type="text" id="pfCode" placeholder="P-X200"></label>
+                <label>配置名称<input type="text" id="pfName" placeholder="X200 工艺配置"></label>
+                <label>关联机种<select id="pfModel"></select></label>
+              </div>
+              <div class="pf-fields">
+                <label class="pf-wide">适用线体
+                  <span class="pf-lines" id="pfLines"></span>
+                </label>
+                <label class="pf-grow">备注<input type="text" id="pfNote" placeholder="给现场看的说明"></label>
+              </div>
+              <div class="pf-ops">
+                <button class="btn sm" id="pfApplyBtn">应用到线体…</button>
+                <button class="btn sm" id="pfCheckBtn">校验现状</button>
+                <div class="spacer"></div>
+                <button class="btn sm danger" id="pfDelBtn">删除配置</button>
+              </div>            </div>
+
+            <div class="pf-steps-head">
+              <strong>工序要求</strong>
+              <span class="hint">
+                勾选 = 这道工序允许这类文件；数字 = 至少几份。没勾的类型上传时会被拒。
+              </span>
+            </div>
+            <div class="pf-steps" id="pfSteps"></div>
+            <div class="pf-addrow">
+              <button class="btn sm" id="pfAddStep">+ 添加工序</button>
+            </div>
+          </div>
+        </div>
+
+        <aside class="col-param">
+          <div class="param-head">
+            <strong>配置说明</strong>
+          </div>
+          <div class="param-body pf-help">
+            <p><b>三张表的关系</b></p>
+            <p><b>配置档案</b> 回答「这个产品怎么做」：绑哪个机种、在哪几条线做。</p>
+            <p><b>工序要求</b> 回答「要做几道、每道叫什么」。</p>
+            <p><b>类型要求</b> 回答「每道要交几张图、几段视频、几份 PDF，分辨率与体积上限」。</p>
+            <hr>
+            <p><b>它怎么跟线体内容连起来</b></p>
+            <p>配置库是<b>模板</b>，不复制内容。当它在「线体内容」里被匹配上时：</p>
+            <p>① 矩阵表头显示该工序的要求与达标情况；</p>
+            <p>② 打开清单抽屉时逐项标注「低于要求 / 配置外类型」；</p>
+            <p>③ 列表页可用它一键<b>应用到线体</b>，把参数里的工序数改成配置里的。</p>
+            <hr>
+            <p><b>匹配顺序</b></p>
+            <p>绑了机种 → 编码/名称里带机种号 → 绑了线体的通用档案 → 通用档案。</p>
+            <p class="dim">找不到匹配就只显示"未配置要求"，不会判为不合格。</p>
+          </div>
+        </aside>
+      </div>
+    </section>
   </main>
 </div>
+
+<!-- ========== 底部状态栏：换型 ==========
+     换型是"一天做几次"的动作，填内容是"一天做几十次"，所以换型让位到底部。
+     下拉与中栏的机种选择联动：选哪个机种，换的就是哪个。 -->
+<footer class="footbar">
+  <div class="foot-left">
+    <span class="stat" id="footHint">在左侧选线体，在中栏选机种</span>
+  </div>
+  <div class="spacer"></div>
+  <div class="switcher">
+    <label for="switchSel" id="switchLabel">换型到</label>
+    <select id="switchSel"></select>
+    <button class="btn sm primary" id="switchBtn">切换</button>
+  </div>
+</footer>
 
 <!-- ========== 清单编辑抽屉 ========== -->
 <div class="overlay" id="overlay"></div>
@@ -124,6 +245,9 @@
   </div>
 
   <div class="drawer-body">
+    <!-- 这道工序的配置要求（来自配置库）。没有配置就不显示，不吓人。 -->
+    <div class="reqbox hide" id="reqBox"></div>
+
     <div class="drop" id="drop">
       <div><b>把图片、视频或 PDF 拖到这里</b>　或　<button class="btn sm" id="pickBtn">选择文件</button></div>
       <div class="hint">
@@ -131,6 +255,9 @@
       </div>
     </div>
     <input type="file" id="fileInput" multiple accept="image/*,video/*,application/pdf,.pdf" style="display:none">
+
+    <!-- 上传进度：一次可能拖进来好几个文件，逐个显示百分比 -->
+    <div class="upl" id="uplList"></div>
 
     <div class="list-head">
       <strong>播放顺序</strong>
@@ -164,7 +291,7 @@
 </aside>
 
 <!-- ========== 通用对话框 ==========
-     Electron 里 window.prompt() 是直接抛异常的（"prompt() is and will not be supported"），
+     Electron 里 window.prompt() 是直接抛异常的（"prompt() and will not be supported"），
      confirm 也是英文按钮的原生框。全部换成这一个自己画的，顺便能一次问多个字段。 -->
 <div class="modal" id="dialog">
   <div class="modal-card dlg-card">

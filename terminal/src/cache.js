@@ -19,6 +19,23 @@ const net = require('./net');
 let index = null;                  // 内存中的索引，磁盘上同步一份
 const pendingPurge = new Set();    // 删不掉的文件，等会儿再试
 let purgeTimer = null;
+let currentLine = '';              // 本机这次服务于哪条线体（'' = 跟随服务端）
+
+/**
+ * 换线体 = 换一整套内容。
+ * 一线 OP30 和二线 OP30 是两份不同的作业指导书，磁盘上却都叫 <sha>.png，
+ * 不认线体的话，把屏从一线挪到二线会直接播出上一套图 —— 这是最危险的一种错。
+ * 所以索引里记 lineId，对不上就当空盘重新下。
+ */
+function setLine(lineCode) {
+  currentLine = String(lineCode || '').trim();
+}
+
+function lineMatches(idx) {
+  if (!currentLine) return true;            // 没配线体：跟着服务端走，不做限制
+  if (!idx.lineCode) return true;           // 老索引没有线体字段：升级那一次放过，下次写入就有了
+  return idx.lineCode === currentLine;
+}
 
 function loadIndex() {
   if (index) return index;
@@ -71,6 +88,7 @@ function exists(p) {
 function localItems() {
   const idx = loadIndex();
   if (!idx.modelId || !idx.items.length) return null;
+  if (!lineMatches(idx)) return null;         // 换了线体：旧内容一律不用，宁可先空着
   const items = [];
   for (const it of idx.items) {
     const p = filePath(it.mediaId, it.ext);
@@ -97,6 +115,7 @@ function toFileUrl(p) {
 function hasModel(modelId) {
   const idx = loadIndex();
   if (!idx.modelId || idx.modelId !== modelId) return false;
+  if (!lineMatches(idx)) return false;
   return idx.items.every((it) => exists(filePath(it.mediaId, it.ext)));
 }
 
@@ -172,8 +191,9 @@ function pack(it, file) {
 }
 
 /** 翻转成功后写索引：从这一刻起，"本地是哪套内容"才算变了。 */
-function commit({ modelCode, modelId, seq }, items) {
+function commit({ modelCode, modelId, seq, line }, items) {
   return saveIndex({
+    lineCode: line || currentLine || '',
     modelCode: modelCode || '',
     modelId: modelId || '',
     seq: Number(seq) || 0,
@@ -272,6 +292,7 @@ function stats() {
     try { bytes += fs.statSync(path.join(PATHS.current, n)).size; } catch { /* ignore */ }
   }
   return {
+    lineCode: idx.lineCode || '',
     modelCode: idx.modelCode,
     modelId: idx.modelId,
     seq: idx.seq,
@@ -285,6 +306,7 @@ function stats() {
 
 module.exports = {
   PATHS,
+  setLine,
   loadIndex,
   saveIndex,
   localItems,

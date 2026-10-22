@@ -9,7 +9,7 @@
 
 ## 一、装机（3 步）
 
-1. 把 `online-vwi-terminal-1.1.0-x64.exe` 拷到终端机任意目录（建议 `C:\online-vwi\`）。
+1. 把 `ESOP-Client.exe` 拷到终端机任意目录（建议 `C:\VWI\`）。
 2. 同目录放一个 `config.json`：
 
    ```json

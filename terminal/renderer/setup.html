@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta http-equiv="Content-Security-Policy"
       content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
-<title>终端设置</title>
+<title>ESOP 客户端 · 设置</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -96,8 +96,8 @@
 
 <h1>终端设置</h1>
 <p class="sub">
-  每台屏只需填两项：这台屏是哪道工序，服务器在哪。<br>
-  填错会导致屏上显示别的工序的指导书 —— 装机时核对一次。
+  每台屏要填三项：接哪台服务器、属于哪条线体、是哪道工序。<br>
+  填错会导致屏上显示别的产线或工序的指导书 —— 装机时核对一次。
 </p>
 
 <div class="field">
@@ -107,6 +107,11 @@
     <button id="probe" class="ghost">检测</button>
   </div>
   <div class="msg" id="probeMsg"></div>
+</div>
+
+<div class="procs" id="lines">
+  <label>这台屏属于哪条线体？<small>每天的活不一定在同一条线上，选错就会播出另一条线的指导书</small></label>
+  <div class="procgrid" id="linegrid"></div>
 </div>
 
 <div class="procs" id="procs">
@@ -128,8 +133,11 @@
 <script>
 'use strict';
 const $ = (id) => document.getElementById(id);
-let picked = '';
+let picked = '';          // 选中的工序 code
+let pickedLine = '';      // 选中的线体 code（空 = 跟随服务端当前启用的线体）
+let pickedLineId = '';
 let probed = false;
+let serverUrl = '';
 
 $('probe').addEventListener('click', doProbe);
 $('server').addEventListener('keydown', (e) => { if (e.key === 'Enter') doProbe(); });
@@ -147,35 +155,26 @@ async function doProbe() {
     if (!r.ok) {
       setMsg('err', '连不上：' + r.error + '<br>检查服务器是否开机、防火墙是否放行 8092 端口');
       probed = false;
+      $('lines').classList.remove('show');
       $('procs').classList.remove('show');
       $('save').disabled = true;
       return;
     }
     $('server').value = r.server;
+    serverUrl = r.server;
     probed = true;
     setMsg('ok', `已连接　服务器版本 ${r.version || '—'}　当前生产型号 <b>${r.modelCode || '未指定'}</b>`);
 
-    const grid = $('procgrid');
-    grid.textContent = '';
-    for (const p of r.processes) {
-      const b = document.createElement('button');
-      b.className = 'proc';
-      b.dataset.code = p.code;
-      const t = document.createElement('b');
-      t.textContent = p.code;
-      const s = document.createElement('span');
-      s.textContent = p.name;
-      b.appendChild(t);
-      b.appendChild(s);
-      b.addEventListener('click', () => {
-        picked = p.code;
-        for (const el of grid.querySelectorAll('.proc')) el.classList.toggle('sel', el === b);
-        $('save').disabled = false;
-      });
-      grid.appendChild(b);
+    renderLines(r.lines || [], r.activeLineCode || '');
+    // 只有一条线体时不必让运维多点一次，直接按它带出工序
+    if ((r.lines || []).length === 1) {
+      pickedLine = r.lines[0].code;
+      pickedLineId = r.lines[0].id;
+      renderProcs(r.processes || []);
+    } else {
+      $('procs').classList.remove('show');
     }
-    $('procs').classList.add('show');
-    $('save').disabled = !picked;
+    $('save').disabled = !pickedLine || !picked;
   } catch (e) {
     setMsg('err', '检测失败：' + e.message);
   } finally {
@@ -183,12 +182,75 @@ async function doProbe() {
   }
 }
 
+function renderLines(lines, activeCode) {
+  const grid = $('linegrid');
+  grid.textContent = '';
+  if (!lines.length) {
+    $('lines').classList.remove('show');
+    setMsg('err', '服务器上还没有任何线体，请先在管理端「+ 新建线体」');
+    return;
+  }
+  for (const l of lines) {
+    const b = document.createElement('button');
+    b.className = 'proc' + (l.code === activeCode ? ' sel' : '');
+    b.dataset.code = l.code;
+    const t = document.createElement('b');
+    t.textContent = l.name + (l.enabled ? ' · 启用中' : '');
+    const s = document.createElement('span');
+    s.textContent = l.code + ' · ' + l.processes + ' 道工序';
+    b.appendChild(t);
+    b.appendChild(s);
+    b.addEventListener('click', async () => {
+      pickedLine = l.code;
+      pickedLineId = l.id;
+      picked = '';
+      $('save').disabled = true;
+      for (const el of grid.querySelectorAll('.proc')) el.classList.toggle('sel', el === b);
+      $('procs').classList.remove('show');
+      setMsg('', '正在读取「' + l.name + '」的工序…');
+      const r = await window.vwi.lineProcesses(serverUrl, l.id);
+      if (!r.ok) { setMsg('err', '读取工序失败：' + r.error); return; }
+      renderProcs(r.processes || []);
+      setMsg('ok', `已选「${l.name}」　共 ${(r.processes || []).length} 道工序，请选本机所在的那道`);
+    });
+    grid.appendChild(b);
+  }
+  $('lines').classList.add('show');
+}
+
+function renderProcs(list) {
+  const grid = $('procgrid');
+  grid.textContent = '';
+  if (!list.length) { $('procs').classList.remove('show'); return; }
+  for (const p of list) {
+    const b = document.createElement('button');
+    b.className = 'proc';
+    b.dataset.code = p.code;
+    const t = document.createElement('b');
+    t.textContent = p.code;
+    const s = document.createElement('span');
+    s.textContent = p.name;
+    b.appendChild(t);
+    b.appendChild(s);
+    b.addEventListener('click', () => {
+      picked = p.code;
+      for (const el of grid.querySelectorAll('.proc')) el.classList.toggle('sel', el === b);
+      $('save').disabled = false;
+    });
+    grid.appendChild(b);
+  }
+  $('procs').classList.add('show');
+}
+
 async function doSave() {
+  if (!pickedLine) { setMsg('err', '请选择线体'); return; }
   if (!picked) { setMsg('err', '请选择工序'); return; }
   if (!probed) { setMsg('err', '请先点"检测"确认服务器可达'); return; }
   $('save').disabled = true;
   setMsg('', '正在保存…');
-  const r = await window.vwi.saveConfig({ op: picked, server: $('server').value.trim() });
+  const r = await window.vwi.saveConfig({
+    line: pickedLine, op: picked, server: $('server').value.trim()
+  });
   if (!r.ok) {
     setMsg('err', r.error || '保存失败');
     $('save').disabled = false;
@@ -204,7 +266,7 @@ function setMsg(cls, html) {
 (async function init() {
   try {
     const snap = await window.vwi.snapshot();
-    if (snap.op) $('server').value = (snap.status && snap.status.server) || '';
+    if (snap.op || snap.line) $('server').value = (snap.status && snap.status.server) || '';
   } catch { /* ignore */ }
   try {
     const c = await window.vwi.cacheStats();

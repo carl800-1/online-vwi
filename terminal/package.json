@@ -1,7 +1,7 @@
 {
   "name": "online-vwi-terminal",
-  "version": "1.4.0",
-  "productName": "在线VWI终端",
+  "version": "1.7.0",
+  "productName": "ESOP-Client",
   "description": "在线 VWI 发布系统 · 工作台接收端（kiosk 全屏播放）",
   "main": "main.js",
   "type": "commonjs",
@@ -11,7 +11,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "test": "node test/sync-test.cjs",
+    "test": "node test/migrate-test.cjs && node test/sync-test.cjs",
     "preview": "node test/serve.cjs",
     "dist": "electron-builder --win portable --x64",
     "dist:dir": "electron-builder --win --dir --x64"
@@ -21,8 +21,8 @@
     "electron-builder": "^26.15.3"
   },
   "build": {
-    "appId": "com.frank.online-vwi-terminal",
-    "productName": "在线VWI终端",
+    "appId": "com.frank.esop-client",
+    "productName": "ESOP-Client",
     "directories": {
       "output": "dist",
       "buildResources": "assets"
@@ -49,9 +49,9 @@
       ]
     },
     "portable": {
-      "artifactName": "online-vwi-terminal-${version}-x64.exe",
+      "artifactName": "ESOP-Client.exe",
       "requestExecutionLevel": "user",
-      "unpackDirName": "online-vwi-terminal"
+      "unpackDirName": "esop-client"
     }
   }
 }

@@ -1,4 +1,4 @@
-// 在线 VWI 发布系统 · 服务端桌面程序主进程
+// ESOP 发布系统 · 服务端桌面程序主进程
 //
 // 这个文件的定位：把原来"双击 bat → 弹黑框 → 还要自己开浏览器"这套动作
 // 收进一个窗口里。双击 exe → 服务起来 + 界面打开，全程不碰浏览器。
@@ -38,7 +38,7 @@ const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEV = process.argv.includes('--dev') || !app.isPackaged;
 // 开机自启拉起时不弹窗口：这是常驻服务，没人会坐在机器前等它开界面
 const SILENT = process.argv.includes('--autostart');
-const WANT_PORT = int(process.env.VWI_PORT || portFromArgv() || 8092, 8092);
+const WANT_PORT = int(process.env.ESOP_PORT || process.env.VWI_PORT || portFromArgv() || 8092, 8092);
 const LOG_MAX = 2 * 1024 * 1024;
 const POLL_MS = 5000;
 
@@ -78,7 +78,7 @@ function fatal(err, where) {
   const msg = (err && err.message) || String(err);
   log('ERROR', where + '：' + msg + '\n' + ((err && err.stack) || ''));
   try {
-    dialog?.showErrorBox('在线VWI服务端 无法启动', (where ? where + '\n\n' : '') + msg +
+    dialog?.showErrorBox('ESOP 服务端 无法启动', (where ? where + '\n\n' : '') + msg +
       '\n\n如果日志里有更多信息，请把这个文件发给维护人员：\n' + (logFile || '(尚未确定数据目录)'));
   } catch { /* 连对话框都弹不出来就算了 */ }
   quitting = true;
@@ -165,7 +165,7 @@ async function askFreePort(taken) {
     if (await isPortFree(p)) free.push(p);
   }
   if (!free.length) {
-    await dialog.showErrorBox('在线VWI服务端 无法启动',
+    await dialog.showErrorBox('ESOP 服务端 无法启动',
       '端口 ' + taken + ' 被占用，而且往后连查 20 个端口都被占用了。\n请先关掉占端口的程序再启动。');
     return null;
   }
@@ -174,7 +174,7 @@ async function askFreePort(taken) {
     type: 'error',
     title: '端口被占用',
     message: '端口 ' + taken + ' 已被其它程序占用，服务端起不来。',
-    detail: '占用它的不是在线VWI服务端。\n\n' +
+    detail: '占用它的不是 ESOP 服务端。\n\n' +
       '可以改用一个空闲端口：' + free.join('、') + '\n\n' +
       '注意：改端口后，5 台终端的「服务端地址」必须同步改成新端口，否则全部连不上。\n' +
       '如果能腾出 ' + taken + '，保持原端口最省事。',
@@ -241,7 +241,7 @@ function createWindow() {
     minWidth: 1080,
     minHeight: 680,
     show: false,
-    title: '在线VWI服务端',
+    title: 'ESOP 服务端',
     icon: path.join(APP_DIR, 'assets', 'icon-256.png'),
     backgroundColor: '#eef1f6',   // 与 style.css 的 --bg 一致，避免加载瞬间白闪
     autoHideMenuBar: true,
@@ -333,9 +333,9 @@ function refreshTray() {
   const n = snap.online.length;
   const phaseCn = { idle: '空闲', preparing: '准备中', activating: '翻屏中', done: '已生效' }[snap.phase] || snap.phase || '—';
 
-  tray.setToolTip('在线VWI服务端 v' + version + ' · 端口 ' + port + ' · 在线终端 ' + n);
+  tray.setToolTip('ESOP 服务端 v' + version + ' · 端口 ' + port + ' · 在线终端 ' + n);
   tray.setContextMenu(Menu.buildFromTemplate([
-    { label: '在线VWI服务端 v' + version, enabled: false },
+    { label: 'ESOP 服务端 v' + version, enabled: false },
     { label: '服务运行中 · 端口 ' + port, enabled: false },
     { label: '在线终端 ' + n + ' 台' + (n ? '（' + snap.online.join('、') + '）' : ''), enabled: false },
     { label: '当前 ' + (snap.model || '未指定') + ' · ' + phaseCn, enabled: false },
@@ -442,7 +442,7 @@ if (!app.requestSingleInstanceLock()) {
   process.on('uncaughtException', (e) => {
     log('ERROR', '未捕获异常：' + (e && e.stack ? e.stack : e));
     try {
-      dialog?.showErrorBox('在线VWI服务端 出错了',
+      dialog?.showErrorBox('ESOP 服务端 出错了',
         '发生了未处理的错误（服务可能还能用，但建议重启）。\n\n' +
         (e && e.message ? e.message : String(e)) + '\n\n日志：' + logFile);
     } catch { /* 忽略 */ }

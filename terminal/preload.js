@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('vwi', {
 
   // 设置页用
   probe: (server) => ipcRenderer.invoke('vwi:probe', server),
+  lineProcesses: (server, lineId) => ipcRenderer.invoke('vwi:line-processes', { server, lineId }),
   saveConfig: (input) => ipcRenderer.invoke('vwi:save-config', input),
   openContentDir: () => ipcRenderer.invoke('vwi:open-content-dir'),
   openLog: () => ipcRenderer.invoke('vwi:open-log'),
