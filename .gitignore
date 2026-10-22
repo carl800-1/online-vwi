@@ -21,3 +21,6 @@ desktop.ini
 # 验收产物：截图、测试实例数据、生成的测试图（体积大且可重造）
 terminal/tools/probe/probe-out/
 terminal/tools/probe/media/
+
+# Release 上传用的临时说明文件（内容已发到 GitHub，不入库）
+.release-notes/

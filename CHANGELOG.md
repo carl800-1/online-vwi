@@ -13,6 +13,17 @@
 
 发版前先按上表判断本次改动属于哪一级，写进下面，再打 tag。
 
+**构建产物一律不进 git**（`dist/`、`release/` 已在 `.gitignore`），走 GitHub Release 附件：
+
+| tag | Release | 附件 |
+|---|---|---|
+| `v1.5.0` | 服务端桌面程序（现场默认） | 服务端 exe 85.6 MB、A7 检验卡 |
+| `v1.4.0` | 服务端绿色免安装包（无图形界面备用） | 绿色包 zip 31.8 MB |
+| `v1.3.0` | 终端接收端（5 台各一份） | 终端 exe 66.4 MB |
+
+上传用 `tools/create-release.py`（建 Release 壳）+ `tools/upload-release.py`（传附件 / 改说明），
+两者都读 `~/.workbuddy/secrets/github_pat.txt`，不需要 `gh`。
+
 ---
 
 ## [1.5.0] — 2026-10-21 · 服务端桌面程序（双击即用，不用浏览器）
