@@ -8,63 +8,61 @@
 </head>
 <body>
 
-<!-- 顶栏只留系统名。换型、在线数、当前型号都在别处：
-     换型在底栏（一天几次的低频操作），在线/当前/版本在左下角（一眼扫的信息）。
-     顶部是"今天在干什么"的入口，越干净越好找。 -->
-<header class="topbar">
-  <div class="brand">
-    <strong>E-SOP 系统</strong>
-    <span>在线作业指导书发布 · 线体 → 机种 → 工序</span>
-  </div>
-</header>
+<!-- ========== 整体骨架：左侧功能区 + 右侧内容区 ==========
+     左栏只回答"我要干什么"（功能导航），不回答"我在看哪条线"（作业上下文）。
+     线体选择因此移到内容区顶部的上下文条 —— 那才是它该待的地方：
+     它是"当前作业对象"，属于内容的一部分。
 
-<div class="shell">
-  <!-- ========== 左侧：线体选择器 + 模块 ==========
-       线体放最上面，因为它是"今天在哪儿干活"的第一层身份：
-       选错线体，后面看的内容全都是另一条线上的，填了也白填。 -->
-  <nav class="side">
-    <div class="side-block">
-      <div class="side-label">
-        <span>线体</span>
-        <button class="mini" id="addLineBtn" title="新建线体">+</button>
-      </div>
-      <!-- 启用中的那条恒排第一，其余按排序；点一下只是"看这条"，不改启用状态 -->
-      <div class="linelist" id="lineChips"></div>
-      <button class="btn sm block" id="enableLineBtn">启用线体</button>
+     视觉规范与工装夹具管理程序（FMS）保持一致：深色侧栏 + 白顶栏 + 浅底白卡片，
+     现场换一台机器接手时，不用重新适应一套皮肤。 -->
+<div id="app">
+
+  <!-- ========== 左侧功能区 ========== -->
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-logo">📋</span>
+      <span class="brand-name">E-SOP 发布系统</span>
     </div>
 
-    <div class="side-block">
-      <div class="side-label"><span>模块</span></div>
-      <button class="side-item on" data-view="matrix">
-        <span class="ico">▦</span><span>线体内容</span>
-      </button>
-      <button class="side-item" data-view="media">
-        <span class="ico">▤</span><span>媒体库</span>
-      </button>
-      <button class="side-item" data-view="profiles">
-        <span class="ico">☰</span><span>配置库</span>
-      </button>
-    </div>
+    <nav class="nav" id="nav">
+      <button class="nav-item active" data-view="matrix"><span class="ico">▦</span>作业内容</button>
+      <button class="nav-item" data-view="lines"><span class="ico">⚙</span>线体设置</button>
+      <button class="nav-item" data-view="media"><span class="ico">▤</span>媒体库</button>
+      <button class="nav-item" data-view="profiles"><span class="ico">☰</span>配置库</button>
+      <button class="nav-item" data-view="terms"><span class="ico">▣</span>终端监控</button>
+      <button class="nav-item desk-only" data-view="system"><span class="ico">⚙</span>系统</button>
+    </nav>
 
-    <div class="side-fill"></div>
-
-    <button class="side-item desk-only" id="sysBtn" title="版本、端口、终端装机地址、数据目录、开机自启">
-      <span class="ico">⚙</span><span>系统</span>
-    </button>
-
-    <!-- 左下角：在线台数 / 当前型号 / 版本号 —— 现场最常问的三个数 -->
-    <div class="side-foot">
-      <div class="foot-line">
-        <span class="dot" id="dot"></span>
-        <span>在线 <b id="onlineTxt">0</b></span>
-      </div>
+    <div class="sidebar-foot">
+      <!-- 在线 / 当前型号 / 版本号：现场最常被问的三个数，钉在视线终点 -->
+      <div class="foot-line"><span class="dot" id="dot"></span>在线 <b id="onlineTxt">0</b></div>
       <div class="foot-line">当前 <b id="curTxt">未指定</b></div>
-      <div class="foot-line dim">v<b id="verTxt">—</b></div>
+      <small class="foot-version">ESOP 发布系统 v<span id="verTxt">—</span></small>
+      <small class="foot-sign">design by Frank, 2026.10</small>
     </div>
-  </nav>
+  </aside>
 
-  <!-- ========== 右侧：内容区 ========== -->
-  <main class="main">
+  <!-- ========== 右侧内容区 ========== -->
+  <div class="main">
+
+    <!-- 顶栏：页面标题 + 右侧统计。跟 FMS 同一套位置，现场看惯了 -->
+    <header class="topbar">
+      <h1 id="viewTitle">作业内容</h1>
+      <div class="topbar-right">
+        <span class="top-stats" id="topStats">—</span>
+      </div>
+    </header>
+
+    <!-- 作业上下文条：当前线体（切哪条线看） + 警告
+         线体是"当前作业对象"，不属于左侧功能区，所以放在内容区顶部。 -->
+    <div class="ctxbar" id="ctxbar">
+      <span class="ctx-label">当前线体</span>
+      <div class="ctx-lines" id="lineChips"></div>
+      <button class="mini" id="addLineBtn" title="新建线体">+</button>
+      <div class="spacer"></div>
+      <span class="ctx-hint" id="ctxHint"></span>
+    </div>
+
     <!-- 正在看的这条线今天没启用时，必须马上说清楚，不能等到点了换型才发现没反应 -->
     <div class="linewarn hide" id="lineWarn"></div>
 
@@ -75,162 +73,233 @@
       <button class="btn sm danger" id="cancelSwitchBtn">放弃本次切换</button>
     </div>
 
-    <!-- ========== 线体内容：左矩阵 + 右终端实时 ========== -->
-    <section id="view-matrix" class="view">
-      <div class="split">
-        <div class="col-main">
-          <div class="panel">
-            <div class="panel-head">
-              <label class="modelsel">
-                <span>机种</span>
-                <select id="modelSel"></select>
-              </label>
-              <span class="sub" id="covTxt">—</span>
-              <div class="bar"><i id="covBar"></i></div>
-              <div class="spacer"></div>
-              <button class="btn sm" id="addModelBtn">+ 新型号</button>
-              <button class="btn sm" id="refreshBtn">刷新</button>
+    <section class="content">
+
+      <!-- ========== 作业内容：机种矩阵 + 精简终端状态条 ==========
+           详细的 IP / 分辨率 / 磁盘在「终端监控」页，这里只留"就绪没就绪"。 -->
+      <div class="view" id="view-matrix">
+        <div class="split">
+          <div class="col-main">
+            <div class="card">
+              <div class="card-head">
+                <label class="modelsel">
+                  <span>机种</span>
+                  <select id="modelSel"></select>
+                </label>
+                <span class="sub" id="covTxt">—</span>
+                <div class="bar"><i id="covBar"></i></div>
+                <div class="spacer"></div>
+                <button class="btn sm" id="addModelBtn">+ 新型号</button>
+                <button class="btn sm" id="refreshBtn">刷新</button>
+              </div>
+              <div class="matrix-scroll">
+                <table class="matrix" id="matrix">
+                  <thead></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
             </div>
-            <div class="matrix-scroll">
-              <table class="matrix" id="matrix">
-                <thead></thead>
-                <tbody></tbody>
-              </table>
-            </div>
+            <p class="foot-hint" id="matrixHint"></p>
           </div>
-          <p class="foot-hint" id="matrixHint">
-            一个格子 = 一个机种在某道工序下的播放清单。点格子进编辑；表头工序名可直接点开改。
+
+          <!-- 精简状态条：只回答"哪几台屏还没就绪"，细节去「终端监控」 -->
+          <aside class="col-param">
+            <div class="param-head">
+              <strong>终端就绪</strong>
+              <span class="sub" id="paramSub">—</span>
+              <div class="spacer"></div>
+              <button class="iconbtn" id="paramRefresh" title="立即刷新">⟳</button>
+            </div>
+            <div class="param-body" id="termCards"></div>
+            <div class="param-foot" id="paramFoot"></div>
+          </aside>
+        </div>
+      </div>
+
+      <!-- ========== 线体设置：线体的新建 / 改名 / 排序 / 启停 ==========
+           这是全系统唯一能改线体的地方。作业内容页的线体切换只是"看哪条"，不碰启用状态。 -->
+      <div class="view hide" id="view-lines">
+        <div class="card">
+          <div class="card-head">
+            <h2>线体设置</h2>
+            <span class="sub">一条线体 = 一条物理产线。同一时刻只允许一条启用，终端会读启用那条的内容。</span>
+            <div class="spacer"></div>
+            <button class="btn sm primary" id="lnNewBtn">+ 新建线体</button>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="lineTable">
+              <thead>
+                <tr>
+                  <th style="width:96px">启用</th>
+                  <th style="width:110px">编码</th>
+                  <th>名称</th>
+                  <th style="width:90px">工序数</th>
+                  <th style="width:110px">内容覆盖</th>
+                  <th style="width:130px">当前型号</th>
+                  <th style="width:86px">在线</th>
+                  <th style="width:170px">操作</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="foot-hint">
+            勾选框打勾 = 这条线今天在跑（终端会读它）。停用中若有其他线顶上会自动切换；
+            没有其他线时停用会让终端连不上、屏上内容停住，所以会先问一句。
           </p>
         </div>
+      </div>
 
-        <!-- 右栏：这台线体上每道工序的屏现在的真实情况。
-             数据 2 秒刷一次，不参与换型判断，纯粹"看现场"。 -->
-        <aside class="col-param">
-          <div class="param-head">
-            <strong>终端实时</strong>
-            <span class="sub" id="paramSub">—</span>
+      <!-- ========== 媒体库 ========== -->
+      <div class="view hide" id="view-media">
+        <div class="card">
+          <div class="card-head">
+            <h2>媒体库</h2>
+            <span class="sub" id="mediaTxt">—</span>
             <div class="spacer"></div>
-            <button class="iconbtn" id="paramRefresh" title="立即刷新">⟳</button>
+            <button class="btn sm" id="uploadBtn">上传文件</button>
+            <button class="btn sm" id="adviceBtn">规格体检</button>
+            <button class="btn sm danger" id="gcBtn">清理未引用</button>
           </div>
-          <div class="param-body" id="termCards"></div>
-          <div class="param-foot" id="paramFoot"></div>
-        </aside>
-      </div>
-    </section>
-
-    <!-- ========== 媒体库 ========== -->
-    <section id="view-media" class="view hide">
-      <div class="panel">
-        <div class="panel-head">
-          <h2>媒体库</h2>
-          <span class="sub" id="mediaTxt">—</span>
-          <div class="spacer"></div>
-          <button class="btn sm" id="uploadBtn">上传文件</button>
-          <button class="btn sm" id="adviceBtn">规格体检</button>
-          <button class="btn sm danger" id="gcBtn">清理未引用</button>
+          <div class="toolbar">
+            <input type="search" id="mediaSearch" placeholder="按文件名搜索">
+            <select id="mediaKind" class="btn sm" style="padding:6px 10px">
+              <option value="">全部类型</option>
+              <option value="image">只看图片</option>
+              <option value="video">只看视频</option>
+            </select>
+          </div>
+          <div class="mediagrid" id="mediagrid"></div>
         </div>
-        <div class="toolbar">
-          <input type="search" id="mediaSearch" placeholder="按文件名搜索">
-          <select id="mediaKind" class="btn sm" style="padding:6px 10px">
-            <option value="">全部类型</option>
-            <option value="image">只看图片</option>
-            <option value="video">只看视频</option>
-          </select>
-        </div>
-        <div class="mediagrid" id="mediagrid"></div>
       </div>
-    </section>
 
-    <!-- ========== 配置库 ==========
-         左边是档案列表，右边是这份档案的工序要求。
-         配置库不改任何正在播的内容，只做两件事：对齐工序清单、检查实际内容缺什么。 -->
-    <section id="view-profiles" class="view hide">
-      <div class="split">
-        <div class="col-main">
-          <div class="panel">
-            <div class="panel-head">
-              <label class="modelsel">
-                <span>配置档案</span>
-                <select id="pfPick"></select>
-              </label>
-              <span class="sub" id="pfSub">按产品定义：在哪条线做、几道工序、每道要交什么</span>
-              <div class="spacer"></div>
-              <button class="btn sm" id="pfNewBtn">+ 新建配置</button>
-              <button class="btn sm primary" id="pfSaveBtn">保存</button>
-            </div>
-
-            <div class="pf-head" id="pfHead">
-              <div class="pf-fields">
-                <label>配置编码<input type="text" id="pfCode" placeholder="P-X200"></label>
-                <label>配置名称<input type="text" id="pfName" placeholder="X200 工艺配置"></label>
-                <label>关联机种<select id="pfModel"></select></label>
-              </div>
-              <div class="pf-fields">
-                <label class="pf-wide">适用线体
-                  <span class="pf-lines" id="pfLines"></span>
+      <!-- ========== 配置库 ==========
+           左边是档案列表，右边是这份档案的工序要求。
+           配置库不改任何正在播的内容，只做两件事：对齐工序清单、检查实际内容缺什么。 -->
+      <div class="view hide" id="view-profiles">
+        <div class="split">
+          <div class="col-main">
+            <div class="card">
+              <div class="card-head">
+                <label class="modelsel">
+                  <span>配置档案</span>
+                  <select id="pfPick"></select>
                 </label>
-                <label class="pf-grow">备注<input type="text" id="pfNote" placeholder="给现场看的说明"></label>
-              </div>
-              <div class="pf-ops">
-                <button class="btn sm" id="pfApplyBtn">应用到线体…</button>
-                <button class="btn sm" id="pfCheckBtn">校验现状</button>
+                <span class="sub" id="pfSub">按产品定义：在哪条线做、几道工序、每道要交什么</span>
                 <div class="spacer"></div>
-                <button class="btn sm danger" id="pfDelBtn">删除配置</button>
-              </div>            </div>
+                <button class="btn sm" id="pfNewBtn">+ 新建配置</button>
+                <button class="btn sm primary" id="pfSaveBtn">保存</button>
+              </div>
 
-            <div class="pf-steps-head">
-              <strong>工序要求</strong>
-              <span class="hint">
-                勾选 = 这道工序允许这类文件；数字 = 至少几份。没勾的类型上传时会被拒。
-              </span>
-            </div>
-            <div class="pf-steps" id="pfSteps"></div>
-            <div class="pf-addrow">
-              <button class="btn sm" id="pfAddStep">+ 添加工序</button>
+              <div class="pf-head" id="pfHead">
+                <div class="pf-fields">
+                  <label>配置编码<input type="text" id="pfCode" placeholder="P-X200"></label>
+                  <label>配置名称<input type="text" id="pfName" placeholder="X200 工艺配置"></label>
+                  <label>关联机种<select id="pfModel"></select></label>
+                </div>
+                <div class="pf-fields">
+                  <label class="pf-wide">适用线体
+                    <span class="pf-lines" id="pfLines"></span>
+                  </label>
+                  <label class="pf-grow">备注<input type="text" id="pfNote" placeholder="给现场看的说明"></label>
+                </div>
+                <div class="pf-ops">
+                  <button class="btn sm" id="pfApplyBtn">应用到线体…</button>
+                  <button class="btn sm" id="pfCheckBtn">校验现状</button>
+                  <div class="spacer"></div>
+                  <button class="btn sm danger" id="pfDelBtn">删除配置</button>
+                </div>
+              </div>
+
+              <div class="pf-steps-head">
+                <strong>工序要求</strong>
+                <span class="hint">
+                  勾选 = 这道工序允许这类文件；数字 = 至少几份。没勾的类型上传时会被拒。
+                </span>
+              </div>
+              <div class="pf-steps" id="pfSteps"></div>
+              <div class="pf-addrow">
+                <button class="btn sm" id="pfAddStep">+ 添加工序</button>
+              </div>
             </div>
           </div>
+
+          <aside class="col-param">
+            <div class="param-head">
+              <strong>配置说明</strong>
+            </div>
+            <div class="param-body pf-help">
+              <p><b>三张表的关系</b></p>
+              <p><b>配置档案</b> 回答「这个产品怎么做」：绑哪个机种、在哪几条线做。</p>
+              <p><b>工序要求</b> 回答「要做几道、每道叫什么」。</p>
+              <p><b>类型要求</b> 回答「每道要交几张图、几段视频、几份 PDF，分辨率与体积上限」。</p>
+              <hr>
+              <p><b>它怎么跟线体内容连起来</b></p>
+              <p>配置库是<b>模板</b>，不复制内容。当它在「作业内容」里被匹配上时：</p>
+              <p>① 矩阵表头显示该工序的要求与达标情况；</p>
+              <p>② 打开清单抽屉时逐项标注「低于要求 / 配置外类型」；</p>
+              <p>③ 「应用到线体」可一键把参数里的工序数改成配置里的。</p>
+              <hr>
+              <p><b>匹配顺序</b></p>
+              <p>绑了机种 → 编码/名称里带机种号 → 绑了线体的通用档案 → 通用档案。</p>
+              <p class="dim">找不到匹配就只显示"未配置要求"，不会判为不合格。</p>
+            </div>
+          </aside>
         </div>
-
-        <aside class="col-param">
-          <div class="param-head">
-            <strong>配置说明</strong>
-          </div>
-          <div class="param-body pf-help">
-            <p><b>三张表的关系</b></p>
-            <p><b>配置档案</b> 回答「这个产品怎么做」：绑哪个机种、在哪几条线做。</p>
-            <p><b>工序要求</b> 回答「要做几道、每道叫什么」。</p>
-            <p><b>类型要求</b> 回答「每道要交几张图、几段视频、几份 PDF，分辨率与体积上限」。</p>
-            <hr>
-            <p><b>它怎么跟线体内容连起来</b></p>
-            <p>配置库是<b>模板</b>，不复制内容。当它在「线体内容」里被匹配上时：</p>
-            <p>① 矩阵表头显示该工序的要求与达标情况；</p>
-            <p>② 打开清单抽屉时逐项标注「低于要求 / 配置外类型」；</p>
-            <p>③ 列表页可用它一键<b>应用到线体</b>，把参数里的工序数改成配置里的。</p>
-            <hr>
-            <p><b>匹配顺序</b></p>
-            <p>绑了机种 → 编码/名称里带机种号 → 绑了线体的通用档案 → 通用档案。</p>
-            <p class="dim">找不到匹配就只显示"未配置要求"，不会判为不合格。</p>
-          </div>
-        </aside>
       </div>
-    </section>
-  </main>
-</div>
 
-<!-- ========== 底部状态栏：换型 ==========
-     换型是"一天做几次"的动作，填内容是"一天做几十次"，所以换型让位到底部。
-     下拉与中栏的机种选择联动：选哪个机种，换的就是哪个。 -->
-<footer class="footbar">
-  <div class="foot-left">
-    <span class="stat" id="footHint">在左侧选线体，在中栏选机种</span>
+      <!-- ========== 终端监控：全部终端的 IP / 分辨率 / 版本 / 磁盘 / 进度 ==========
+           作业内容页只放精简状态条；这里横排成表格，5 台屏一行一台，字段不截断。 -->
+      <div class="view hide" id="view-terms">
+        <div class="card">
+          <div class="card-head">
+            <h2>终端监控</h2>
+            <span class="sub" id="termSub">—</span>
+            <div class="spacer"></div>
+            <button class="btn sm" id="termRefresh">刷新</button>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="termTable">
+              <thead>
+                <tr>
+                  <th style="width:96px">工序</th>
+                  <th style="width:150px">名称</th>
+                  <th style="width:150px">IP 地址</th>
+                  <th style="width:130px">分辨率</th>
+                  <th style="width:110px">版本</th>
+                  <th style="width:130px">剩余磁盘</th>
+                  <th>下载进度</th>
+                  <th style="width:150px">状态</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="foot-hint" id="termFoot">
+            IP 由服务端从连接来源读取，不采信终端自报；终端每 5 秒上报一次参数。
+            未上线的工序也会列出来，方便区分"没装机"和"装了没开机"。
+          </p>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ========== 底部状态栏：换型 ==========
+         换型是"一天做几次"的动作，填内容是"一天做几十次"，所以换型让位到底部。 -->
+    <footer class="footbar">
+      <div class="foot-left">
+        <span class="stat" id="footHint">在顶部选线体，在中栏选机种</span>
+      </div>
+      <div class="spacer"></div>
+      <div class="switcher">
+        <label for="switchSel" id="switchLabel">换型到</label>
+        <select id="switchSel"></select>
+        <button class="btn sm primary" id="switchBtn">切换</button>
+      </div>
+    </footer>
+
   </div>
-  <div class="spacer"></div>
-  <div class="switcher">
-    <label for="switchSel" id="switchLabel">换型到</label>
-    <select id="switchSel"></select>
-    <button class="btn sm primary" id="switchBtn">切换</button>
-  </div>
-</footer>
+</div>
 
 <!-- ========== 清单编辑抽屉 ========== -->
 <div class="overlay" id="overlay"></div>
@@ -291,7 +360,7 @@
 </aside>
 
 <!-- ========== 通用对话框 ==========
-     Electron 里 window.prompt() 是直接抛异常的（"prompt() and will not be supported"），
+     Electron 里 window.prompt() 是直接抛异常的（"prompt() is and will not be supported"），
      confirm 也是英文按钮的原生框。全部换成这一个自己画的，顺便能一次问多个字段。 -->
 <div class="modal" id="dialog">
   <div class="modal-card dlg-card">

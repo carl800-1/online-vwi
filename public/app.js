@@ -190,7 +190,7 @@ async function loadAll() {
     S.currentId = ''; S.currentCode = ''; S.online = [];
     S.profileMatch = null; S.terms = null;
     renderMatrix(); renderModelOptions(); renderSwitchOptions(); renderFooter();
-    renderTerms();
+    renderTerms(); renderLineTable(); renderTopStats();
     return;
   }
 
@@ -210,6 +210,8 @@ async function loadAll() {
   renderMatrix();
   renderModelOptions();
   renderSwitchOptions();
+  renderLineTable();
+  renderTopStats();
   await Promise.all([loadProfileMatch(), loadTerminals()]);
 }
 
@@ -250,22 +252,25 @@ function renderFooter() {
   const m = S.modelPick || S.currentCode;
   $('footHint').innerHTML = line
     ? `线体 <b>${H(line.name)}</b>${line.enabled ? '' : '（未启用）'}　·　机种 <b>${H(m || '全部')}</b>`
-    : '在左侧选线体，在中栏选机种';
+    : '在上面选线体，在中栏选机种';
 }
 
 /**
- * 左栏线体列表。
+ * 顶部上下文条上的线体胶囊。
  *
  * 排序规则：**启用中的那条恒排第一**，其余按 sort。
  * 为什么不是纯 sort：每天上线第一件事就是确认"今天跑哪条"，
  * 让它永远在最上面，不用在十条线里找那个绿点。
  * 这里只在显示层排序，不动数据库的 sort —— 数据库里的 sort 是"车间给的顺序"，
  * 启用状态是"今天的状态"，两者混在一起写回库里，明天换线就得手工再排一遍。
+ *
+ * 这里的点击**只切"看哪条线"**，不改启用状态。启用/停用在「线体设置」页做，
+ * 避免在浏览内容时误触导致整线停产。
  */
 function renderLineBar() {
   const box = $('lineChips');
   if (!S.lines.length) {
-    box.innerHTML = '<div class="sub" style="padding:4px 10px">还没有线体，点上面的 + 新建</div>';
+    box.innerHTML = '<span class="sub">还没有线体，点右边的 + 新建</span>';
     $('lineWarn').classList.add('hide');
     return;
   }
@@ -274,14 +279,14 @@ function renderLineBar() {
     (b.enabled ? 1 : 0) - (a.enabled ? 1 : 0) || (a.sort - b.sort) || a.code.localeCompare(b.code));
 
   box.innerHTML = sorted.map((l) => {
-    const cls = ['linechip', l.id === S.lineId ? 'on' : '', l.enabled ? 'enabled' : 'off']
-      .filter(Boolean).join(' ');
+    const cls = ['ctx-line', l.id === S.lineId ? 'on' : ''].filter(Boolean).join(' ');
+    // 绿点 = 这条线今天在跑（终端读它）；胶囊高亮 = 我正在看这条线。两件事不一样。
+    const dot = l.enabled ? '<span class="en-dot"></span>' : '';
     return `<button class="${cls}" data-lid="${H(l.id)}"
         title="${H(l.name)}（${H(l.code)}）· ${l.processes} 道工序 · 已配 ${l.coverage.done}/${l.coverage.total}${
           l.enabled ? '　今天在跑这条线' : '　未启用，终端不会读这条线'}">
-      <span class="live"></span>
-      <span class="ln-name">${H(l.name)}</span>
-      ${l.enabled ? '<em>启用</em>' : `<span class="cov">${l.coverage.done}/${l.coverage.total}</span>`}
+      ${dot}<span>${H(l.name)}</span>
+      <span class="cov">${l.coverage.done}/${l.coverage.total}</span>
     </button>`;
   }).join('');
 
@@ -324,12 +329,47 @@ async function enableLine(lineId) {
 }
 
 $('lineChips').addEventListener('click', (e) => {
-  const b = e.target.closest('.linechip');
+  // 上下文条上的线体胶囊：只切"看哪条线"，不改启用状态。
+  // 启用/停用是「线体设置」页的事 —— 浏览内容时误触勾选框会让整线停产。
+  const b = e.target.closest('.ctx-line');
   if (!b) return;
   if (b.dataset.lid === S.lineId) return;
   S.lineId = b.dataset.lid;
   loadAll().catch((err) => toast(err.message, 'err'));
 });
+
+/**
+ * 勾选框：启用/停用某条线体。同一时刻只有一条在跑。
+ * 只在「线体设置」页调用，作业内容页的上下文条不提供这个入口。
+ */
+async function toggleLine(lineId) {
+  const target = S.lines.find((l) => l.id === lineId);
+  if (!target) return;
+
+  if (!target.enabled) { await enableLine(lineId); return; }
+
+  // 停用必问一句。原因很实在：enableOnlyLine 保证同一时刻只有一条线体在跑，
+  // 所以停掉它就意味着**没有任何线体在跑** —— 终端会因找不到启用线体直接 404，
+  // 屏上内容停住。现场产线正在跑时误点这个框，屏幕会立刻黑掉。
+  const ok = await dialog({
+    title: `停用「${target.name}」？`,
+    message: '停用后没有任何线体在跑，终端会连不上服务端、屏上的内容会停住不动。' +
+      '如果是要换到别的线，请直接勾选那一条。',
+    okText: '停用',
+    danger: true
+  });
+  if (!ok) return;
+
+  try {
+    await api('/api/lines/' + encodeURIComponent(lineId), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: false })
+    });
+    await loadAll();
+    toast('已停用 ' + target.name, 'ok');
+  } catch (err) { toast(err.message, 'err'); }
+}
 
 $('addLineBtn').addEventListener('click', async () => {
   const r = await dialog({
@@ -357,29 +397,130 @@ $('addLineBtn').addEventListener('click', async () => {
 });
 
 /* 启用线体：同一时刻只能有一条在跑，所以是单选而不是多选。
-   多选会让不带 line 的老终端不知道该听谁 —— 现场 5 台屏还没重装。 */
-$('enableLineBtn').addEventListener('click', async () => {
-  if (!S.lines.length) return toast('还没有线体，先新建一条', 'err');
+   多选会让不带 line 的老终端不知道该听谁 —— 现场 5 台屏还没重装。
+   入口是线体行右侧的勾选框：打勾 = 这条线今天在跑。 */
 
-  const html = '<div class="linepick">' + S.lines.map((l) => `
-    <label class="linepick-row ${l.enabled ? 'cur' : ''}">
-      <input type="radio" name="pickline" value="${H(l.id)}" ${l.enabled ? 'checked' : ''}>
-      <span class="lp-name">${H(l.name)}<small>${H(l.code)}</small></span>
-      <span class="lp-meta">${l.processes} 道工序 · ${l.coverage.done}/${l.coverage.total} 套已配置${
-        l.currentModelCode ? ' · 当前 ' + H(l.currentModelCode) : ''}</span>
-    </label>`).join('') + '</div>';
+/* ---------- 线体设置页 ----------
+   全系统唯一能改线体的地方：新建、改名、删除、调顺序、启用停用。
+   作业内容页顶部的线体胶囊只负责"看哪条线"，不动这里的任何状态。 */
+function renderLineTable() {
+  const tbody = $('lineTable').querySelector('tbody');
+  if (!S.lines.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">还没有线体，点右上角「+ 新建线体」。</td></tr>';
+    return;
+  }
 
-  const picked = await dialog({
-    title: '启用线体',
-    message: '选中的这条线今天在跑，终端会读它的内容。同一时刻只有一条线体启用，换线不影响另一条线已配好的内容。',
-    html,
-    read: (body) => (body.querySelector('input[name=pickline]:checked') || {}).value || '',
-    okText: '启用这条线'
-  });
-  if (picked === null) return;
-  if (!picked) return toast('请先选一条线体', 'err');
-  await enableLine(picked);
+  const sorted = [...S.lines].sort((a, b) => (a.sort - b.sort) || a.code.localeCompare(b.code));
+
+  tbody.innerHTML = sorted.map((l, i) => `
+    <tr class="${l.enabled ? 'cur' : ''}" data-lid="${H(l.id)}">
+      <td>
+        <button class="ln-check${l.enabled ? ' on' : ''}" data-toggle="${H(l.id)}"
+          title="${l.enabled ? '取消启用这条线' : '启用这条线'}"
+          aria-label="${l.enabled ? '取消启用' : '启用'} ${H(l.name)}"
+          aria-pressed="${l.enabled ? 'true' : 'false'}">${l.enabled ? '✓' : ''}</button>
+      </td>
+      <td class="mono">${H(l.code)}</td>
+      <td><b>${H(l.name)}</b>${l.id === S.lineId ? ' <span class="badge info">正在查看</span>' : ''}</td>
+      <td class="num">${l.processes}</td>
+      <td class="num">${l.coverage.done} / ${l.coverage.total}</td>
+      <td>${l.currentModelCode ? H(l.currentModelCode) : '<span class="badge muted">未设定</span>'}</td>
+      <td class="num">${l.online || 0}</td>
+      <td>
+        <div class="row-actions">
+          <button class="btn sm" data-act="view" data-lid="${H(l.id)}">查看</button>
+          <button class="btn sm" data-act="rename" data-lid="${H(l.id)}">改名</button>
+          <button class="iconbtn" data-act="up" data-lid="${H(l.id)}" title="上移" ${i === 0 ? 'disabled' : ''}>↑</button>
+          <button class="iconbtn" data-act="down" data-lid="${H(l.id)}" title="下移" ${
+            i === sorted.length - 1 ? 'disabled' : ''}>↓</button>
+          <button class="btn sm danger" data-act="del" data-lid="${H(l.id)}">删除</button>
+        </div>
+      </td>
+    </tr>`).join('');
+}
+
+$('lineTable').addEventListener('click', async (e) => {
+  const tgl = e.target.closest('[data-toggle]');
+  if (tgl) return toggleLine(tgl.dataset.toggle);
+
+  const b = e.target.closest('[data-act]');
+  if (!b) return;
+  const id = b.dataset.lid;
+  const target = S.lines.find((l) => l.id === id);
+  if (!target) return;
+
+  if (b.dataset.act === 'view') {
+    S.lineId = id;
+    S.tab = 'matrix';
+    syncNav();
+    await loadAll();
+    return;
+  }
+
+  if (b.dataset.act === 'rename') {
+    const r = await dialog({
+      title: '改线体名称',
+      message: '编码是终端装机时要填的标识，一般不改；显示名称可以随时改。',
+      fields: [
+        { key: 'name', label: '显示名称', value: target.name, placeholder: '例如：二线' },
+        { key: 'code', label: '线体编码', value: target.code, placeholder: 'L2' }
+      ],
+      okText: '保存'
+    });
+    if (!r) return;
+    try {
+      await api('/api/lines/' + encodeURIComponent(id), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: r.name || target.name, code: r.code || target.code })
+      });
+      await loadAll();
+      toast('已保存', 'ok');
+    } catch (err) { toast(err.message, 'err'); }
+    return;
+  }
+
+  if (b.dataset.act === 'up' || b.dataset.act === 'down') {
+    // 排序是"车间给的顺序"，跟"今天跑哪条"是两回事，所以单独存 sort 字段。
+    // 交换相邻两条的 sort 即可，不必重排全表。
+    const sorted = [...S.lines].sort((a, b2) => (a.sort - b2.sort) || a.code.localeCompare(b2.code));
+    const i = sorted.findIndex((l) => l.id === id);
+    const j = b.dataset.act === 'up' ? i - 1 : i + 1;
+    if (j < 0 || j >= sorted.length) return;
+    const a = sorted[i], c = sorted[j];
+    try {
+      await api('/api/lines/' + encodeURIComponent(a.id), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sort: c.sort })
+      });
+      await api('/api/lines/' + encodeURIComponent(c.id), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sort: a.sort })
+      });
+      await loadAll();
+    } catch (err) { toast(err.message, 'err'); }
+    return;
+  }
+
+  if (b.dataset.act === 'del') {
+    const ok = await dialog({
+      title: `删除线体「${target.name}」？`,
+      message: '删除后这条线上的工序会一并消失。已经配了播放内容的线体删不掉，' +
+        '需要先清空各工序的清单。',
+      okText: '删除',
+      danger: true
+    });
+    if (!ok) return;
+    try {
+      await api('/api/lines/' + encodeURIComponent(id), { method: 'DELETE' });
+      if (S.lineId === id) S.lineId = '';
+      await loadAll();
+      toast('已删除 ' + target.name, 'ok');
+    } catch (err) { toast(err.message, 'err'); }
+  }
 });
+
+$('lnNewBtn').addEventListener('click', () => $('addLineBtn').click());
 
 function renderPhaseBar() {
   const bar = $('phasebar');
@@ -422,13 +563,15 @@ async function loadProfileMatch() {
 }
 
 async function loadTerminals() {
-  if (!S.lineId) { S.terms = null; renderTerms(); return; }
+  if (!S.lineId) { S.terms = null; renderTerms(); renderTermTable(); return; }
   try {
     S.terms = await api('/api/terminals?lineId=' + encodeURIComponent(S.lineId));
   } catch {
     S.terms = null;
   }
   renderTerms();
+  renderTermTable();
+  renderTopStats();
 }
 
 function ageShort(ms) {
@@ -439,12 +582,18 @@ function ageShort(ms) {
   return Math.round(min / 60) + ' 小时';
 }
 
+/**
+ * 作业内容页右栏：精简状态条。
+ *
+ * 只回答"哪几台屏还没就绪"这一件事。IP、分辨率、版本、磁盘这些细节原来挤在
+ * 302px 里要截断显示，看不全也看不清 —— 现在挪到「终端监控」页横排成表格。
+ */
 function renderTerms() {
   const box = $('termCards');
   const t = S.terms;
   if (!t) {
     $('paramSub').textContent = '—';
-    box.innerHTML = '<div class="sub" style="padding:6px">还没有线体，先在左侧建一条。</div>';
+    box.innerHTML = '<div class="sub" style="padding:6px">还没有线体，先在上面建一条。</div>';
     $('paramFoot').textContent = '';
     return;
   }
@@ -463,14 +612,6 @@ function renderTerms() {
         ? `<span class="d"></span>${ageShort(r.ageMs)}前`
         : `<span class="d"></span>已离线 ${ageShort(r.ageMs)}`;
 
-    const req = reqOf(r.op);
-    const chk = chkOf(r.op);
-    const reqLine = req
-      ? `<div class="term-req">配置 <span class="tag">${H(reqSummary(req))}</span>${
-          chk ? `<span class="tag ${chk.ok ? 'ok' : 'bad'}">${chk.ok ? '✓ 达标' : '✕ ' + chk.issues.length + ' 项不符'}</span>` : ''
-        }</div>`
-      : '';
-
     if (!r.seen) {
       return `<div class="${cls}">
         <div class="term-top">
@@ -478,15 +619,11 @@ function renderTerms() {
           <span class="term-name">${H(r.name)}</span>
           <span class="term-state">${state}</span>
         </div>
-        <div class="term-kv" style="color:var(--ink3)">从未有终端连接过 · 检查这台机器是否已装机</div>
-        ${reqLine}
+        <div class="term-kv" style="color:var(--ink3)">从未有终端连接过</div>
       </div>`;
     }
 
     const pct = r.total > 0 ? Math.min(100, Math.round((r.done / r.total) * 100)) : (r.ready ? 100 : 0);
-    const doneCls = pct >= 100 ? 'done' : '';
-    const resText = r.res ? r.res.replace('x', '×') : '—';
-    const freeText = r.free ? fmtBytes(r.free) : '—';
     const progText = r.total > 0
       ? `${r.modelCode ? H(r.modelCode) + ' · ' : ''}${r.done}/${r.total} 项`
       : (r.ready ? '内容已就绪' : (r.modelCode ? H(r.modelCode) + ' · 等待下载' : '空闲'));
@@ -497,25 +634,74 @@ function renderTerms() {
         <span class="term-name">${H(r.name)}</span>
         <span class="term-state">${state}${r.ready ? ' <b>已就绪</b>' : ''}</span>
       </div>
-      <div class="term-kv">
-        <span class="mono">${H(r.ip || '—')}</span>
-        <span><b>${H(resText)}</b></span>
-        <span>v<b>${H(r.ver || '—')}</b></span>
-        <span>剩余 <b>${freeText}</b></span>
-      </div>
-      <div class="term-bar ${doneCls}"><i style="width:${pct}%"></i></div>
+      <div class="term-bar ${pct >= 100 ? 'done' : ''}"><i style="width:${pct}%"></i></div>
       <div class="term-prog"><span>${progText}</span><b>${pct}%</b></div>
-      ${reqLine}
     </div>`;
   }).join('') || '<div class="sub" style="padding:6px">这条线体还没有工序。</div>';
 
   const when = t.ts ? new Date(t.ts).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
   $('paramFoot').innerHTML =
     `${t.phase === 'prepare' ? `<b style="color:var(--warn)">正在准备 ${H(t.pendingModelCode || '')}</b>　` : ''}` +
-    `刷新于 ${when} · 每 2 秒自动刷新`;
+    `刷新于 ${when} · IP 等详情见「终端监控」`;
+}
+
+/**
+ * 终端监控页：全部终端横排成表格。
+ *
+ * 原来这些字段挤在作业页 302px 的右栏里，IP 和分辨率都得截断。
+ * 独立成页后一行一台屏，字段完整显示，5 台屏一眼扫完。
+ */
+function renderTermTable() {
+  const tbody = $('termTable').querySelector('tbody');
+  const t = S.terms;
+  if (!t || !t.terminals.length) {
+    tbody.innerHTML = '<tr><td colspan="8" class="empty">还没有线体，先在「线体设置」建一条。</td></tr>';
+    $('termSub').textContent = '—';
+    return;
+  }
+
+  $('termSub').textContent = `${t.lineName} · 在线 ${t.onlineCount} / ${t.total} 台 · 每 2 秒自动刷新`;
+
+  tbody.innerHTML = t.terminals.map((r) => {
+    const pct = r.total > 0 ? Math.min(100, Math.round((r.done / r.total) * 100)) : (r.ready ? 100 : 0);
+
+    let stateBadge;
+    if (!r.seen) {
+      stateBadge = '<span class="badge muted">从未上线</span>';
+    } else if (r.online) {
+      stateBadge = r.ready
+        ? '<span class="badge ok">在线 · 已就绪</span>'
+        : '<span class="badge warn">在线 · 下载中</span>';
+    } else {
+      stateBadge = `<span class="badge danger">已离线 ${H(ageShort(r.ageMs))}</span>`;
+    }
+
+    const resText = r.res ? H(r.res.replace('x', '×')) : '—';
+    const freeText = r.free ? fmtBytes(r.free) : '—';
+    const progText = r.total > 0
+      ? `${r.modelCode ? H(r.modelCode) + ' ' : ''}${r.done}/${r.total} 项`
+      : (r.ready ? '内容已就绪' : (r.modelCode ? H(r.modelCode) + ' 等待下载' : '空闲'));
+
+    return `<tr>
+      <td><b>${H(r.op)}</b></td>
+      <td>${H(r.name)}</td>
+      <td class="mono">${H(r.ip || '—')}</td>
+      <td class="num">${resText}</td>
+      <td class="num">v${H(r.ver || '—')}</td>
+      <td class="num">${freeText}</td>
+      <td>
+        <div class="progbar">
+          <span class="track"><i class="${pct >= 100 ? 'done' : ''}" style="width:${pct}%"></i></span>
+          <em>${pct}%　${progText}</em>
+        </div>
+      </td>
+      <td>${stateBadge}</td>
+    </tr>`;
+  }).join('');
 }
 
 $('paramRefresh').addEventListener('click', () => loadTerminals().catch(() => {}));
+$('termRefresh').addEventListener('click', () => loadTerminals().catch(() => {}));
 
 // 2 秒轮询：只在看"线体内容"并且窗口可见时跑，切到媒体库/后台标签页不占带宽
 setInterval(() => {
@@ -549,7 +735,7 @@ function renderMatrix() {
   const tbody = $('matrix').querySelector('tbody');
 
   thead.innerHTML = '<tr>' +
-    '<th style="width:186px">机种</th>' +
+    '<th style="width:178px">机种</th>' +
     S.processes.map((p) => {
       const req = reqOf(p.code);
       const chk = chkOf(p.code);
@@ -620,7 +806,7 @@ function renderMatrix() {
   const line = S.lines.find((l) => l.id === S.lineId);
   const pm = S.profileMatch && S.profileMatch.profile;
   $('matrixHint').innerHTML = !line
-    ? '还没有线体。先在左侧「+」新建，再把型号的内容填进去。'
+    ? '还没有线体。先在顶部「+」新建，或到「线体设置」页创建，再把型号的内容填进去。'
     : `正在查看「<b>${H(line.name)}</b>」的内容矩阵（${S.processes.length} 道工序）。` +
       (line.enabled ? '' : ' <b style="color:var(--warn)">这条线今天没有启用</b>，终端不会读它的内容。') +
       (pm
@@ -674,23 +860,76 @@ $('modelSel').addEventListener('change', () => {
   loadTerminals().catch(() => {});
 });
 
-// ---------- 左侧模块切换 ----------
-document.querySelectorAll('.side-item[data-view]').forEach((b) => {
+// ---------- 左侧功能区切换 ----------
+// 左栏六个入口，每个对应右侧一个页面。页面标题与右上角统计跟着切换，
+// 让现场一眼知道"我在哪个功能里、现在是什么状态"。
+const VIEW_TITLE = {
+  matrix: '作业内容',
+  lines: '线体设置',
+  media: '媒体库',
+  profiles: '配置库',
+  terms: '终端监控'
+};
+
+// 「系统」是桌面程序专属，走弹层而不切页面 —— 切走会让底下空一大块，
+// 而这个面板要的信息量本来就只占一小块。
+let openSysPanel = null;
+
+function syncNav() {
+  document.querySelectorAll('.nav-item[data-view]').forEach((x) =>
+    x.classList.toggle('active', x.dataset.view === S.tab));
+  for (const v of Object.keys(VIEW_TITLE)) {
+    const el = $('view-' + v);
+    if (el) el.classList.toggle('hide', v !== S.tab);
+  }
+  $('viewTitle').textContent = VIEW_TITLE[S.tab] || '作业内容';
+
+  // 上下文条只在跟线体有关的页面出现：媒体库是全局的，与当前看哪条线无关。
+  const ctx = $('ctxbar');
+  if (ctx) ctx.classList.toggle('hide', S.tab === 'media');
+}
+
+function renderTopStats() {
+  const line = S.lines.find((l) => l.id === S.lineId);
+  const bits = [];
+  if (S.tab === 'terms') {
+    const t = S.terms;
+    if (t) bits.push(`在线 <b>${t.onlineCount}</b> / ${t.total} 台`);
+  } else if (S.tab === 'lines') {
+    bits.push(`共 <b>${S.lines.length}</b> 条线体`);
+    const on = S.lines.filter((l) => l.enabled);
+    bits.push(`启用中 <b>${on.length ? H(on[0].name) : '无'}</b>`);
+  } else {
+    bits.push(`在线 <b>${S.online.length}</b> 台`);
+    if (line) bits.push(`线体 <b>${H(line.name)}</b>`);
+    if (S.currentCode) bits.push(`当前型号 <b>${H(S.currentCode)}</b>`);
+  }
+  $('topStats').innerHTML = bits.join('　·　') || '—';
+}
+
+document.querySelectorAll('.nav-item[data-view]').forEach((b) => {
   b.addEventListener('click', () => {
     const v = b.dataset.view;
+
+    // 系统面板是弹层：打开它但不切走当前页面
+    if (v === 'system') {
+      if (openSysPanel) openSysPanel();
+      return;
+    }
+
     S.tab = v;
-    document.querySelectorAll('.side-item[data-view]').forEach((x) => x.classList.toggle('on', x === b));
-    $('view-matrix').classList.toggle('hide', v !== 'matrix');
-    $('view-media').classList.toggle('hide', v !== 'media');
-    $('view-profiles').classList.toggle('hide', v !== 'profiles');
-    if (v === 'matrix') {
+    syncNav();
+    if (S.tab === 'matrix') {
       renderLineBar();
       loadTerminals().catch(() => {});
     } else {
       $('lineWarn').classList.add('hide');
     }
-    if (v === 'media') loadMedia();
-    if (v === 'profiles') loadProfiles();
+    if (S.tab === 'lines') renderLineTable();
+    if (S.tab === 'media') loadMedia();
+    if (S.tab === 'profiles') loadProfiles();
+    if (S.tab === 'terms') loadTerminals().catch(() => {});
+    renderTopStats();
   });
 });
 
@@ -1824,8 +2063,7 @@ if (desk) {
   const modal = $('sysModal');
 
   const openSys = () => {
-    modal.classList.add('on');
-    desk.info().then((info) => {
+    modal.classList.add('on');    desk.info().then((info) => {
       sysInfo = info;
       $('sysVer').textContent = 'v' + info.version;
       $('sysPort').textContent = info.port;
@@ -1863,7 +2101,9 @@ if (desk) {
 
   const closeSys = () => modal.classList.remove('on');
 
-  $('sysBtn').addEventListener('click', () => (modal.classList.contains('on') ? closeSys() : openSys()));
+  // 左栏「系统」入口调这个（见上面的导航切换）。
+  // 系统面板是弹层，关闭后仍停在原来的功能页，底下不会空一大块。
+  openSysPanel = openSys;
   $('sysClose').addEventListener('click', closeSys);
   modal.addEventListener('click', (e) => { if (e.target === modal) closeSys(); });
 
@@ -1922,6 +2162,7 @@ if (desk) {
 // ---------- 启动 ----------
 (async function boot() {
   try {
+    syncNav();
     await loadAll();
     pollLoop();
   } catch (err) {
