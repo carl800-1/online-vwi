@@ -174,6 +174,19 @@ npm run gui          # 以桌面程序方式启动（开发调试）
 npm run gui:dist     # 打包 portable exe
 ```
 
+打包环境两个坑（本机内网必需）：
+
+1. **必须走公司代理**：`export https_proxy=http://sha1.sme.zscaler.net:443`。
+   不设会报 `unable to get local issuer certificate`。
+2. `build.electronDownload.isVerifyChecksum = false` 是**故意开着**的。
+   `@electron/get` 每次打包都要联网拉 `SHASUMS256.txt` 校验 electron 的 zip，
+   而这个校验文件**不走本地缓存**，代理经常在建连阶段就断（
+   `Client network socket disconnected before secure TLS connection was established`），
+   表现为每次打包都卡在 `packaging ... win-unpacked` 之后失败。
+   electron 的 zip 本身是从 `%LOCALAPPDATA%\electron\Cache` 读的（命中缓存打印 `using cached artifact`），
+   跳过的是它的哈希校验。**换机器或首次装依赖后要联网跑一次成功打包**，
+   让 zip 进缓存，之后就能离线出包。
+
 </details>
 
 ### 日常操作

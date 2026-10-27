@@ -29,6 +29,9 @@
     "appId": "com.frank.esop-server",
     "productName": "ESOP-Server",
     "asar": false,
+    "electronDownload": {
+      "isVerifyChecksum": false
+    },
     "directories": {
       "output": "server-gui/dist",
       "buildResources": "server-gui/assets"
