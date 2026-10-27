@@ -8,6 +8,61 @@
 </head>
 <body>
 
+<!-- ========== 图标库（内联 SVG symbol，统一 24 网格 / 1.7 笔宽） ==========
+     原来用 ▦ ⚙ ▤ ☰ ▣ 这类文字符号当图标，问题有三个：
+     字形粗细随字体走、基线不齐（选了之后尤其明显）、缩小后糊成一团。
+     改成一整套手绘等宽的线性图标，笔宽、圆角、留白都一致，
+     颜色用 currentColor，深色侧栏与选中态自动跟着走。 -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <!-- 作业内容：宫格矩阵，对应"型号 × 工序"那张表 -->
+    <symbol id="i-matrix" viewBox="0 0 24 24">
+      <rect x="3" y="3" width="7.5" height="7.5" rx="1.6"/>
+      <rect x="13.5" y="3" width="7.5" height="7.5" rx="1.6"/>
+      <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.6"/>
+      <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1.6"/>
+    </symbol>
+    <!-- 线体设置：两段工序 + 折线连接，读作"工序流程"（直角比曲线在 18px 下更清楚） -->
+    <symbol id="i-line" viewBox="0 0 24 24">
+      <rect x="2.6" y="3.4" width="6.6" height="5.6" rx="1.5"/>
+      <rect x="14.8" y="15" width="6.6" height="5.6" rx="1.5"/>
+      <path d="M9.2 6.2h5.2a2.2 2.2 0 0 1 2.2 2.2v6.6"/>
+    </symbol>
+    <!-- 媒体库：图片框 + 山峰 + 太阳 -->
+    <symbol id="i-media" viewBox="0 0 24 24">
+      <rect x="3" y="4" width="18" height="16" rx="2.2"/>
+      <circle cx="8.6" cy="9.4" r="1.5"/>
+      <path d="M3.6 17.4l4.6-4.2a2 2 0 0 1 2.7 0l3.1 2.9"/>
+      <path d="M13.4 15.6l2.3-2.1a2 2 0 0 1 2.7 0l2 1.9"/>
+    </symbol>
+    <!-- 配置库：带条目清单的档案板 -->
+    <symbol id="i-profile" viewBox="0 0 24 24">
+      <rect x="4.5" y="4" width="15" height="17" rx="2.2"/>
+      <path d="M8.5 2.5h7v3h-7z" stroke-linejoin="round"/>
+      <path d="M8.5 11h7M8.5 15h4.5"/>
+    </symbol>
+    <!-- 终端监控：显示器 + 底座 -->
+    <symbol id="i-terminal" viewBox="0 0 24 24">
+      <rect x="2.5" y="3.5" width="19" height="13" rx="2.2"/>
+      <path d="M9 20.5h6M12 16.5v4"/>
+      <path d="M6 8.5h6M6 12h3.5"/>
+    </symbol>
+    <!-- 系统：齿轮（环形轮体 + 8 个贴合的齿 + 轮毂；齿必须咬住圆环，
+         否则在小尺寸下会读成"太阳"） -->
+    <symbol id="i-system" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="6.1"/>
+      <circle cx="12" cy="12" r="2.7"/>
+      <path d="M18.1 12L20.7 12M16.31 16.31L18.15 18.15M12 18.1L12 20.7M7.69 16.31L5.85 18.15M5.9 12L3.3 12M7.69 7.69L5.85 5.85M12 5.9L12 3.3M16.31 7.69L18.15 5.85"/>
+    </symbol>
+    <!-- 品牌标：屏幕 + 两行内容（ESOP = 屏上作业指导书） -->
+    <symbol id="i-brand" viewBox="0 0 24 24">
+      <rect x="2.6" y="4" width="18.8" height="13.4" rx="2.4"/>
+      <path d="M7 9h10M7 13h6"/>
+      <path d="M9.4 20.6h5.2"/>
+    </symbol>
+  </defs>
+</svg>
+
 <!-- ========== 整体骨架：左侧功能区 + 右侧内容区 ==========
      左栏只回答"我要干什么"（功能导航），不回答"我在看哪条线"（作业上下文）。
      线体选择因此移到内容区顶部的上下文条 —— 那才是它该待的地方：
@@ -20,17 +75,17 @@
   <!-- ========== 左侧功能区 ========== -->
   <aside class="sidebar">
     <div class="brand">
-      <span class="brand-logo">📋</span>
+      <span class="brand-logo" aria-hidden="true"><svg><use href="#i-brand"/></svg></span>
       <span class="brand-name">E-SOP 发布系统</span>
     </div>
 
     <nav class="nav" id="nav">
-      <button class="nav-item active" data-view="matrix"><span class="ico">▦</span>作业内容</button>
-      <button class="nav-item" data-view="lines"><span class="ico">⚙</span>线体设置</button>
-      <button class="nav-item" data-view="media"><span class="ico">▤</span>媒体库</button>
-      <button class="nav-item" data-view="profiles"><span class="ico">☰</span>配置库</button>
-      <button class="nav-item" data-view="terms"><span class="ico">▣</span>终端监控</button>
-      <button class="nav-item desk-only" data-view="system"><span class="ico">⚙</span>系统</button>
+      <button class="nav-item active" data-view="matrix"><svg class="ico"><use href="#i-matrix"/></svg>作业内容</button>
+      <button class="nav-item" data-view="lines"><svg class="ico"><use href="#i-line"/></svg>线体设置</button>
+      <button class="nav-item" data-view="media"><svg class="ico"><use href="#i-media"/></svg>媒体库</button>
+      <button class="nav-item" data-view="profiles"><svg class="ico"><use href="#i-profile"/></svg>配置库</button>
+      <button class="nav-item" data-view="terms"><svg class="ico"><use href="#i-terminal"/></svg>终端监控</button>
+      <button class="nav-item desk-only" data-view="system"><svg class="ico"><use href="#i-system"/></svg>系统</button>
     </nav>
 
     <div class="sidebar-foot">

@@ -1,6 +1,6 @@
 {
   "name": "online-vwi-terminal",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "productName": "ESOP-Client",
   "description": "在线 VWI 发布系统 · 工作台接收端（kiosk 全屏播放）",
   "main": "main.js",
@@ -21,6 +21,9 @@
     "electron-builder": "^26.15.3"
   },
   "build": {
+    "electronDownload": {
+      "isVerifyChecksum": false
+    },
     "appId": "com.frank.esop-client",
     "productName": "ESOP-Client",
     "directories": {
