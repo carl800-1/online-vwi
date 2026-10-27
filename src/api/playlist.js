@@ -1,20 +1,34 @@
-// 播放清单：一个 (型号 × 工序) 下的一组有序内容
-// 保存方式刻意做成"整批覆盖"：前端一次提交该工序全部项，
-// 后台先删后插。逐条增删会留下"删了第 3 条、第 4 条序号要不要重排"的中间态，
-// 整批覆盖没有中间态，也不会出现半套清单被终端读到。
-import { q, tx } from '../db.js';
+// 播放清单（兼容接口）：按「机种 × 工位」读写
+//
+// v2.0.0 起内容的宿主是工位，但老调用方（脚本、旧页面）传的是 processId。
+// 这里把 process.code 映射到该机种的同码工位 —— 语义没变
+// （"这个机种在这道工序上该播什么"），只是不再按线体复制。
+// 新代码请直接用 /api/stations/:id。
+import { q, stationsOf, saveStation } from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
-import { uid, int, clamp } from '../util.js';
 import { notifyContentChanged } from '../switch.js';
 
-function loadItems(modelId, processId) {
+/** processId 或 stationId 都收；返回 station 记录 */
+function resolveStation(modelId, { stationId, processId }) {
+  if (stationId) {
+    return q.get('SELECT * FROM station WHERE id = ? AND model_id = ?', stationId, modelId) || null;
+  }
+  if (processId) {
+    const p = q.get('SELECT * FROM process WHERE id = ?', processId);
+    if (!p) return null;
+    return q.get('SELECT * FROM station WHERE model_id = ? AND code = ?', modelId, p.code) || null;
+  }
+  return null;
+}
+
+function loadItems(stationId) {
   return q.all(
     `SELECT i.id, i.ord, i.kind, i.media_id, i.dwell_sec, i.fit, i.zoom,
             m.name, m.ext, m.mime, m.bytes, m.width, m.height, m.duration_ms
        FROM item i JOIN media m ON m.id = i.media_id
-      WHERE i.model_id = ? AND i.process_id = ?
+      WHERE i.station_id = ?
       ORDER BY i.ord, i.id`,
-    modelId, processId
+    stationId
   ).map((r) => ({
     id: r.id,
     ord: r.ord,
@@ -37,18 +51,20 @@ function loadItems(modelId, processId) {
 export function register(router) {
   router.get('/api/playlist', (req, res, ctx) => {
     const modelId = String(ctx.query.modelId || '');
-    const processId = String(ctx.query.processId || '');
     const model = q.get('SELECT * FROM model WHERE id = ?', modelId);
-    const process = q.get('SELECT * FROM process WHERE id = ?', processId);
     if (!model) throw badRequest('型号不存在');
-    if (!process) throw badRequest('工序不存在');
 
-    const items = loadItems(modelId, processId);
+    const station = resolveStation(modelId, {
+      stationId: String(ctx.query.stationId || ''),
+      processId: String(ctx.query.processId || '')
+    });
+    if (!station) throw badRequest('这个机种在这道工序上还没有工位');
+
+    const items = loadItems(station.id);
     sendJson(res, 200, {
       model: { id: model.id, code: model.code, name: model.name },
-      process: { id: process.id, code: process.code, name: process.name },
+      station: { id: station.id, code: station.code, name: station.name },
       items,
-      // 给前端算总数：这套内容需要多少 MB、几张图几段视频
       stats: {
         count: items.length,
         images: items.filter((i) => i.kind === 'image').length,
@@ -61,51 +77,46 @@ export function register(router) {
   router.put('/api/playlist', async (req, res) => {
     const body = await readJsonBody(req);
     const modelId = String(body.modelId || '');
-    const processId = String(body.processId || '');
-    const list = Array.isArray(body.items) ? body.items : null;
-
     const model = q.get('SELECT * FROM model WHERE id = ?', modelId);
-    const process = q.get('SELECT * FROM process WHERE id = ?', processId);
     if (!model) throw badRequest('型号不存在');
-    if (!process) throw badRequest('工序不存在');
-    if (!list) throw badRequest('items 必须是数组');
 
-    // 先全部校验完再动数据库：宁可整批失败，也不要写进去一半
+    const station = resolveStation(modelId, {
+      stationId: String(body.stationId || ''),
+      processId: String(body.processId || '')
+    });
+    if (!station) throw badRequest('这个机种在这道工序上还没有工位');
+
+    const list = body.items;
+    if (!Array.isArray(list)) throw badRequest('items 必须是数组');
+
+    // 先全部校验完再写库：宁可整批失败，也不要写进去一半
     const seen = new Set();
-    const rows = list.map((it, i) => {
+    const rows = [];
+    list.forEach((it, i) => {
       const mediaId = String(it.mediaId || '');
       const media = q.get('SELECT * FROM media WHERE id = ?', mediaId);
       if (!media) throw badRequest(`第 ${i + 1} 项的媒体不存在（${mediaId}）`);
       if (seen.has(mediaId)) throw badRequest(`同一个文件不能在一套清单里出现两次：${media.name}`);
       seen.add(mediaId);
-      return {
+      rows.push({
         mediaId,
-        kind: media.kind,
-        ord: i,
-        // 图片停留 1–120 秒；视频不看这个值，播完就下一项
-        dwellSec: clamp(it.dwellSec ?? 10, 1, 120),
-        // 显示方式只对图片有意义：contain 不裁切、cover 铺满。zoom 是百分比，
-        // 超过 100 就是放大后裁掉两边 —— 指导书上的小字看不清时用得上。
+        dwellSec: it.dwellSec ?? 10,
         fit: it.fit === 'cover' ? 'cover' : 'contain',
-        zoom: clamp(it.zoom ?? 100, 50, 200)
-      };
+        zoom: it.zoom ?? 100
+      });
     });
 
-    tx(() => {
-      q.run('DELETE FROM item WHERE model_id = ? AND process_id = ?', modelId, processId);
-      for (const r of rows) {
-        q.run(
-          `INSERT INTO item(id,model_id,process_id,ord,kind,media_id,dwell_sec,fit,zoom)
-           VALUES(?,?,?,?,?,?,?,?,?)`,
-          uid('it'), modelId, processId, r.ord, r.kind, r.mediaId, r.dwellSec, r.fit, r.zoom
-        );
-      }
-    });
-
-    // 提交之后再通知：终端收到的每一次 rev 变化都对应一个已经落库的清单，
-    // 顺序反了会让终端读到旧数据（"收到通知但内容没变"）。
+    saveStation(modelId, station.id, { items: rows });
     notifyContentChanged();
 
-    sendJson(res, 200, { ok: true, count: rows.length, items: loadItems(modelId, processId) });
+    sendJson(res, 200, { ok: true, count: rows.length, items: loadItems(station.id) });
+  });
+
+  // 机种的全部工位（含内容），机种设置页一次取完
+  router.get('/api/playlist/all', (req, res, ctx) => {
+    const modelId = String(ctx.query.modelId || '');
+    const model = q.get('SELECT * FROM model WHERE id = ?', modelId);
+    if (!model) throw badRequest('型号不存在');
+    sendJson(res, 200, { model, stations: stationsOf(modelId) });
   });
 }

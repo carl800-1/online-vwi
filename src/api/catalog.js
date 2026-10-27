@@ -96,14 +96,8 @@ export function register(router) {
     if (l.enabled) throw badRequest('这条线体正在启用，先停用再删除');
     if (q.get('SELECT COUNT(*) n FROM line').n <= 1) throw badRequest('至少保留一条线体');
 
-    const procIds = processesOf(l.id).map((p) => p.id);
-    if (procIds.length) {
-      const used = q.get(
-        `SELECT COUNT(*) n FROM item WHERE process_id IN (${procIds.map(() => '?').join(',')})`,
-        ...procIds
-      ).n;
-      if (used) throw badRequest(`这条线体还有 ${used} 条播放内容，删掉会丢数据；请先清空清单`);
-    }
+    // v2.0.0 起内容挂在「机种工位」上，跟线体没有外键关系，
+    // 所以删线体不会丢内容 —— 只是这条线上那几块屏以后没人读了。
     tx(() => {
       q.run('DELETE FROM process WHERE line_id = ?', l.id);
       q.run('DELETE FROM line_state WHERE line_id = ?', l.id);
@@ -118,6 +112,16 @@ export function register(router) {
     const lineId = String(ctx.query.lineId || '').trim() || pickActiveLineId();
     const models = q.all('SELECT * FROM model ORDER BY sort, code');
     const cov = coverage(lineId);
+    // 机种自己的工位完成度：机种设置页看的是"这个机种配了几块屏"，
+    // 跟"在当前这条线上备了几块屏"是两件事，两个数都要给。
+    const stMap = new Map(
+      q.all(`
+        SELECT s.model_id,
+               COUNT(*) total,
+               SUM(CASE WHEN EXISTS(SELECT 1 FROM item i WHERE i.station_id = s.id) THEN 1 ELSE 0 END) done
+          FROM station s GROUP BY s.model_id
+      `).map((r) => [r.model_id, { total: r.total, done: r.done || 0 }])
+    );
     sendJson(res, 200, {
       lineId,
       models: models.map((m) => ({
@@ -129,6 +133,9 @@ export function register(router) {
         // 完成度按"这套型号在本线体有几道工序已经有内容"算，分母是线体的工序数
         done: cov.byModel[m.id]?.done ?? 0,
         total: cov.byModel[m.id]?.total ?? 0,
+        // 这个机种自己的工位完成度（跟线体无关）
+        stDone: stMap.get(m.id)?.done ?? 0,
+        stTotal: stMap.get(m.id)?.total ?? 0,
         cells: Object.fromEntries(
           Object.entries(cov.cells)
             .filter(([k]) => k.startsWith(m.id + ':'))
@@ -183,24 +190,23 @@ export function register(router) {
   });
 
   // ---------- 工序 ----------
-  // 工序挂在具体线体下。新建线体时自动带 5 道标准工序，之后可以改名、增删。
+  // 工序挂在具体线体下（这条线上有几块屏）。新建线体时自动带 5 道标准工序。
+  // 内容不在这里：播什么由「机种工位」按同码对位决定。
   router.get('/api/processes', (req, res, ctx) => {
     const lineId = String(ctx.query.lineId || '').trim() || pickActiveLineId();
     const processes = processesOf(lineId);
-    const ids = processes.map((p) => p.id);
-    const counts = ids.length
-      ? q.all(
-          `SELECT process_id, COUNT(DISTINCT model_id) n FROM item
-            WHERE process_id IN (${ids.map(() => '?').join(',')})
-            GROUP BY process_id`, ...ids)
-      : [];
-    const map = new Map(counts.map((r) => [r.process_id, r.n]));
+    // 这道工序在多少个机种里有对应工位且已备内容 —— 只做展示，帮人判断"这条屏是不是空转"
+    const counts = q.all(`
+      SELECT s.code, COUNT(DISTINCT s.model_id) n
+        FROM station s JOIN item i ON i.station_id = s.id
+       GROUP BY s.code
+    `);
+    const map = new Map(counts.map((r) => [r.code, r.n]));
     sendJson(res, 200, {
       lineId,
       processes: processes.map((p) => ({
         id: p.id, code: p.code, name: p.name, sort: p.sort,
-        // 这道工序已经有几个型号备好了内容
-        modelsWithContent: map.get(p.id) || 0
+        modelsWithContent: map.get(p.code) || 0
       }))
     });
   });
@@ -251,8 +257,7 @@ export function register(router) {
     if (q.get('SELECT COUNT(*) n FROM process WHERE line_id = ?', p.line_id).n <= 1) {
       throw badRequest('至少保留一道工序');
     }
-    const used = q.get('SELECT COUNT(*) n FROM item WHERE process_id = ?', p.id).n;
-    if (used) throw badRequest(`这道工序还有 ${used} 条播放内容，删掉会丢数据；请先清空清单`);
+    // 内容在机种工位上，删工序不动内容；只是这条线少一块屏。
     q.run('DELETE FROM process WHERE id = ?', p.id);
     sendJson(res, 200, { ok: true });
   });

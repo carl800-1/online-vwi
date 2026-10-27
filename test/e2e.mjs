@@ -289,9 +289,11 @@ async function upload(buf, name) {
   const readyNoLine = await post('/api/ready', { op: 'OP30', modelId: M.X230.id });
   ok(readyNoLine.ok && readyNoLine.body.state.lineId === L2, '举手不带 line 时落到当前启用线体');
 
-  // 有内容的线体不许直接删（会丢清单）
-  const delBusy = await j('/api/lines/' + ls.find((l) => l.code === 'L1').id, { method: 'DELETE' });
-  ok(delBusy.status === 400, '还有内容的线体不允许删除（防误删清单一整条线）');
+  // v2.0.0：内容挂在「机种工位」上，跟线体没有外键关系，所以"有内容不许删线体"
+  // 这条保护随内容模型一起取消了 —— 删线体只删那几块屏的身份，不动 SOP。
+  // 这里确认一下现状：机种内容确实存在，且不依赖线体。
+  const covBefore = (await j('/api/models')).body.coverage.done;
+  ok(covBefore > 0, '机种里有内容（不依赖线体存在）');
 
   // 收拾：停用并删掉测试线体
   await put('/api/lines/' + L2, { enabled: false });
@@ -300,80 +302,69 @@ async function upload(buf, name) {
   await put('/api/lines/' + ls.find((l) => l.code === 'L1').id, { enabled: true });
   ok((await j('/api/lines')).body.lines.length === 1, '删除后只剩一线，且恢复启用');
 
-  // ---------- 12. 配置库 ----------
-  // 这一节的用例对应"配置库到底是什么"：它是模板，不复制内容，
-  // 只做两件事 —— 对齐线的工序清单、拿它去量实际内容缺什么。
-  const pfList = (await j('/api/profiles')).body;
-  ok(Array.isArray(pfList.profiles) && pfList.profiles.length >= 1,
-    '首次启动自带一份标准工艺模板（配置库不是空白）');
+  // ---------- 12. 工位（机种设置） ----------
+  // v2.0.0 的核心变化：内容从「线体工序」搬到「机种工位」，全厂一份。
+  // 这一节验证：工位与工序码对位、类型闸门、跨线共用、同步工序、总览接口。
+  const L1id = (await j('/api/lines')).body.lines.find((l) => l.code === 'L1').id;
+  const stAll = (await j('/api/stations?modelId=' + M.X200.id)).body;
+  ok(stAll.stations.length === 5, '机种自带 5 个标准工位');
+  ok(stAll.stations.map((s) => s.code).join(',') === 'OP10,OP20,OP30,OP40,OP50',
+    '工位码与线体工序码一一对位（OP10 ↔ OP10）');
 
-  const STD = pfList.profiles.find((x) => x.code === 'STD') || pfList.profiles[0];
-  ok(STD.steps.length === 5 && STD.steps[0].reqs.length >= 1,
-    '模板带 5 道工序，且每道有类型要求');
+  const st30 = stAll.stations.find((s) => s.code === 'OP30');
+  ok(st30.items.length === 2, 'OP30 上有前面写入的 2 项（内容已迁到工位）');
 
-  // 校验：用模板去量 X200 的实际内容（本测试前面只给 OP30 配了内容）
-  const chk = (await j(`/api/profiles/${STD.id}/check?lineCode=L1&modelCode=X200`)).body;
-  ok(chk.summary.total === 5, '校验按工序逐道返回，总数等于配置里的工序数');
-  ok(chk.steps.find((x) => x.code === 'OP30').count === 2, 'OP30 的实际项数被正确统计（2 项）');
-  ok(chk.steps.find((x) => x.code === 'OP30').ok === false,
-    '8×8 的图低于 1280×720 要求 → 判为不达标（不是有内容就算过）');
-  ok(chk.steps.find((x) => x.code === 'OP30').badItems.length === 2,
-    '不符合规格的项被逐条列出来（界面靠它标红）');
-
-  // 建一份自定义配置：OP10 要 2 图 + 1 视频 + 1 PDF，OP20 只要 1 图
-  const made = await post('/api/profiles', {
-    code: 'P-X220',
-    name: 'X220 工艺',
-    steps: [
-      { code: 'OP10', name: '上料', maxMb: 30, reqs: [
-        { kind: 'image', minCount: 2, minWidth: 640, minHeight: 480 },
-        { kind: 'video', minCount: 1 },
-        { kind: 'pdf', minCount: 1 }
-      ] },
-      { code: 'OP20', name: '装配', reqs: [{ kind: 'image', minCount: 1 }] }
-    ]
+  // 类型闸门：工位只允许视频时，塞图片必须被拒
+  await put('/api/stations/' + st30.id, { reqs: [{ kind: 'video', minCount: 1 }] });
+  const gate = await put('/api/stations/' + st30.id, { items: [{ mediaId: u1.body.id }] });
+  ok(gate.status === 400, '工位只允许视频时，写进图片被拒（类型闸门生效）');
+  ok((await j('/api/playlist?modelId=' + M.X200.id + '&processId=' + P.OP30.id)).body.items.length === 2,
+    '被拒的那次没有破坏原有内容（整批校验，不留半套）');
+  await put('/api/stations/' + st30.id, {
+    reqs: [{ kind: 'image', minCount: 1, minWidth: 1280, minHeight: 720 }]
   });
-  ok(made.ok && made.body.steps.length === 2, '可以新建一份带类型要求的配置');
-  ok(made.body.steps[0].reqs.length === 3, '一道工序可以同时要求图片/视频/PDF 三类');
 
-  // 应用到线体：默认不删配置外的工序
-  const L1id = ls.find((l) => l.code === 'L1').id;
-  const apKeep = await post(`/api/profiles/${made.body.id}/apply`, { lineId: L1id });
-  ok(apKeep.ok && apKeep.body.created.length === 0 && apKeep.body.updated.length === 0,
-    '应用时同工序码只改名字/顺序，不重复建');
-  ok(apKeep.body.kept.length === 3 && apKeep.body.removed.length === 0,
-    '默认不删配置外的工序（哪怕它没有内容）—— 一份 2 道工序的配置不该毁掉 5 道');
+  // 跨线共用：同一机种在一线和三线播同一套（不再按线各存一份）
+  const madeL3 = await post('/api/lines', { code: 'L3', name: '三线' });
+  const L3 = madeL3.body.id;
+  const plL1 = (await j('/display/playlist?op=OP30&line=L1&model=X200')).body;
+  const plL3 = (await j('/display/playlist?op=OP30&line=L3&model=X200')).body;
+  ok(plL1.count === 2 && plL3.count === 2,
+    '同一机种在不同线体上取到同一套内容（全厂一份 SOP，换线不用重传）');
+  await j('/api/lines/' + L3, { method: 'DELETE' });
 
-  // 明确要求 prune 时才删，而且仍然只删空的：
-  // 此时线体上是 OP10/OP20（配置内）+ OP30（有内容）/OP40/OP50（空）。
-  // 所以能删的只有 OP40、OP50 两道，OP30 因为有内容必须留下 —— 这正是这条保护的意义。
-  const apPrune = await post(`/api/profiles/${made.body.id}/apply`, { lineId: L1id, prune: true });
-  ok(apPrune.body.removed.length === 2, 'prune=true 才删配置外的工序，且只删空的（OP40/OP50）');
-  ok(apPrune.body.kept.some((x) => x.code === 'OP30' && x.items > 0),
-    '配置外但有播放内容的工序，即使 prune 也不删（不替人删他的活儿）');
-  const procsAfter = (await j('/api/processes?lineId=' + L1id)).body.processes;
-  ok(procsAfter.length === 3, '应用后剩 2 道配置内 + 1 道有内容的（5 → 3）');
+  // 加工位 / 重码拒绝
+  const madeSt = await post('/api/stations', { modelId: M.X200.id, code: 'OP60', name: '老化' });
+  ok(madeSt.ok && madeSt.body.code === 'OP60' && madeSt.body.reqs.some((r) => r.kind === 'image'),
+    '可以给机种加工位（默认允许图片）');
+  ok((await post('/api/stations', { modelId: M.X200.id, code: 'OP60' })).status === 400,
+    '同一机种工位码不能重复');
 
-  // 恢复：把标准 5 道工序补回来（否则后面的换型用例全乱了）
-  const restore = await post(`/api/profiles/${STD.id}/apply`, { lineId: L1id });
-  ok(restore.body.created.length === 2, '把标准模板再应用回来，缺的 2 道工序被补上');
-  const procsRestored = (await j('/api/processes?lineId=' + L1id)).body.processes;
-  ok(procsRestored.length === 5, '线体恢复 5 道工序');
+  // 同步到线体：缺的补上，多出来的不删
+  const sync = await post('/api/stations/sync', { modelId: M.X200.id, lineId: L1id });
+  ok(sync.ok && sync.body.created.some((x) => x.code === 'OP60'),
+    '可以把机种工位同步成线体工序（缺的补上）');
+  ok(sync.body.processes === 6, '同步后一线有 6 道工序');
 
-  // 配置匹配：编码里带机种号时能自动匹配上
-  const match = (await j('/api/profiles/match?lineId=' + L1id + '&modelCode=X220')).body;
-  ok(match.profile && match.profile.code === 'P-X220',
-    '机种 X220 自动匹配到「P-X220」这份配置（编码里带机种号）');
-  ok(match.byCode && match.byCode.OP10, '匹配结果里带"工序码 → 要求"，矩阵表头直接可用');
+  // 有内容的工位不许直接删（会丢内容）
+  const delBusySt = await j('/api/stations/' + st30.id, { method: 'DELETE' });
+  ok(delBusySt.status === 400, '有内容的工位不允许直接删');
 
-  // 没有配置的机种不能凭空判不合格
-  const noMatch = (await j('/api/profiles/match?lineId=' + L1id + '&modelCode=X299')).body;
-  ok(noMatch.profile === null || noMatch.profile.code !== 'P-X220',
-    '没匹配到专属配置时不会硬套别人的要求');
+  // 清理：删掉空的 OP60，把一线工序恢复成 5 道
+  const st60 = (await j('/api/stations?modelId=' + M.X200.id)).body.stations.find((s) => s.code === 'OP60');
+  await j('/api/stations/' + st60.id, { method: 'DELETE' });
+  const p60 = (await j('/api/processes?lineId=' + L1id)).body.processes.find((p) => p.code === 'OP60');
+  await j('/api/processes/' + p60.id, { method: 'DELETE' });
+  ok((await j('/api/processes?lineId=' + L1id)).body.processes.length === 5, '一线恢复 5 道工序');
 
-  await j('/api/profiles/' + made.body.id, { method: 'DELETE' });
-  ok((await j('/api/profiles')).body.profiles.every((x) => x.code !== 'P-X220'),
-    '配置档案可以删除（只删模板，不动内容）');
+  // 总览接口：线体 + 机种 + 客户端状态一次给全
+  const board = (await j('/api/board')).body;
+  ok(Array.isArray(board.lines) && board.lines.length >= 1, '总览一次返回所有线体');
+  const bl = board.lines[0];
+  ok(bl.clients.length === bl.processes, '每个工序都占一个客户端位置（没装机的也列出来）');
+  ok(bl.clients.every((c) => typeof c.status === 'string' && 'hasContent' in c),
+    '客户端带 status 与 hasContent，总览据此标出"哪块屏没内容"');
+
 
   // ---------- 13. 终端参数与上传进度 ----------
   // 现场最常问的是"3 号工位怎么没数据"，所以两条路径都要能区分：

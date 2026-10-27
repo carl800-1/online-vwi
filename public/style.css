@@ -1365,3 +1365,244 @@ body.is-desktop .modal.desk-only.on { display: flex !important; }
   .col-param { position: static; }
   .pf-step { grid-template-columns: 40px 66px minmax(60px, 1fr) repeat(3, 104px) 66px 26px; }
 }
+
+/* ==========================================================================
+   v2.0.0：作业内容总览 + 机种设置（工位）
+   ========================================================================== */
+
+/* 侧栏分组标题：总览和设置是两类东西，中间要有条线 */
+.nav-group {
+  padding: 14px 18px 5px;
+  font-size: 11px;
+  color: #64748b;
+  letter-spacing: .1em;
+}
+
+/* ---------- 总览：每条产线一张卡 ---------- */
+.board {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(540px, 1fr));
+  gap: 14px;
+}
+
+.bcard {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 4px solid #cbd5e1;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 13px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.bcard.on { border-left-color: var(--ok); }
+.bcard.preparing { border-left-color: var(--warn); }
+
+.bc-head { display: flex; align-items: center; gap: 8px; }
+.bc-name { font-size: 15.5px; font-weight: 600; }
+.bc-code {
+  font-size: 11.5px; color: var(--ink2);
+  background: #eef2f7; border-radius: 5px; padding: 1px 6px;
+}
+.bc-online { font-size: 12px; color: var(--ink3); }
+.bc-online b { color: var(--ink); }
+
+.bc-model { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.bc-model .k { font-size: 11.5px; color: var(--ink3); }
+.bc-model b { font-size: 22px; font-weight: 700; letter-spacing: .3px; }
+.bc-model.none b { font-size: 16px; color: var(--ink3); font-weight: 600; }
+.bc-model .nm { font-size: 12.5px; color: var(--ink2); }
+.bc-model.switching b.to { color: var(--brand); }
+.bc-model .arrow { color: var(--ink3); }
+.bc-model .prog {
+  width: 110px; height: 6px; border-radius: 3px; background: #eef2f7; overflow: hidden;
+}
+.bc-model .prog i { display: block; height: 100%; background: var(--warn); }
+.bc-model .sub { font-size: 11.5px; color: var(--ink3); }
+
+.bc-clients { display: flex; flex-wrap: wrap; gap: 6px; }
+.cl {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 9px; border-radius: 999px; font-size: 12px;
+  border: 1px solid var(--line); background: #f8fafc; color: var(--ink2);
+  white-space: nowrap;
+}
+.cl b { font-weight: 600; color: var(--ink); }
+.cl.ok { background: var(--ok-bg); border-color: #bbe7c9; color: #15803d; }
+.cl.ok b { color: #15803d; }
+.cl.run { background: #eef6ff; border-color: #cfe4ff; color: var(--brand-ink); }
+.cl.run b { color: var(--brand-ink); }
+.cl.warn { background: var(--warn-bg); border-color: #f3dfa8; color: #a16207; }
+.cl.warn b { color: #a16207; }
+.cl.off, .cl.muted { background: #f3f5f8; color: var(--ink3); }
+.cl.off b, .cl.muted b { color: var(--ink2); }
+/* 当前机种在这个工位没有内容：红点前置，换型前就该看见 */
+.cl-warn {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--danger); flex: none;
+}
+
+.bc-alert {
+  font-size: 12.5px; color: #a16207; background: var(--warn-bg);
+  border: 1px solid #f3dfa8; border-radius: 7px; padding: 7px 10px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+
+.bc-acts {
+  display: flex; gap: 8px; align-items: center;
+  padding-top: 8px; border-top: 1px solid var(--line2);
+}
+.bc-sel {
+  flex: 1; max-width: 260px; padding: 6px 9px;
+  border: 1px solid var(--line); border-radius: 7px; background: #fff;
+}
+
+/* ---------- 机种设置：左边列表，右边工位 ---------- */
+.col-list {
+  width: 214px; flex: none;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  max-height: calc(100vh - 190px);
+}
+.md-list { overflow: auto; flex: 1; padding: 0 6px 8px; }
+.md-item {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%; padding: 8px 10px; margin-bottom: 2px;
+  border: none; border-radius: 8px; background: none;
+  cursor: pointer; text-align: left;
+}
+.md-item:hover { background: #f6f8fb; }
+.md-item.on { background: var(--brand-bg); }
+.md-item.on .md-code { color: var(--brand-ink); }
+.md-item.off { opacity: .5; }
+.md-code { font-weight: 600; font-size: 13.5px; }
+.md-dot {
+  margin-left: auto; font-size: 11px; color: var(--ink3);
+  background: #eef2f7; border-radius: 999px; padding: 1px 7px;
+}
+.md-dot.part { background: var(--warn-bg); color: #a16207; }
+.md-dot.full { background: var(--ok-bg); color: #15803d; }
+.mini-search {
+  margin: 0 10px 8px; padding: 6px 9px;
+  border: 1px solid var(--line); border-radius: 7px; font-size: 12.5px;
+}
+
+.md-summary { padding: 12px 14px 14px; }
+.ms { display: flex; gap: 30px; flex-wrap: wrap; }
+.ms-item { display: flex; flex-direction: column; }
+.ms-item b { font-size: 17px; font-weight: 700; }
+.ms-item span { font-size: 11.5px; color: var(--ink3); }
+
+/* ---------- 工位卡 ---------- */
+.stations { display: flex; flex-direction: column; gap: 12px; }
+.station {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 12px 14px 13px;
+}
+.st-head { display: flex; align-items: center; gap: 8px; }
+.st-code {
+  font-weight: 700; font-size: 13.5px; color: var(--brand-ink);
+  background: var(--brand-bg); border-radius: 6px; padding: 2px 8px;
+}
+.st-name {
+  width: 170px; padding: 4px 7px; font-size: 14px;
+  border: 1px solid transparent; border-radius: 6px; background: none;
+}
+.st-name:hover { border-color: var(--line); }
+.st-name:focus { border-color: var(--brand); outline: none; background: #fff; }
+.st-meta { font-size: 12px; color: var(--ink3); }
+
+.st-reqs {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  margin: 9px 0; font-size: 12.5px; color: var(--ink2);
+}
+.st-lbl { color: var(--ink3); font-size: 12px; }
+.req {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 8px; border: 1px solid var(--line); border-radius: 8px;
+  background: #fafbfd;
+}
+.req.on { background: #fff; border-color: #cfd8e6; }
+.req .kres { display: inline-flex; align-items: center; gap: 3px; color: var(--ink3); }
+.knum {
+  width: 50px; padding: 2px 4px; text-align: center;
+  border: 1px solid var(--line); border-radius: 5px;
+}
+.req .kres input { width: 48px; padding: 2px 4px; text-align: center;
+  border: 1px solid var(--line); border-radius: 5px; }
+
+.st-drop {
+  border: 1.5px dashed #cbd5e1; border-radius: 8px;
+  padding: 11px; text-align: center;
+  color: var(--ink2); font-size: 12.5px; background: #fbfcfe;
+}
+.st-drop.hot { border-color: var(--brand); background: var(--brand-bg); }
+.st-drop .dim { color: var(--ink3); }
+
+.st-items { margin-top: 9px; display: flex; flex-direction: column; gap: 6px; }
+.sitem {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 8px; border: 1px solid var(--line2);
+  border-radius: 8px; background: #fbfcfe;
+}
+.sidx { width: 16px; text-align: center; font-size: 12px; color: var(--ink3); flex: none; }
+.spic {
+  width: 56px; height: 38px; flex: none; overflow: hidden;
+  border-radius: 5px; background: #eef2f7;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; color: var(--ink3);
+}
+.spic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.sinfo { flex: 1; min-width: 0; }
+.sn { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sm { font-size: 11.5px; color: var(--ink3); }
+.sctrls { display: flex; gap: 12px; align-items: center; margin-top: 3px;
+  font-size: 11.5px; color: var(--ink2); flex-wrap: wrap; }
+.sctrls .dwell { display: inline-flex; align-items: center; gap: 3px; }
+.sctrls .dwell.dim { color: var(--ink3); }
+.sctrls .dwell input { width: 50px; padding: 1px 4px; text-align: center;
+  border: 1px solid var(--line); border-radius: 4px; }
+.sacts { display: flex; gap: 1px; flex: none; }
+.sempty {
+  padding: 12px; text-align: center; color: var(--ink3); font-size: 12.5px;
+  border: 1px dashed var(--line); border-radius: 8px;
+}
+.st-addrow { margin-top: 12px; }
+
+/* ---------- 行内小控件 ---------- */
+.inl { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink2); }
+.inl select, .inl input {
+  padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff;
+}
+.cell-input {
+  width: 100%; padding: 4px 6px; border: 1px solid transparent;
+  border-radius: 5px; background: none;
+}
+.cell-input:hover { border-color: var(--line); }
+.cell-input:focus { border-color: var(--brand); outline: none; background: #fff; }
+.warn-txt { color: var(--warn); }
+
+/* ---------- 上传进度浮层（工位内上传时不打断操作） ---------- */
+.upl-float {
+  position: fixed; right: 20px; bottom: 20px; width: 330px;
+  background: #fff; border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 10px 34px rgba(15, 23, 42, .18);
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 7px;
+  z-index: 70; max-height: 40vh; overflow: auto;
+}
+.upl-float.hide { display: none; }
+
+/* 机种设置是「左窄列表 + 右宽内容」，和作业页的「左内容 + 右窄栏」正好相反，
+   所以单独一个栅格，别去改 .split 的默认列宽（别的页还在用）。 */
+.split.split-list { grid-template-columns: 214px minmax(0, 1fr); }
+.split-list .col-list { width: auto; max-height: calc(100vh - 150px); }
+
+/* 工位已经有内容时，把大拖拽区收成一条：5 个工位都占 44px 的话一屏放不下 */
+.station.has-items .st-drop { padding: 6px 10px; text-align: left; font-size: 12px; }

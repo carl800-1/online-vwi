@@ -14,7 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { openDb, seed, ensureDefaultProfile, q } from './db.js';
+import { openDb, seed, ensureAllModelStations, q } from './db.js';
 import { findMedia, serveMedia, mediaStats } from './media.js';
 import { createRouter } from './router.js';
 import { initSwitch } from './switch.js';
@@ -26,7 +26,8 @@ import { register as registerPlaylist } from './api/playlist.js';
 import { register as registerMediaApi } from './api/mediaApi.js';
 import { register as registerState } from './api/state.js';
 import { register as registerDisplay } from './api/display.js';
-import { register as registerProfiles } from './api/profiles.js';
+import { register as registerStations } from './api/stations.js';
+import { register as registerBoard } from './api/board.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -120,7 +121,9 @@ export function startServer(opts = {}) {
   fs.mkdirSync(DATA, { recursive: true });
   openDb(DATA);
   const seeded = seed();
-  ensureDefaultProfile();
+  // 每个机种都要有工位，否则「机种设置」进去是空的。
+  // 放在 seed 之后：新库这时才刚建出型号。
+  ensureAllModelStations();
   initSwitch();
 
   const router = createRouter();
@@ -129,7 +132,8 @@ export function startServer(opts = {}) {
   registerMediaApi(router);
   registerState(router);
   registerDisplay(router);
-  registerProfiles(router);
+  registerStations(router);
+  registerBoard(router);
 
   const server = http.createServer(async (req, res) => {
     let url;

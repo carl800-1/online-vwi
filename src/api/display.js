@@ -1,12 +1,18 @@
 // 终端接口：身份 = 线体 + 工序，不鉴权（内网 + 一期不做权限）
 //
-// 为什么身份要加线体：一线和二线的 OP30 是两块屏、两份内容，
-// 只报 op 的话服务端分不清该给谁。不带 line 时由 router.js 回落到当前启用线体，
-// 这样现场老终端（config.json 里没有 line）升级后照常工作。
+// 为什么身份要加线体：一线和二线的 OP30 是两块屏，服务端要知道是谁在问。
+// 但**内容**从 v2.0.0 起不再按线体存：线体的工序只决定"这条线上有几块屏"，
+// 播什么由「机种 × 工位」决定，全厂一份。所以同一机种换线不用重传。
+// 不带 line 时由 router.js 回落到当前启用线体，现场老终端照常工作。
 import { q } from '../db.js';
 import { sendJson, badRequest } from '../router.js';
 import { touch, getState } from '../switch.js';
 import { termMeta } from '../util.js';
+
+/** 机种里 code 等于这道工序的工位。没有就是"这个机种没配这块屏"，要显式告警。 */
+export function stationOf(modelId, code) {
+  return q.get('SELECT * FROM station WHERE model_id = ? AND code = ?', String(modelId || ''), String(code || ''));
+}
 
 export function register(router) {
   /**
@@ -31,19 +37,23 @@ export function register(router) {
           lineCode: line.code, lineName: line.name,
           modelCode: '', modelId: '', processCode: process.code, processName: process.name,
           items: [], empty: true, count: 0, totalBytes: 0,
-          message: `「${line.name}」还没有指定当前型号`
+          message: `「${line.name}」还没有指定当前机种`
         });
       }
     }
 
-    const rows = q.all(
-      `SELECT i.ord, i.kind, i.dwell_sec, i.fit, i.zoom, i.media_id,
-              m.sha256, m.ext, m.mime, m.bytes, m.name
-         FROM item i JOIN media m ON m.id = i.media_id
-        WHERE i.model_id = ? AND i.process_id = ?
-        ORDER BY i.ord`,
-      model.id, process.id
-    );
+    const station = stationOf(model.id, process.code);
+
+    const rows = station
+      ? q.all(
+          `SELECT i.ord, i.kind, i.dwell_sec, i.fit, i.zoom, i.media_id,
+                  m.sha256, m.ext, m.mime, m.bytes, m.name
+             FROM item i JOIN media m ON m.id = i.media_id
+            WHERE i.station_id = ?
+            ORDER BY i.ord`,
+          station.id
+        )
+      : [];
 
     sendJson(res, 200, {
       lineCode: line.code,
@@ -53,6 +63,8 @@ export function register(router) {
       modelName: model.name,
       processCode: process.code,
       processName: process.name,
+      stationCode: station?.code || '',
+      stationName: station?.name || process.name,
       items: rows.map((r) => ({
         mediaId: r.media_id,
         kind: r.kind,
@@ -70,8 +82,11 @@ export function register(router) {
         ext: r.ext,
         url: `/m/${r.media_id}`
       })),
-      // 空清单 = 这道工序这个型号还没有内容。终端要显式告警，不能静默播空白
+      // 空清单 = 这个机种在这道工序上还没有内容，或者压根没配这个工位。
+      // 终端要显式告警，不能静默播空白。
       empty: rows.length === 0,
+      // 区分"工位没配"和"工位配了但没传内容"：前者要去机种设置加工位，后者只是没传
+      noStation: !station,
       count: rows.length,
       // 终端算下载进度用（准备中 3/11）
       totalBytes: rows.reduce((s, r) => s + r.bytes, 0)
@@ -84,10 +99,10 @@ export function register(router) {
     touch(line.id, process.code, termMeta(ctx));
     const st = getState(line.id);
     const cur = st.currentModelId ? q.get('SELECT code, name FROM model WHERE id = ?', st.currentModelId) : null;
-    const have = q.get(
-      'SELECT COUNT(*) n FROM item WHERE model_id = ? AND process_id = ?',
-      st.currentModelId || '', process.id
-    ).n;
+    const station = cur ? stationOf(cur.id, process.code) : null;
+    const have = station
+      ? q.get('SELECT COUNT(*) n FROM item WHERE station_id = ?', station.id).n
+      : 0;
     sendJson(res, 200, {
       lineId: line.id,
       lineCode: line.code,
@@ -97,6 +112,11 @@ export function register(router) {
       modelId: st.currentModelId || '',
       modelCode: cur?.code || '',
       modelName: cur?.name || '',
+      stationCode: station?.code || '',
+      stationName: station?.name || '',
+      // 机种里没有这道工序的工位：终端该提示"这个机种没配这块屏"，
+      // 而不是让运维对着空屏猜是网络还是没内容
+      noStation: !!cur && !station,
       seq: st.seq,
       rev: st.rev,
       phase: st.phase,

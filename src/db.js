@@ -33,6 +33,36 @@ CREATE TABLE IF NOT EXISTS model (
   created_at  INTEGER NOT NULL
 );
 
+-- 工位：属于某个机种，是「这个机种的这块屏该看什么」。
+-- v2.0.0 起内容按「机种 × 工位」存，全厂一份 —— 同一机种同一工位，
+-- 一线和二线看的是同一份 SOP，换线不用重传，改一次全线生效。
+-- code 与线体的工序码（process.code）对位：线体的 OP30 播的就是机种里 code=OP30 的工位。
+CREATE TABLE IF NOT EXISTS station (
+  id          TEXT PRIMARY KEY,
+  model_id    TEXT NOT NULL REFERENCES model(id) ON DELETE CASCADE,
+  code        TEXT NOT NULL,            -- OP10
+  name        TEXT NOT NULL,            -- 上料
+  sort        INTEGER NOT NULL DEFAULT 0,
+  max_mb      INTEGER NOT NULL DEFAULT 0, -- 单文件体积上限（MB），0 = 不限
+  note        TEXT NOT NULL DEFAULT '',
+  created_at  INTEGER NOT NULL,
+  UNIQUE(model_id, code)
+);
+CREATE INDEX IF NOT EXISTS idx_station_model ON station(model_id, sort, code);
+
+-- 工位对某类文件的要求。核心约定同配置库：**有行 = 允许这类文件**。
+--   有 image 行 → 这个工位可以传图片，min_count 是至少几张（0 = 可以没有）
+--   没有 video 行 → 这个工位不接受视频（上传时会被拒）
+CREATE TABLE IF NOT EXISTS station_req (
+  id          TEXT PRIMARY KEY,
+  station_id  TEXT NOT NULL REFERENCES station(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL,            -- image | video | pdf
+  min_count   INTEGER NOT NULL DEFAULT 0,
+  min_width   INTEGER NOT NULL DEFAULT 0, -- 仅图片
+  min_height  INTEGER NOT NULL DEFAULT 0, -- 仅图片
+  UNIQUE(station_id, kind)
+);
+
 -- 工序：属于某条线体，也是终端身份的一半（另一 half 是线体）。
 -- code 只在同一条线体内唯一：一线有 OP10，二线也可以有 OP10，两者是两份内容。
 CREATE TABLE IF NOT EXISTS process (
@@ -62,21 +92,24 @@ CREATE TABLE IF NOT EXISTS media (
   created_at  INTEGER NOT NULL
 );
 
--- 播放清单项：(型号 × 工序) 下的一条
+-- 播放清单项：(机种 × 工位) 下的一条。
+-- v2.0.0 之前这里挂的是 process_id（线体工序），同机种在不同线体要各存一份，
+-- 一个 SOP 改两次、传两遍，还容易一边新一边旧。现在统一到机种工位。
 CREATE TABLE IF NOT EXISTS item (
   id          TEXT PRIMARY KEY,
   model_id    TEXT NOT NULL REFERENCES model(id) ON DELETE CASCADE,
-  process_id  TEXT NOT NULL REFERENCES process(id) ON DELETE CASCADE,
+  station_id  TEXT NOT NULL REFERENCES station(id) ON DELETE CASCADE,
   ord         INTEGER NOT NULL DEFAULT 0,
   kind        TEXT NOT NULL,            -- image | video，冗余存一份便于直接查
   media_id    TEXT NOT NULL REFERENCES media(id),
   dwell_sec   INTEGER NOT NULL DEFAULT 10,
   fit         TEXT NOT NULL DEFAULT 'contain', -- contain | cover
   zoom        INTEGER NOT NULL DEFAULT 100,    -- 百分比，50–200
-  UNIQUE(model_id, process_id, media_id)
+  UNIQUE(model_id, station_id, media_id)
 );
-CREATE INDEX IF NOT EXISTS idx_item_mp ON item(model_id, process_id, ord);
-CREATE INDEX IF NOT EXISTS idx_item_media ON item(media_id);
+-- 注：item 的索引不写在这里。老库的 item 表还没有 station_id 列，
+-- SCHEMA 里写 CREATE INDEX 会立刻报 "no such column"，直接开不了库。
+-- 统一放到 migrate() 末尾建（那时表结构一定已经就位）。
 
 -- 全局状态：KV
 --   rev          单调递增的通信序号（任何"该看一眼了"的变化都 +1）
@@ -181,6 +214,145 @@ function migrate() {
   else q.run("UPDATE process SET line_id = ? WHERE line_id IS NULL OR line_id = ''", dft.id);
 
   migrateLineState(dft.id);
+  migrateToStations();
+
+  // 索引放在所有结构迁移之后：老库在这一步之前 item 还没有 station_id，
+  // 提前建会直接抛 "no such column"，库都打不开。
+  db.exec('CREATE INDEX IF NOT EXISTS idx_item_ms ON item(model_id, station_id, ord)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_item_media ON item(media_id)');
+}
+
+/**
+ * v2.0.0 迁移：播放内容从「线体工序」搬到「机种工位」。
+ *
+ * 为什么必须搬：原来 item 挂 process_id，而 process 属于线体，于是同一机种
+ * 在一线和二线是两份内容 —— 一份 SOP 要传两遍、改两次，还容易一边新一边旧。
+ * 现在机种自己的工位就是内容的宿主，线体的工序只决定"这条线上有几块屏"。
+ *
+ * 判定是否迁过：看 item 有没有 station_id 列。SQLite 改不了列和约束，只能重建表；
+ * 搬的时候关外键（item/station 的 id 都原样保留，关掉再开是安全的）。
+ */
+function migrateToStations() {
+  const cols = new Set(q.all('PRAGMA table_info(item)').map((r) => r.name));
+  if (cols.has('station_id')) return;
+
+  const t = now();
+  db.exec('PRAGMA foreign_keys = OFF');
+  try {
+    db.exec('BEGIN');
+
+    // 1) 配置库里绑了机种的档案，其工序要求原样变成工位要求
+    for (const pf of q.all("SELECT * FROM profile WHERE model_id <> ''")) {
+      const steps = q.all('SELECT * FROM profile_step WHERE profile_id = ? ORDER BY seq, code', pf.id);
+      for (const s of steps) {
+        const st = ensureStation(pf.model_id, s.code, s.name, s.seq, s.max_mb, s.note, t);
+        for (const r of q.all('SELECT * FROM profile_req WHERE step_id = ?', s.id)) {
+          q.run(
+            'INSERT OR IGNORE INTO station_req(id,station_id,kind,min_count,min_width,min_height) VALUES(?,?,?,?,?,?)',
+            uid('sr'), st.id, r.kind, r.min_count, r.min_width, r.min_height
+          );
+        }
+      }
+    }
+
+    // 2) 老内容按 (机种, 工序码) 归并。两条线的同机种同工序会合成一个工位，
+    //    用 INSERT OR IGNORE 去重（同一份文件本来就是同一份，合并不会丢东西）。
+    db.exec(`CREATE TABLE item_new (
+      id          TEXT PRIMARY KEY,
+      model_id    TEXT NOT NULL REFERENCES model(id) ON DELETE CASCADE,
+      station_id  TEXT NOT NULL REFERENCES station(id) ON DELETE CASCADE,
+      ord         INTEGER NOT NULL DEFAULT 0,
+      kind        TEXT NOT NULL,
+      media_id    TEXT NOT NULL REFERENCES media(id),
+      dwell_sec   INTEGER NOT NULL DEFAULT 10,
+      fit         TEXT NOT NULL DEFAULT 'contain',
+      zoom        INTEGER NOT NULL DEFAULT 100,
+      UNIQUE(model_id, station_id, media_id)
+    )`);
+
+    const rows = q.all(
+      `SELECT i.*, p.code pcode, p.name pname FROM item i JOIN process p ON p.id = i.process_id`
+    );
+    let moved = 0;
+    for (const r of rows) {
+      const st = ensureStation(r.model_id, r.pcode, r.pname, 0, 0, '', t);
+      // 已经有内容 = 这个工位本来就允许这类文件。补一条 min_count=0 的要求，
+      // 不写成 1，否则升级完老内容立刻满屏"未达标"，现场会以为数据坏了。
+      if (!q.get('SELECT id FROM station_req WHERE station_id = ? AND kind = ?', st.id, r.kind)) {
+        q.run(
+          'INSERT INTO station_req(id,station_id,kind,min_count,min_width,min_height) VALUES(?,?,?,?,?,?)',
+          uid('sr'), st.id, r.kind, 0, 0, 0
+        );
+      }
+      q.run(
+        `INSERT OR IGNORE INTO item_new(id,model_id,station_id,ord,kind,media_id,dwell_sec,fit,zoom)
+         VALUES(?,?,?,?,?,?,?,?,?)`,
+        r.id, r.model_id, st.id, r.ord, r.kind, r.media_id,
+        r.dwell_sec, r.fit || 'contain', r.zoom || 100
+      );
+      moved++;
+    }
+
+    db.exec('DROP TABLE item');
+    db.exec('ALTER TABLE item_new RENAME TO item');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_item_ms ON item(model_id, station_id, ord)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_item_media ON item(media_id)');
+
+    // 工位是按"内容第一次出现的顺序"建出来的，OP40 可能先于 OP10 落库。
+    // 迁完按工序码重排一遍，界面上的顺序才跟产线一致。
+    for (const m of q.all('SELECT id FROM model')) {
+      const list = q.all('SELECT id FROM station WHERE model_id = ? ORDER BY code', m.id);
+      list.forEach((s, i) => q.run('UPDATE station SET sort = ? WHERE id = ?', (i + 1) * 10, s.id));
+    }
+
+    db.exec('COMMIT');
+    if (moved) console.log(`[db] ${moved} 条播放内容已从「线体工序」迁到「机种工位」`);
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* 回滚失败也没别的办法 */ }
+    throw e;
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON');
+  }
+}
+
+/** 找工位，没有就建一个。迁移和种子都用它，保证 (model, code) 只存在一份。 */
+function ensureStation(modelId, code, name, sort, maxMb, note, ts) {
+  const c = String(code || '').trim().toUpperCase();
+  const hit = q.get('SELECT * FROM station WHERE model_id = ? AND code = ?', modelId, c);
+  if (hit) return hit;
+  const maxSort = q.get('SELECT COALESCE(MAX(sort),0) s FROM station WHERE model_id = ?', modelId).s;
+  const useSort = Number(sort) > 0 ? Number(sort) : maxSort + 10;
+  const id = uid('st');
+  q.run(
+    'INSERT INTO station(id,model_id,code,name,sort,max_mb,note,created_at) VALUES(?,?,?,?,?,?,?,?)',
+    id, modelId, c, (String(name || '').trim() || c), useSort, int(maxMb, 0), str(note, 200), ts || now()
+  );
+  return q.get('SELECT * FROM station WHERE id = ?', id);
+}
+
+/**
+ * 每个机种都要有一套工位。
+ * 不补的话「机种设置」进去是空的，工程部不知道该配几道 —— 现场本来就有 5 道标准工序，
+ * 照它起一份最贴近实际，之后可以改名、增删。幂等，每次启动跑一遍。
+ */
+export function ensureAllModelStations() {
+  let added = 0;
+  for (const m of q.all('SELECT * FROM model')) {
+    if (q.get('SELECT COUNT(*) n FROM station WHERE model_id = ?', m.id).n) continue;
+    const t = now();
+    tx(() => {
+      SEED_PROCESSES.forEach(([code, name], i) => {
+        const st = ensureStation(m.id, code, name, (i + 1) * 10, 20, '', t);
+        q.run(
+          'INSERT OR IGNORE INTO station_req(id,station_id,kind,min_count,min_width,min_height) VALUES(?,?,?,?,?,?)',
+          uid('sr'), st.id, 'image', 1, 1280, 720
+        );
+      });
+    });
+    added++;
+  }
+  if (added) console.log(`[db] 已为 ${added} 个机种补上标准工位（OP10…OP50）`);
+  return added;
 }
 
 /**
@@ -405,32 +577,33 @@ export function seed() {
 }
 
 // ---------- 完成度 ----------
-// 一套 = (型号 × 线体工序) 有至少一条清单项。
+// 一套 = (机种 × 线体工序) 在机种工位里有至少一条内容。
+// 注意这里是「按线体工序数」算分母：线体有几块屏，这套机种就缺几块。
+// 同机种别的线体多出来的工位不算进来 —— 那属于别的线的活。
+//
 // 返回 { total, done, byModel: {modelId: {done, total}}, byCell: {"modelId:processId": count} }
 export function coverage(lineId) {
   const models = q.all('SELECT * FROM model ORDER BY sort, code');
   const processes = processesOf(lineId);
-  const ids = processes.map((p) => p.id);
 
-  // 只统计这条线的工序，别把别的线体的项算进来
-  const rows = ids.length
-    ? q.all(
-        `SELECT model_id, process_id, COUNT(*) n FROM item
-          WHERE process_id IN (${ids.map(() => '?').join(',')})
-          GROUP BY model_id, process_id`,
-        ...ids
-      )
-    : [];
-
-  const cell = new Map();
-  for (const r of rows) cell.set(`${r.model_id}:${r.process_id}`, r.n);
+  // 一次取全「机种 × 工位码」的项数，避免每个格子查一次库
+  const counts = new Map(
+    q.all(`
+      SELECT s.model_id, s.code, COUNT(i.id) n
+        FROM station s LEFT JOIN item i ON i.station_id = s.id
+       GROUP BY s.model_id, s.code
+    `).map((r) => [`${r.model_id}|${r.code}`, r.n])
+  );
 
   const byModel = {};
+  const cells = {};
   let done = 0;
   for (const m of models) {
     let d = 0;
     for (const p of processes) {
-      if ((cell.get(`${m.id}:${p.id}`) || 0) > 0) { d++; done++; }
+      const n = counts.get(`${m.id}|${p.code}`) || 0;
+      cells[`${m.id}:${p.id}`] = n;
+      if (n > 0) { d++; done++; }
     }
     byModel[m.id] = { done: d, total: processes.length };
   }
@@ -439,113 +612,136 @@ export function coverage(lineId) {
     total: models.length * processes.length,
     done,
     byModel,
-    cells: Object.fromEntries(cell)
+    cells: Object.fromEntries(Object.entries(cells))
   };
 }
 
-// ---------- 配置库 ----------
-export const KINDS = ['image', 'video', 'pdf'];
+// ---------- 工位 ----------
+const KINDS_ORDER = ['image', 'video', 'pdf'];
 
-/** 全部配置档案（含工序与要求），一次取完——档案数量是十几份量级，不值得分页 */
-export function profiles() {
-  const rows = q.all('SELECT * FROM profile ORDER BY sort, code');
-  const steps = q.all('SELECT * FROM profile_step ORDER BY profile_id, seq, code');
-  const reqs = q.all('SELECT * FROM profile_req');
+/**
+ * 一个机种的全部工位（含要求与内容），一次取完。
+ * 机种数量是几十个量级、工位数是几个，逐个查库反而更慢。
+ */
+export function stationsOf(modelId) {
+  const mid = String(modelId || '');
+  const rows = q.all('SELECT * FROM station WHERE model_id = ? ORDER BY sort, code', mid);
+  if (!rows.length) return [];
 
-  const reqByStep = new Map();
-  for (const r of reqs) {
-    if (!reqByStep.has(r.step_id)) reqByStep.set(r.step_id, []);
-    reqByStep.get(r.step_id).push({
-      kind: r.kind,
-      minCount: r.min_count,
-      minWidth: r.min_width,
-      minHeight: r.min_height
-    });
-  }
-  const stepsByProfile = new Map();
-  for (const s of steps) {
-    if (!stepsByProfile.has(s.profile_id)) stepsByProfile.set(s.profile_id, []);
-    stepsByProfile.get(s.profile_id).push({
-      id: s.id,
-      seq: s.seq,
-      code: s.code,
-      name: s.name,
-      maxMb: s.max_mb,
-      note: s.note,
-      reqs: (reqByStep.get(s.id) || []).sort(
-        (a, b) => KINDS.indexOf(a.kind) - KINDS.indexOf(b.kind)
-      )
+  const byStation = new Map(rows.map((s) => [s.id, { reqs: [], items: [] }]));
+
+  for (const r of q.all(
+    `SELECT r.* FROM station_req r JOIN station s ON s.id = r.station_id WHERE s.model_id = ?`, mid
+  )) {
+    const box = byStation.get(r.station_id);
+    if (box) box.reqs.push({
+      kind: r.kind, minCount: r.min_count, minWidth: r.min_width, minHeight: r.min_height
     });
   }
 
-  return rows.map((p) => ({
-    id: p.id,
-    code: p.code,
-    name: p.name,
-    modelId: p.model_id,
-    lineCodes: p.line_codes ? p.line_codes.split(',').filter(Boolean) : [],
-    note: p.note,
-    enabled: !!p.enabled,
-    sort: p.sort,
-    steps: stepsByProfile.get(p.id) || []
+  for (const i of q.all(
+    `SELECT i.*, m.name mname, m.bytes, m.width, m.height, m.duration_ms, m.ext, m.mime
+       FROM item i
+       JOIN media m ON m.id = i.media_id
+       JOIN station s ON s.id = i.station_id
+      WHERE s.model_id = ?
+      ORDER BY i.ord, i.id`, mid
+  )) {
+    const box = byStation.get(i.station_id);
+    if (!box) continue;
+    box.items.push({
+      id: i.id,
+      mediaId: i.media_id,
+      kind: i.kind,
+      name: i.mname,
+      bytes: i.bytes,
+      width: i.width,
+      height: i.height,
+      durationMs: i.duration_ms,
+      ext: i.ext,
+      mime: i.mime,
+      dwellSec: i.dwell_sec,
+      fit: i.fit || 'contain',
+      zoom: i.zoom || 100,
+      url: `/m/${i.media_id}`
+    });
+  }
+
+  return rows.map((s) => ({
+    id: s.id,
+    modelId: s.model_id,
+    code: s.code,
+    name: s.name,
+    sort: s.sort,
+    maxMb: s.max_mb,
+    note: s.note,
+    reqs: byStation.get(s.id).reqs.sort(
+      (a, b) => KINDS_ORDER.indexOf(a.kind) - KINDS_ORDER.indexOf(b.kind)
+    ),
+    items: byStation.get(s.id).items
   }));
 }
 
-export function profileById(id) {
-  return profiles().find((p) => p.id === id) || null;
-}
-
-/** 整份替换某档案的工序要求。前端一次提交整棵树，比逐个增删改少一半出错路径。 */
-export function saveProfileSteps(profileId, steps) {
-  tx(() => {
-    const old = q.all('SELECT id FROM profile_step WHERE profile_id = ?', profileId);
-    for (const r of old) q.run('DELETE FROM profile_req WHERE step_id = ?', r.id);
-    q.run('DELETE FROM profile_step WHERE profile_id = ?', profileId);
-
-    steps.forEach((s, i) => {
-      const sid = uid('ps');
-      q.run(
-        'INSERT INTO profile_step(id,profile_id,seq,code,name,max_mb,note) VALUES(?,?,?,?,?,?,?)',
-        sid, profileId, int(s.seq, i * 10 + 10), str(s.code, 16).toUpperCase(),
-        str(s.name, 40), int(s.maxMb, 0), str(s.note, 200)
-      );
-      for (const r of (s.reqs || [])) {
-        if (!KINDS.includes(r.kind)) continue;
-        q.run(
-          'INSERT OR IGNORE INTO profile_req(id,step_id,kind,min_count,min_width,min_height) VALUES(?,?,?,?,?,?)',
-          uid('pr'), sid, r.kind, int(r.minCount, 0), int(r.minWidth, 0), int(r.minHeight, 0)
-        );
-      }
-    });
-  });
+export function stationById(id) {
+  return q.get('SELECT * FROM station WHERE id = ?', String(id || '')) || null;
 }
 
 /**
- * 首次启动给一份能直接用的模板。
- * 不建的话配置库一进去是空白，工程部得从头想"该填什么"；
- * 而现场本来就有 5 道标准工序，照它起一份最贴近实际。
+ * 整份替换某个工位的要求与内容。
+ * 和播放清单一样走"整批覆盖"：逐条增删会留下"删了第 3 条、第 4 条序号要不要重排"
+ * 的中间态，整批覆盖没有中间态，也不会出现半套内容被终端读到。
  */
-export function ensureDefaultProfile() {
-  if (q.get('SELECT id FROM profile LIMIT 1')) return false;
-  const id = uid('pf');
+export function saveStation(modelId, stationId, { name, maxMb, note, reqs, items }) {
   tx(() => {
-    q.run(
-      'INSERT INTO profile(id,code,name,model_id,line_codes,note,enabled,sort,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
-      id, 'STD', '标准 ESOP 工艺模板', '', '',
-      '照现场 5 道标准工序起的模板：每道工序至少 1 张图，图片不小于 1280×720。可按实际产品改。',
-      1, 10, now()
-    );
-    SEED_PROCESSES.forEach(([code, name], i) => {
-      const sid = uid('ps');
-      q.run(
-        'INSERT INTO profile_step(id,profile_id,seq,code,name,max_mb,note) VALUES(?,?,?,?,?,?,?)',
-        sid, id, (i + 1) * 10, code, name, 20, ''
-      );
-      q.run(
-        'INSERT INTO profile_req(id,step_id,kind,min_count,min_width,min_height) VALUES(?,?,?,?,?,?)',
-        uid('pr'), sid, 'image', 1, 1280, 720
-      );
-    });
+    const st = q.get('SELECT * FROM station WHERE id = ? AND model_id = ?', stationId, modelId);
+    if (!st) throw Object.assign(new Error('工位不存在'), { status: 400 });
+
+    if (name !== undefined) q.run('UPDATE station SET name = ? WHERE id = ?', str(name, 40) || st.name, st.id);
+    if (maxMb !== undefined) q.run('UPDATE station SET max_mb = ? WHERE id = ?', int(maxMb, 0), st.id);
+    if (note !== undefined) q.run('UPDATE station SET note = ? WHERE id = ?', str(note, 200), st.id);
+
+    if (Array.isArray(reqs)) {
+      q.run('DELETE FROM station_req WHERE station_id = ?', st.id);
+      for (const r of reqs) {
+        if (!KINDS.includes(r.kind)) continue;
+        q.run(
+          'INSERT OR IGNORE INTO station_req(id,station_id,kind,min_count,min_width,min_height) VALUES(?,?,?,?,?,?)',
+          uid('sr'), st.id, r.kind, int(r.minCount, 0), int(r.minWidth, 0), int(r.minHeight, 0)
+        );
+      }
+    }
+
+    if (Array.isArray(items)) {
+      // 两道闸都在这里，两个入口（/api/stations/:id 和兼容的 /api/playlist）都受同一套约束：
+      // 没有要求行 = 这个工位不接受这类文件；超过单文件上限也拒。
+      // 空 reqs 表示"还没配要求"，此时不锁类型，否则升级上来的老工位会传不进东西。
+      const allowed = q.all('SELECT kind FROM station_req WHERE station_id = ?', st.id).map((r) => r.kind);
+      const limit = st.max_mb;
+
+      q.run('DELETE FROM item WHERE model_id = ? AND station_id = ?', modelId, st.id);
+      items.forEach((it, i) => {
+        const mediaId = String(it.mediaId || '');
+        const m = q.get('SELECT * FROM media WHERE id = ?', mediaId);
+        if (!m) throw Object.assign(new Error(`内容里有不存在的文件（${mediaId}）`), { status: 400 });
+        if (allowed.length && !allowed.includes(m.kind)) {
+          const cn = m.kind === 'video' ? '视频' : m.kind === 'pdf' ? ' PDF' : '图片';
+          throw Object.assign(new Error(`这个工位不允许放${cn}：${m.name}`), { status: 400 });
+        }
+        if (limit > 0 && m.bytes > limit * 1024 * 1024) {
+          throw Object.assign(new Error(`文件超过 ${limit} MB：${m.name}`), { status: 400 });
+        }
+        q.run(
+          `INSERT OR IGNORE INTO item(id,model_id,station_id,ord,kind,media_id,dwell_sec,fit,zoom)
+           VALUES(?,?,?,?,?,?,?,?,?)`,
+          uid('it'), modelId, st.id, i, m.kind, mediaId,
+          Math.min(120, Math.max(1, int(it.dwellSec, 10))),
+          it.fit === 'cover' ? 'cover' : 'contain',
+          Math.min(200, Math.max(50, int(it.zoom, 100)))
+        );
+      });
+    }
   });
-  return true;
 }
+
+// ---------- 通用 ----------
+export const KINDS = ['image', 'video', 'pdf'];

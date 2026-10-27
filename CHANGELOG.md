@@ -17,6 +17,7 @@
 
 | tag | Release | 附件 |
 |---|---|---|
+| `v2.0.0` | 内容改挂机种工位 + 作业内容改总览（服务端 2.0.0） | ESOP-Server.exe、ESOP-Client.exe |
 | `v1.10.1` | 图标重做（服务端 1.10.1 + 终端 1.7.1，现场默认） | ESOP-Server.exe、ESOP-Client.exe |
 | `v1.10.0` | 功能区重构版（服务端 1.10.0） | ESOP-Server.exe、ESOP-Client.exe |
 | `v1.9.0` | ESOP 更名版（服务端 1.9.0 + 终端 1.7.0） | ESOP-Server.exe、ESOP-Client.exe |
@@ -29,7 +30,119 @@
 
 ---
 
-## [1.10.1] — 2026-10-27 · 图标重做：应用图标 + 侧栏导航图标
+## [2.0.0] — 2026-10-27 · 内容改挂机种工位，作业内容改为线体总览
+
+**定为**主版本**（数据模型不兼容）**：播放内容的宿主从 `型号 × 工序` 改成 `机种 × 工位`，
+`item` 表的 `process_id` 列换成 `station_id`；`profile`（配置库）整块退役。
+老库启动时自动迁移，**不需要清库**，但迁移后"内容跟着机种走"，不再跟着某条线走。
+
+### 为什么改
+
+原来一套内容挂在「型号 + 产线工序」上，于是：
+
+- 同一个机种在两条线上跑，内容要录两遍，改一处漏一处；
+- 内容挂在线上，删一条线会牵连一堆内容，线体设置里到处是"有内容不能删"的红字；
+- 「作业内容」页是一张 `型号 × 工序` 的矩阵，运维看不出"今天这几条线各做什么、哪块屏还没切过来"。
+
+现场的实际问题是**总览**：看板上一眼要能回答"几条线、各做什么机种、哪几块屏切完了"。
+而"每条线有几块屏"和"这块屏播什么"本来就是两件事——
+线体该管的只是"我这有几块屏、编号是 OP10/OP20/…"，
+机种该管的是"我这个机种的 OP10 播哪张图、OP20 播哪个视频"。
+
+### 改了什么
+
+| 层 | 旧 | 新 |
+|---|---|---|
+| 数据表 | `item(model_id, process_id, ord)` | `item(model_id, station_id, ord)`；新增 `station` / `station_req` |
+| 内容归属 | 型号 × 产线工序（一线一套） | **机种 × 工位（全厂一套，跨线共用）** |
+| 对位关系 | 靠 `process_id` 直接指向 | 靠**工序码**对位：线体 OP10 ↔ 机种 OP10 |
+| 作业内容页 | `型号 × 工序` 矩阵 + 清单编辑 | **线体总览**：每条线的当前机种、换型入口、各客户端切换状态 |
+| 机种设置 | 只有型号列表 | 型号列表 + **工位设置**（每工位可传 PDF / 图片 / 视频） |
+| 线体设置 | 线体 + 工序两级 | 不变，工序可自由增删（不再受内容牵连） |
+| 配置库 | `profile` 表 + 接口 + 界面 | **整块删除**（内容已经跟机种走，不再需要"参数快照"） |
+
+### 概念怎么对应
+
+```
+line  L1  有 5 块屏  →  process: OP10 OP20 OP30 OP40 OP50   （只是编号，不带内容）
+model X200 有 5 个位 →  station: OP10 OP20 OP30 OP40 OP50   （每个位挂内容）
+                             ↑ 靠 code 对位 ↑
+```
+
+终端身份仍是 `line + op`（`?line=L1&op=OP30`），服务端内部这样取内容：
+
+```js
+stationOf(modelId, process.code)   // 用工序码去机种的工位里找同名的那一个
+```
+
+所以**接口契约没变**，`GET /display/playlist` 与 `GET /display/boot` 的入参出参原样保留
+（只多了 `stationCode` / `stationName` / `noStation` 三个描述字段）。
+现场 5 台终端**不用改配置、不用升终端**，服务端换掉即可。
+
+### 「有行 = 允许这类文件」
+
+`station_req(station_id, kind, min_count, min_width, min_height)` 表达"这个工位允许放什么"：
+
+- 某个 kind **有行** → 允许放这类文件，`min_count` 是"至少几份"；
+- 某个 kind **没行** → 这个工位不接受这类文件，上传会被服务端拒掉；
+- 整张 reqs 表为空 → 视为**未配置**，不做类型锁（避免迁移后每个工位都要先勾一遍才能用）。
+
+闸门写在 `saveStation()` 里，`PUT /api/stations/:id` 与上传入口共用同一道，
+报错是 `400 这个工位不允许放视频：xxx.mp4`、`400 内容里有不存在的文件（…）`。
+
+### 整批覆盖保存
+
+工位内容与要求一次 `PUT` 提交，前端先整批校验，后端**事务内先删后插**：
+
+- 不会出现"删了一半、插了一半"的半套状态；
+- 前端不做增量调用，避免两次改动之间被别的操作插进来。
+
+### 迁移怎么做（老库自动跑，幂等）
+
+`migrateToStations()` 在 `migrate()` 末尾执行：
+
+1. `PRAGMA table_info(item)` 看有没有 `station_id`，有就直接返回（幂等）；
+2. 关外键 → 建 `item` 新表 → 按 `(机种, 工序码)` 搬数据 → `drop` 老表 → `rename`；
+   两条线同码同机种的重复内容靠 `INSERT OR IGNORE` 合并成一份；
+3. 每个机种补齐 OP10…OP50 工位（`ensureAllModelStations()`，默认只允许图片 1 张 1280×720）；
+4. 按 `code` 重排 `station.sort = (i+1)*10` —— 早期版本工位是按"内容第一次出现"建的，顺序是乱的。
+
+实测老开发库：`41 条播放内容已从「线体工序」迁到「机种工位」`，
+`models 10 | stations 20 | items 41`，补全后 50 个工位，X200 coverage 5/5。
+
+> **索引不能写进 SCHEMA**：老 `item` 表还没有 `station_id` 列，
+> `CREATE INDEX ... ON item(model_id, station_id, ord)` 会在 `openDb()` 里直接抛
+> `no such column: station_id`。两条索引统一放在 `migrate()` 末尾。
+
+### 新增接口
+
+| 接口 | 用途 |
+|---|---|
+| `GET /api/board` | 一次返回**全部线体** + 每线 clients 状态 + `hasContent`（总览页一次拿完） |
+| `POST /api/board/switch` | 总览页换型，回 `{ok, activated, phase}`（无终端在线时直接 `activated=true`） |
+| `GET /api/stations?modelId=` | 某机种的全部工位（含 reqs 与 items） |
+| `POST/PUT/DELETE /api/stations/:id` | 工位增删改（改=整批覆盖内容与要求） |
+| `POST /api/stations/sync` | 按机种工位补齐线体工序（**多出来的不删**） |
+
+`/api/board` 里每个 client 的 `status` 取 `absent / offline / preparing / loading / ready / playing / stale / nomodel`，
+总览页据此把"哪块屏没内容、哪块屏掉队"直接标在卡片上。
+
+### 退役的
+
+- `src/api/profiles.js`、`db.js` 里的配置库 CRUD（`profiles/byId/saveProfileSteps/ensureDefaultProfile`）；
+- `public/` 里的配置库视图与抽屉；
+- 线体删除/工序删除"因为有内容所以拒绝"的判断（内容不挂在线上，删线不再牵连）。
+
+### 验证
+
+- 服务端端到端：`node test/run.mjs` → **通过 94 / 失败 0**
+  （第 12 节换成工位测试：工序码对位、类型闸门、跨线共用一份内容、补加工位、同步、有内容工位不许删、总览接口结构）
+- 老库迁移：真实开发数据集跑通，无丢内容
+- 新库冒烟：10 机种 / 5 工位 / 50 分母；类型闸门 `400`；兼容接口 `/api/playlist`（按 processId）读写正常
+- 界面 CDP 实测：勾选"视频"→ reqs 变 `image,video`；总览换型 X200→X210 成功；工位内文件上下移真的落库
+
+---
+
 
 **定为修订号（只改观感，不改任何功能）**：接口、表结构、配置格式、交互全没变，
 `data\vwi.db` 直接能用。终端同步升 `1.7.1`，只是换了图标，逻辑一行未动。
