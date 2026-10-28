@@ -500,7 +500,7 @@ function rebuildStationTable() {
 }
 
 /** 找工位，没有就建一个。迁移和种子都用它，保证 (model, line, code) 只存在一份。 */
-function ensureStation(modelId, lineId, code, name, sort, maxMb, note, ts) {
+export function ensureStation(modelId, lineId, code, name, sort, maxMb, note, ts) {
   const c = String(code || '').trim().toUpperCase();
   const lid = String(lineId || '');
   const hit = q.get('SELECT * FROM station WHERE model_id = ? AND line_id = ? AND code = ?', modelId, lid, c);

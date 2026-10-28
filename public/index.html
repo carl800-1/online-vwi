@@ -39,6 +39,14 @@
       <path d="M3.6 17.4l4.6-4.2a2 2 0 0 1 2.7 0l3.1 2.9"/>
       <path d="M13.4 15.6l2.3-2.1a2 2 0 0 1 2.7 0l2 1.9"/>
     </symbol>
+    <!-- 文件查询：文件 + 放大镜（媒体库管"往工序里放"，这里管"全库找文件"） -->
+    <symbol id="i-files" viewBox="0 0 24 24">
+      <path d="M13.4 3.4H6.6a2 2 0 0 0-2 2v13.2a2 2 0 0 0 2 2h5.6"/>
+      <path d="M13.4 3.4l5 5v2.2"/>
+      <path d="M13.4 3.4v5h5"/>
+      <circle cx="16.2" cy="16.2" r="3.3"/>
+      <path d="M18.6 18.6L21.2 21.2"/>
+    </symbol>
     <!-- 终端监控：显示器 + 底座 -->
     <symbol id="i-terminal" viewBox="0 0 24 24">
       <rect x="2.5" y="3.5" width="19" height="13" rx="2.2"/>
@@ -81,6 +89,7 @@
       <button class="nav-item" data-view="lines"><svg class="ico"><use href="#i-line"/></svg>线体设置</button>
       <button class="nav-item" data-view="models"><svg class="ico"><use href="#i-model"/></svg>机种设置</button>
       <button class="nav-item" data-view="media"><svg class="ico"><use href="#i-media"/></svg>媒体库</button>
+      <button class="nav-item" data-view="files"><svg class="ico"><use href="#i-files"/></svg>文件查询</button>
       <button class="nav-item" data-view="terms"><svg class="ico"><use href="#i-terminal"/></svg>终端监控</button>
       <button class="nav-item desk-only" data-view="system"><svg class="ico"><use href="#i-system"/></svg>系统</button>
     </nav>
@@ -202,7 +211,6 @@
                 <span class="sub" id="mdSub">左边选一个机种</span>
                 <div class="spacer"></div>
                 <button class="btn sm" id="mdRenameBtn">改编码/名称</button>
-                <button class="btn sm" id="mdCopyBtn">从其它线复制…</button>
                 <button class="btn sm" id="mdSyncBtn">按本线工序补齐</button>
                 <button class="btn sm danger" id="mdDelBtn">删除机种</button>
               </div>
@@ -214,31 +222,36 @@
               <div class="md-summary" id="mdSummary"></div>
             </div>
 
-            <!-- 工位工作区：左边索引、右边只放当前这一个。
-                 一个机种常有 15–25 道工序，全展开成一列要滚几千像素，
-                 索引让"有哪些、哪个还没配"一眼看全，编辑区高度也不再随工序数增长。 -->
-            <div class="st-work">
-              <aside class="st-index">
-                <div class="si-head">
-                  <strong>工位</strong>
-                  <span class="si-count" id="stCount">0</span>
-                </div>
-                <div class="si-bar"><i id="stBar"></i></div>
-                <input type="search" id="stSearch" class="mini-search" placeholder="找工序码或名称">
-                <div class="si-filter" id="stFilter">
-                  <button class="si-f on" data-sf="all">全部</button>
-                  <button class="si-f" data-sf="has">有内容</button>
-                  <button class="si-f" data-sf="empty">空</button>
-                </div>
-                <div class="si-list" id="stList"></div>
-                <div class="si-foot">
-                  <button class="btn sm" id="stAddBtn" title="可一次贴多行，批量建">+ 批量加工位</button>
-                </div>
-              </aside>
-
-              <div class="st-edit">
-                <div class="se-nav" id="stNav"></div>
-                <div class="stations" id="stations"></div>
+            <!-- 工序清单：只回答"这个机种在这条线上有哪些工序、各是干什么的"。
+                 内容（图片/视频/PDF）不在这里放——去「媒体库」按工序配。
+                 25 道工序用表格而不是卡片：一行 34px，25 行 850px，表头固定、表内滚动，
+                 页面高度不随工序数增长，且「内容」列一眼看出哪几道还没配。 -->
+            <div class="card">
+              <div class="card-head">
+                <h3>工序清单</h3>
+                <span class="sub" id="stTableSub">—</span>
+                <div class="spacer"></div>
+                <input type="search" id="stTableSearch" class="mini-search" placeholder="找工序码或名称">
+                <button class="btn sm" id="stImportBtn" title="从 Excel / CSV 导入工序清单">导入 Excel</button>
+                <button class="btn sm" id="stAddBtn" title="可一次贴多行，批量建">+ 批量加工序</button>
+              </div>
+              <div class="table-wrap st-table-wrap">
+                <table class="data-table st-table">
+                  <thead>
+                    <tr>
+                      <th style="width:96px">工序码</th>
+                      <th style="width:150px">名称</th>
+                      <th>做什么</th>
+                      <th style="width:86px">内容</th>
+                      <th style="width:40px"></th>
+                    </tr>
+                  </thead>
+                  <tbody id="stTbody"></tbody>
+                </table>
+              </div>
+              <div class="st-table-foot">
+                点任意一格直接改，离开这一行自动保存。<b>「做什么」</b>写这道工序的作业要点，
+                会显示在终端顶栏。往工序里放文件请去<b>「媒体库」</b>。
               </div>
             </div>
           </div>
@@ -247,9 +260,55 @@
 
       <!-- ========== 媒体库 ========== -->
       <div class="view hide" id="view-media">
+        <!-- 路径固定三步：先选机种 → 再选工位（左索引）→ 右边上传。
+             线体夹在机种和工位之间（同一机种在两条线的工序完全不同），
+             但只有一条线时不显示选择器，免得现场多点一次。 -->
         <div class="card">
           <div class="card-head">
             <h2>媒体库</h2>
+            <span class="sub" id="mediaSub">选机种 → 选工位 → 上传文件</span>
+            <div class="spacer"></div>
+            <button class="btn sm" id="mdCopyBtn">从其它线复制…</button>
+          </div>
+          <div class="media-pick">
+            <label class="inl">机种
+              <select id="mlModelPick"></select>
+            </label>
+            <div class="line-pick" id="mlLines"></div>
+          </div>
+        </div>
+
+        <div class="st-work">
+          <aside class="st-index">
+            <div class="si-head">
+              <strong>工位</strong>
+              <span class="si-count" id="stCount">0</span>
+            </div>
+            <div class="si-bar"><i id="stBar"></i></div>
+            <input type="search" id="stSearch" class="mini-search" placeholder="找工序码或名称">
+            <div class="si-filter" id="stFilter">
+              <button class="si-f on" data-sf="all">全部</button>
+              <button class="si-f" data-sf="has">有内容</button>
+              <button class="si-f" data-sf="empty">空</button>
+            </div>
+            <div class="si-list" id="stList"></div>
+            <div class="si-foot">
+              <span class="sub">工序的增删改在「机种设置」</span>
+            </div>
+          </aside>
+
+          <div class="st-edit">
+            <div class="se-nav" id="stNav"></div>
+            <div class="stations" id="stations"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========== 文件查询 ========== -->
+      <div class="view hide" id="view-files">
+        <div class="card">
+          <div class="card-head">
+            <h2>文件查询</h2>
             <span class="sub" id="mediaTxt">—</span>
             <div class="spacer"></div>
             <button class="btn sm" id="uploadBtn">上传文件</button>
@@ -262,6 +321,7 @@
               <option value="">全部类型</option>
               <option value="image">只看图片</option>
               <option value="video">只看视频</option>
+              <option value="pdf">只看 PDF</option>
             </select>
           </div>
           <div class="mediagrid" id="mediagrid"></div>
@@ -305,6 +365,48 @@
         </div>
       </div>
 
+      <!-- ========== 系统（仅桌面程序；浏览器版没有托盘与自启，导航项也隐藏） ========== -->
+      <div class="view hide desk-only" id="view-system">
+        <div class="card">
+          <div class="card-head">
+            <h2>服务端</h2>
+            <span class="sub">桌面程序 · 无需浏览器</span>
+            <div class="spacer"></div>
+            <button class="btn" id="sysHide">收进托盘</button>
+            <button class="btn danger" id="sysQuit">退出服务端</button>
+          </div>
+
+          <div class="sys-body">
+            <div class="sys-row">
+              <div class="kv"><span>版本</span><b id="sysVer">—</b></div>
+              <div class="kv"><span>服务端口</span><b id="sysPort">—</b></div>
+              <div class="kv">
+                <span>开机自动启动</span>
+                <label class="switch"><input type="checkbox" id="sysAuto"><i></i></label>
+                <b id="sysAutoTxt" class="switch-txt">—</b>
+              </div>
+            </div>
+
+            <div class="sys-block">
+              <div class="sys-label">终端装机要填的服务端地址
+                <em>装 5 台时逐台粘贴，不要填 127.0.0.1</em></div>
+              <div id="sysLan"></div>
+            </div>
+
+            <div class="sys-row">
+              <div class="kv"><span>数据目录</span><b id="sysData" class="path">—</b>
+                <button class="btn sm" id="sysOpenData">打开</button></div>
+              <div class="kv"><span>运行日志</span><b id="sysLog" class="path">—</b>
+                <button class="btn sm" id="sysOpenLog">定位</button></div>
+            </div>
+
+            <p class="sys-tip">关掉窗口服务<strong>不会停</strong>，它会缩到右下角托盘继续为 5 台终端服务。
+              双击托盘图标能重新打开；要真退出请用右上角「退出服务端」。
+              升级或回滚前请先备份数据目录。</p>
+          </div>
+        </div>
+      </div>
+
     </section>
   </div>
 </div>
@@ -334,48 +436,7 @@
 <div class="upl-float hide" id="uplList"></div>
 <input type="file" id="fileInput" multiple accept="image/*,video/*,application/pdf,.pdf" style="display:none">
 
-<!-- ========== 系统面板（仅桌面程序） ========== -->
-<div class="modal desk-only" id="sysModal">
-  <div class="modal-card">
-    <div class="modal-head">
-      <h3>服务端</h3>
-      <div class="spacer"></div>
-      <button class="iconbtn" id="sysClose" title="关闭">✕</button>
-    </div>
-
-    <div class="modal-body">
-      <div class="kv"><span>版本</span><b id="sysVer">—</b></div>
-      <div class="kv"><span>运行方式</span><b>桌面程序 · 无需浏览器</b></div>
-      <div class="kv"><span>服务端口</span><b id="sysPort">—</b></div>
-
-      <div class="sys-block">
-        <div class="sys-label">终端装机要填的服务端地址<em>装 5 台时逐台粘贴，不要填 127.0.0.1</em></div>
-        <div id="sysLan"></div>
-      </div>
-
-      <div class="kv"><span>数据目录</span><b id="sysData" class="path">—</b>
-        <button class="btn sm" id="sysOpenData">打开</button></div>
-      <div class="kv"><span>运行日志</span><b id="sysLog" class="path">—</b>
-        <button class="btn sm" id="sysOpenLog">定位</button></div>
-
-      <div class="kv">
-        <span>开机自动启动</span>
-        <label class="switch"><input type="checkbox" id="sysAuto"><i></i></label>
-        <b id="sysAutoTxt" class="switch-txt">—</b>
-      </div>
-
-      <p class="sys-tip">关掉这个窗口服务<strong>不会停</strong>，它会缩到右下角托盘继续为 5 台终端服务。
-        双击托盘图标能重新打开；要真退出请用下面的「退出服务端」。</p>
-    </div>
-
-    <div class="modal-foot">
-      <button class="btn" id="sysHide">收进托盘</button>
-      <div class="spacer"></div>
-      <button class="btn danger" id="sysQuit">退出服务端</button>
-    </div>
-  </div>
-</div>
-
+<!-- 系统页已改为独立视图 #view-system，不再用弹层 -->
 <script src="/app.js"></script>
 </body>
 </html>

@@ -457,6 +457,108 @@ async function upload(buf, name) {
   const op40b = t2.terminals.find((x) => x.op === 'OP40');
   ok(op40b.res === '3840x2160', '心跳 query 里的分辨率同样能更新档案（老终端不改代码也够用）');
 
+  // ========== 13. 工序清单导入（xlsx / csv） ==========
+  console.log('\n13. 工序清单导入（Excel / CSV）');
+
+  // 现场没有现成 xlsx，测试里现造一个：ZIP(store) + sharedStrings + sheet1
+  // （crc32 上面造 PNG 时已经写好了，直接复用）
+  function zipStore(entries) {
+    const locals = [];
+    const centrals = [];
+    let off = 0;
+    for (const [name, text] of entries) {
+      const nb = Buffer.from(name, 'utf8');
+      const data = Buffer.from(text, 'utf8');
+      const crc = crc32(data);
+      const lh = Buffer.alloc(30);
+      lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0, 8);
+      lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(data.length, 22);
+      lh.writeUInt16LE(nb.length, 26);
+      const ch = Buffer.alloc(46);
+      ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6);
+      ch.writeUInt16LE(0, 10); ch.writeUInt32LE(crc, 16);
+      ch.writeUInt32LE(data.length, 20); ch.writeUInt32LE(data.length, 24);
+      ch.writeUInt16LE(nb.length, 28); ch.writeUInt32LE(off, 42);
+      locals.push(lh, nb, data);
+      centrals.push(ch, nb);
+      off += 30 + nb.length + data.length;
+    }
+    const cd = Buffer.concat(centrals);
+    const eocd = Buffer.alloc(22);
+    eocd.writeUInt32LE(0x06054b50, 0);
+    eocd.writeUInt16LE(entries.length, 8); eocd.writeUInt16LE(entries.length, 10);
+    eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(off, 16);
+    return Buffer.concat([...locals, cd, eocd]);
+  }
+
+  const rows = [['工序号', '工序名称', '做什么'], ['OP10', '压装（改）', '压轴承到位'], ['OP300', '气密', '打气测漏'], ['OP310', '贴标', '']];
+  const sst = [];
+  const sid = (s) => { if (!sst.includes(s)) sst.push(s); return sst.indexOf(s); };
+  const sheetRows = rows.map((r, ri) =>
+    `<row r="${ri + 1}">${r.map((v, ci) =>
+      `<c r="${'ABC'[ci]}${ri + 1}" t="s"><v>${sid(v)}</v></c>`).join('')}</row>`).join('');
+  const xlsx = zipStore([
+    ['[Content_Types].xml', '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>'],
+    ['xl/workbook.xml', '<workbook/>'],
+    ['xl/worksheets/sheet1.xml',
+      `<worksheet><sheetData>${sheetRows}</sheetData></worksheet>`],
+    ['xl/sharedStrings.xml',
+      `<sst>${sst.map((s) => `<si><t>${s}</t></si>`).join('')}</sst>`]
+  ]);
+
+  const upXlsx = await j('/api/import/parse?filename=' + encodeURIComponent('工序.xlsx'), {
+    method: 'POST', body: xlsx
+  });
+  ok(upXlsx.status === 200 && upXlsx.body.total === 3, 'xlsx 解析出 3 行（标题行自动跳过）');
+  ok(Array.isArray(upXlsx.body.header) && upXlsx.body.header[0] === '工序号', '认出并回传标题行');
+  ok(upXlsx.body.preview[0][0] === 'OP10' && upXlsx.body.preview[1][1] === '气密',
+    '单元格文本按 sharedStrings 正确还原');
+
+  const csvBuf = Buffer.from('工序号,工序名称,做什么\nOP10,压装,说明\nOP320,打磨,砂纸\n', 'utf8');
+  const upCsv = await j('/api/import/parse?filename=a.csv', { method: 'POST', body: csvBuf });
+  ok(upCsv.body.total === 2 && upCsv.body.preview[1][0] === 'OP320', 'CSV 同样能读');
+
+  const imp1 = await post('/api/stations/import', {
+    modelId: M.X200.id, lineId: L1id, rows: upXlsx.body.rows, mode: 'merge'
+  });
+  ok(imp1.ok && imp1.body.created === 2 && imp1.body.skipped === 1,
+    '导入按「有就跳过」：新建 2 道、OP10 已存在跳过 1 道');
+
+  const imp2 = await post('/api/stations/import', {
+    modelId: M.X200.id, lineId: L1id, rows: upXlsx.body.rows, mode: 'merge'
+  });
+  ok(imp2.body.created === 0 && imp2.body.skipped === 3, '同名再导一次不重复建（幂等）');
+
+  const imp3 = await post('/api/stations/import', {
+    modelId: M.X200.id, lineId: L1id, rows: upXlsx.body.rows, mode: 'update'
+  });
+  const op10After = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
+    .body.stations.find((s) => s.code === 'OP10');
+  ok(imp3.body.updated === 3 && op10After.name === '压装（改）' && op10After.note === '压轴承到位',
+    'update 模式覆盖名称与「做什么」');
+
+  const impBad = await post('/api/stations/import', {
+    modelId: M.X200.id, lineId: L1id,
+    rows: [['', '没有码'], ['OP!@#', '乱码', ''], ['OP330', '合格', '']], mode: 'merge'
+  });
+  ok(impBad.body.created === 1 && impBad.body.bad.length === 2,
+    '坏行单独列出来，不影响其它行入库');
+
+  const impWrong = await post('/api/stations/import', {
+    modelId: 'md_not_exist', lineId: L1id, rows: [['OP1', 'x']], mode: 'merge'
+  });
+  ok(!impWrong.ok && impWrong.status === 400, '机种不存在时整批拒绝');
+
+  // 清理：删掉这一节加的几道，别影响后面的覆盖率断言
+  for (const code of ['OP300', 'OP310', 'OP330']) {
+    const st = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
+      .body.stations.find((x) => x.code === code);
+    if (st) await j('/api/stations/' + st.id, { method: 'DELETE' });
+  }
+  const back = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id)).body.stations;
+  ok(!back.some((x) => x.code === 'OP300' || x.code === 'OP310' || x.code === 'OP330'),
+    '删掉导入的工序后恢复原样');
+
   // ---------- 汇总 ----------
   console.log('\n────────────────────────────');
   console.log(`  通过 ${pass}　失败 ${fail}`);

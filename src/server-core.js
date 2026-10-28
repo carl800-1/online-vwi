@@ -28,6 +28,7 @@ import { register as registerState } from './api/state.js';
 import { register as registerDisplay } from './api/display.js';
 import { register as registerStations } from './api/stations.js';
 import { register as registerBoard } from './api/board.js';
+import { register as registerImport } from './api/import.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -134,6 +135,7 @@ export function startServer(opts = {}) {
   registerDisplay(router);
   registerStations(router);
   registerBoard(router);
+  registerImport(router);
 
   const server = http.createServer(async (req, res) => {
     let url;

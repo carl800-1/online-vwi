@@ -1,12 +1,15 @@
 // 管理端逻辑：总览 + 线体/机种设置 + 媒体库 + 终端监控
 // 无框架、无构建，浏览器直接跑。所有状态都在内存，一次刷新从服务端重建。
 //
-// 页面分工（v3.0.0）：
+// 页面分工（v3.2.0）：定义和内容彻底分开，一页只干一件事。
 //   作业内容 = 总览，只读 + 换型。现场天天看的就是这一页。
 //   线体设置 = 这条线上有几块屏（工序），以及今天哪条线在跑。
-//   机种设置 = 这个机种**在某条线上**的每块屏播什么。先选机种，再选线体：
-//              同一机种在不同线体的工艺路线可以完全不同，内容各存各的。
-//   媒体库 / 终端监控 = 素材与设备台账。
+//   机种设置 = **定义层**：这个机种在某条线上有哪些工序、各做什么。
+//              表格里只有工序码 / 名称 / 做什么，不含任何文件。
+//   媒体库   = **内容层**：先选机种、再选工位、再上传图片 / PDF / 视频。
+//              允许类型与体积上限也在这里勾，因为它们只在上传时起作用。
+//   文件查询 = 全库文件：搜索、规格体检、清理未引用。
+//   终端监控 / 系统 = 设备台账与本机设置。
 
 const H = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -23,8 +26,16 @@ const S = {
   boardTimer: null,
 
   models: [],
+
+  // 机种设置（定义层）：只看"有哪些工序、各做什么"，不碰内容
+  mdModelId: '',
+  mdLineId: '',
+  mdStations: [],
+  mdQuery: '',
+
+  // 媒体库（内容层）：选机种 → 选工位 → 传文件
   modelId: '',
-  stLineId: '',      // 机种设置里当前看的是哪条线
+  stLineId: '',
   stations: [],
   // 一个机种普遍有 15–25 道工序，全摊成一列会变成几千像素的长条，
   // 所以改成「左边工位索引、右边只编一个」：索引永远一屏看得完，编辑区高度固定。
@@ -214,11 +225,13 @@ const VIEW_TITLE = {
   lines: '线体设置',
   models: '机种设置',
   media: '媒体库',
-  terms: '终端监控'
+  files: '文件查询',
+  terms: '终端监控',
+  system: '系统'
 };
 
-// 「系统」是桌面程序专属，走弹层而不切页面
-let openSysPanel = null;
+// 「系统」只有桌面程序能提供（托盘、自启、本机路径），浏览器版连导航都不显示
+let loadSysPanel = null;
 
 function syncNav() {
   document.querySelectorAll('.nav-item[data-view]').forEach((x) =>
@@ -233,14 +246,17 @@ function syncNav() {
 document.querySelectorAll('.nav-item[data-view]').forEach((b) => {
   b.addEventListener('click', () => {
     const v = b.dataset.view;
-    if (v === 'system') { if (openSysPanel) openSysPanel(); return; }
+    // 系统页不再是弹层，跟其它页一样切视图；浏览器版没有这一项，点了也不动
+    if (v === 'system' && !loadSysPanel) return;
     S.tab = v;
     syncNav();
     if (v === 'board') loadBoard().catch(() => {});
     if (v === 'lines') { loadLines().catch(() => {}); }
-    if (v === 'models') { loadModels().catch(() => {}); }
-    if (v === 'media') loadMedia();
+    if (v === 'models') { loadModels().catch(() => {}); }   // 定义层：工序清单
+    if (v === 'media') loadStations().catch(() => {});      // 内容层：按工序传文件
+    if (v === 'files') loadMedia();                         // 全库查询：体检与清理
     if (v === 'terms') loadTerms().catch(() => {});
+    if (v === 'system') loadSysPanel();
     renderTopStats();
   });
 });
@@ -746,23 +762,21 @@ $('procAddBtn').addEventListener('click', async () => {
 });
 
 // ==================== 机种设置 ====================
+/** 取机种列表。列表徽标（x/y 道工序已配内容）按「机种设置」当前线体统计，媒体库的下拉不显示徽标。 */
 async function loadModels(keepId) {
-  // 机种列表的徽标（x/y 个工位已配）是按线体统计的，所以要先定下当前线体
   if (!S.lines.length) await loadLines().catch(() => {});
-  if (!S.stLineId || !S.lines.some((l) => l.id === S.stLineId)) {
+  if (!S.mdLineId || !S.lines.some((l) => l.id === S.mdLineId)) {
     const dft = S.lines.find((l) => l.enabled) || S.lines[0];
-    S.stLineId = dft ? dft.id : '';
+    S.mdLineId = dft ? dft.id : '';
   }
-  const d = await api('/api/models' + (S.stLineId ? '?lineId=' + encodeURIComponent(S.stLineId) : ''));
+  const d = await api('/api/models' + (S.mdLineId ? '?lineId=' + encodeURIComponent(S.mdLineId) : ''));
   S.models = d.models || [];
-  const want = keepId || S.modelId;
-  if (!want || !S.models.some((m) => m.id === want)) {
-    S.modelId = (S.models[0] && S.models[0].id) || '';
-  } else {
-    S.modelId = want;
-  }
+  const want = keepId || S.mdModelId;
+  S.mdModelId = (want && S.models.some((m) => m.id === want))
+    ? want : ((S.models[0] && S.models[0].id) || '');
   renderMdList();
-  await loadStations();
+  renderMlModelPick();
+  await loadMdStations();
   renderTopStats();
 }
 
@@ -775,11 +789,11 @@ function renderMdList() {
     const done = m.stDone || 0;
     const total = m.stTotal || 0;
     const full = total > 0 && done === total;
-    return `<button class="md-item ${m.id === S.modelId ? 'on' : ''}${m.enabled ? '' : ' off'}"
+    return `<button class="md-item ${m.id === S.mdModelId ? 'on' : ''}${m.enabled ? '' : ' off'}"
         data-mid="${H(m.id)}">
       <span class="md-code">${H(m.code)}</span>
       <span class="md-dot ${full ? 'full' : (done ? 'part' : '')}"
-            title="${done}/${total} 个工位已配">${done}/${total}</span>
+            title="${done}/${total} 道工序已配内容">${done}/${total}</span>
     </button>`;
   }).join('') || '<div class="sub" style="padding:10px">没有匹配的机种</div>';
 }
@@ -792,36 +806,97 @@ $('mdSearch').addEventListener('input', () => {
 $('mdList').addEventListener('click', async (e) => {
   const b = e.target.closest('[data-mid]');
   if (!b) return;
-  S.modelId = b.dataset.mid;
-  S.stPickId = '';   // 换了机种，上一台机种的工位 id 全部作废，交给 ensurePick 重挑
+  S.mdModelId = b.dataset.mid;
   renderMdList();
-  await loadStations();
+  await loadMdStations();
 });
 
-async function loadStations() {
-  const m = S.models.find((x) => x.id === S.modelId);
-  const line = S.lines.find((x) => x.id === S.stLineId);
-  renderMdLines();
+/* ================= 机种设置：工序清单（定义层） ================= */
 
-  if (!m) {
-    S.stations = [];
-    S.stPickId = '';
-    $('mdTitle').textContent = '机种设置';
-    $('mdSub').textContent = '左边选一个机种';
+/** 取这个机种在这条线上的工序清单。只读内容数，不碰内容本身。 */
+async function loadMdStations() {
+  renderLinePick('mdLines', S.mdLineId);
+
+  const m = S.models.find((x) => x.id === S.mdModelId);
+  const line = S.lines.find((x) => x.id === S.mdLineId);
+
+  if (!m || !line) {
+    S.mdStations = [];
+    $('mdTitle').textContent = m ? modelLabel(m) : '机种设置';
+    $('mdSub').textContent = m ? '还没有线体，先去「线体设置」建一条' : '左边选一个机种';
     $('mdSummary').innerHTML = '';
-    $('stNav').innerHTML = '';
-    $('stations').innerHTML = '<div class="empty">还没有机种。</div>';
-    renderStIndex();
+    renderStTable();
     return;
   }
-  if (!line) {
+
+  try {
+    const d = await api('/api/stations?modelId=' + encodeURIComponent(m.id)
+      + '&lineId=' + encodeURIComponent(line.id));
+    S.mdStations = d.stations || [];
+  } catch (e) {
+    S.mdStations = [];
+    toast(e.message, 'err');
+  }
+
+  $('mdTitle').textContent = modelLabel(m);
+  $('mdSub').innerHTML = `· <b>${H(line.name)}</b> ${line.processes} 道工序`
+    + (m.enabled ? '' : '　（机种已停用，不会出现在换型下拉里）');
+  renderMdSummary();
+  renderStTable();
+}
+
+/**
+ * 线体胶囊条，两页各一份，选中态各自独立：
+ * 在媒体库切到二线传文件，机种设置那边还停在一线，互不干扰。
+ * 只有一条线时整条隐藏 —— 现场一开始就一条线，不让人多点一次。
+ */
+function renderLinePick(boxId, activeId) {
+  const box = $(boxId);
+  if (!box) return;
+  if (S.lines.length <= 1) { box.classList.add('hide'); return; }
+  box.classList.remove('hide');
+  box.innerHTML = '<span class="lp-lbl">线体</span>' + S.lines.map((l) => `
+    <button class="lp${l.id === activeId ? ' on' : ''}" data-mline="${H(l.id)}"
+            title="${l.enabled ? '正在启用' : '未启用'}">
+      <span class="lp-dot${l.enabled ? ' live' : ''}"></span>${H(l.name)}
+      <small>${l.processes} 道</small>
+    </button>`).join('');
+}
+
+$('mdLines').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-mline]');
+  if (!b || b.dataset.mline === S.mdLineId) return;
+  S.mdLineId = b.dataset.mline;
+  // 徽标是按线统计的，切线体要连机种列表一起重取
+  await loadModels();
+});
+
+/* ================= 媒体库：按工序配内容（内容层） ================= */
+
+/** 媒体库：机种 → 线体 → 工位（左索引）+ 当前工位的内容（右编辑区） */
+async function loadStations() {
+  if (!S.models.length) await loadModels().catch(() => {});
+  if (!S.stLineId || !S.lines.some((l) => l.id === S.stLineId)) {
+    const dft = S.lines.find((l) => l.enabled) || S.lines[0];
+    S.stLineId = dft ? dft.id : '';
+  }
+  if (!S.modelId || !S.models.some((m) => m.id === S.modelId)) {
+    S.modelId = S.mdModelId || (S.models[0] && S.models[0].id) || '';
+  }
+  renderLinePick('mlLines', S.stLineId);
+  renderMlModelPick();
+
+  const m = S.models.find((x) => x.id === S.modelId);
+  const line = S.lines.find((x) => x.id === S.stLineId);
+
+  if (!m || !line) {
     S.stations = [];
     S.stPickId = '';
-    $('mdTitle').textContent = modelLabel(m);
-    $('mdSub').textContent = '还没有线体，先去「线体设置」建一条';
-    $('mdSummary').innerHTML = '';
+    $('mediaSub').textContent = m
+      ? '还没有线体，先去「线体设置」建一条'
+      : '还没有机种，先去「机种设置」新建一个';
     $('stNav').innerHTML = '';
-    $('stations').innerHTML = '<div class="empty">没有线体，工位无处可挂。</div>';
+    $('stations').innerHTML = '<div class="empty">先选机种和线体。</div>';
     renderStIndex();
     return;
   }
@@ -835,66 +910,163 @@ async function loadStations() {
     toast(e.message, 'err');
   }
 
-  $('mdTitle').textContent = modelLabel(m);
-  $('mdSub').innerHTML = `· <b>${H(line.name)}</b> ${line.processes} 道工序`
-    + (m.enabled ? '' : '　（机种已停用，不会出现在换型下拉里）');
-  renderMdSummary();
+  const filled = S.stations.filter((x) => x.items.length > 0).length;
+  $('mediaSub').textContent = `${line.name} · ${S.stations.length} 个工位`
+    + (S.stations.length ? ` · 已配 ${filled}` : '');
+
   renderStations();
 }
 
-/**
- * 机种设置页的线体选择条。
- * 这一排就是"先选机种、再选线体"里的后半句 —— 同一个机种在一线和二线
- * 可以是完全不同的两套工位，不选线就不知道该显示哪一套。
- */
-function renderMdLines() {
-  const box = $('mdLines');
-  if (!box) return;
-  if (!S.lines.length) {
-    box.innerHTML = '<span class="sub">还没有线体，先去「线体设置」建一条。</span>';
-    return;
-  }
-  box.innerHTML = '<span class="lp-lbl">线体</span>' + S.lines.map((l) => `
-    <button class="lp${l.id === S.stLineId ? ' on' : ''}" data-mline="${H(l.id)}"
-            title="${l.enabled ? '正在启用' : '未启用'}">
-      <span class="lp-dot${l.enabled ? ' live' : ''}"></span>${H(l.name)}
-      <small>${l.processes} 道</small>
-    </button>`).join('');
+/** 媒体库顶部的机种下拉。用下拉而不是列表：这一页的重点是工位，机种只是入口 */
+function renderMlModelPick() {
+  const sel = $('mlModelPick');
+  if (!sel) return;
+  sel.innerHTML = S.models.map((m) =>
+    `<option value="${H(m.id)}"${m.id === S.modelId ? ' selected' : ''}>${H(modelLabel(m))}</option>`
+  ).join('') || '<option value="">还没有机种</option>';
 }
 
-$('mdLines').addEventListener('click', async (e) => {
+$('mlModelPick').addEventListener('change', async (e) => {
+  S.modelId = e.target.value;
+  S.stPickId = '';   // 换机种，上一台的工位 id 全部作废，交给 ensurePick 重挑
+  await loadStations();
+});
+
+$('mlLines').addEventListener('click', async (e) => {
   const b = e.target.closest('[data-mline]');
   if (!b || b.dataset.mline === S.stLineId) return;
   S.stLineId = b.dataset.mline;
-  S.stPickId = '';   // 换线体等于换一整套工位，旧的选中项无效
-  // 徽标是按线统计的，切线体要连机种列表一起重取
-  await loadModels();
+  S.stPickId = '';   // 换线体等于换一整套工位
+  await loadStations();
 });
 
+/** 机种设置顶部的汇总：主语是"工序"，内容数只作参考 —— 真正配内容去媒体库 */
 function renderMdSummary() {
-  const totalItems = S.stations.reduce((s, x) => s + x.items.length, 0);
-  const bytes = S.stations.reduce((s, x) => s + x.items.reduce((a, i) => a + (i.bytes || 0), 0), 0);
-  const filled = S.stations.filter((x) => x.items.length > 0).length;
-
-  // 每个工位一套内容决定换型要多久：5 台同时下，按最大那个工位估算更接近实际
-  const heaviest = S.stations.reduce((a, x) => {
-    const b = x.items.reduce((s, i) => s + (i.bytes || 0), 0);
-    return b > a ? b : a;
-  }, 0);
-  const est = (link) => {
-    const sec = Math.ceil((heaviest * 5) / link);
-    return sec < 60 ? sec + ' 秒' : Math.floor(sec / 60) + ' 分 ' + (sec % 60) + ' 秒';
-  };
+  const total = S.mdStations.length;
+  const filled = S.mdStations.filter((x) => x.items.length > 0).length;
+  const items = S.mdStations.reduce((s, x) => s + x.items.length, 0);
+  const bytes = S.mdStations.reduce((s, x) => s + x.items.reduce((a, i) => a + (i.bytes || 0), 0), 0);
 
   $('mdSummary').innerHTML = `
     <div class="ms">
-      <div class="ms-item"><b>${S.stations.length}</b><span>个工位</span></div>
-      <div class="ms-item"><b>${filled}/${S.stations.length}</b><span>已配内容</span></div>
-      <div class="ms-item"><b>${totalItems}</b><span>个文件</span></div>
-      <div class="ms-item"><b>${fmtBytes(bytes)}</b><span>合计体积</span></div>
-      <div class="ms-item"><b>${heaviest ? est(25 * 1024 * 1024) : '—'}</b><span>换型预估（内网）</span></div>
-      <div class="ms-item"><b>${heaviest ? est(2.5 * 1024 * 1024) : '—'}</b><span>换型预估（WiFi）</span></div>
+      <div class="ms-item"><b>${total}</b><span>道工序</span></div>
+      <div class="ms-item"><b>${filled}</b><span>已配内容</span></div>
+      <div class="ms-item"><b>${total - filled}</b><span>待配内容</span></div>
+      <div class="ms-item"><b>${items}</b><span>个文件</span></div>
+      <div class="ms-item"><b>${bytes ? fmtBytes(bytes) : '—'}</b><span>合计体积</span></div>
     </div>`;
+}
+
+/**
+ * 工序清单表格。
+ * 25 道工序用表格而不是卡片：一行 34px，表头固定、表内滚动，
+ * 页面高度不随工序数增长；「内容」列直接点进媒体库对应的工位。
+ */
+function renderStTable() {
+  const tb = $('stTbody');
+  if (!tb) return;
+
+  const total = S.mdStations.length;
+  const filled = S.mdStations.filter((x) => x.items.length > 0).length;
+  $('stTableSub').innerHTML = total
+    ? `${total} 道工序 · 已配 <b>${filled}</b> 道`
+    : '—';
+
+  if (!total) {
+    tb.innerHTML = `<tr><td colspan="5" class="st-empty">
+      这个机种在这条线上还没有工序。点右上「按本线工序补齐」按线体工序建一套，
+      或「+ 批量加工序」一次贴多行。</td></tr>`;
+    return;
+  }
+
+  const q = (S.mdQuery || '').trim().toLowerCase();
+  const shown = S.mdStations.filter((st) =>
+    !q || (st.code || '').toLowerCase().includes(q) || (st.name || '').toLowerCase().includes(q));
+
+  if (!shown.length) {
+    tb.innerHTML = '<tr><td colspan="5" class="st-empty">没有匹配的工序</td></tr>';
+    return;
+  }
+
+  tb.innerHTML = shown.map((st) => {
+    const n = st.items.length;
+    return `<tr data-row="${H(st.id)}">
+      <td><span class="cell-code" title="工序码由「线体设置」里的工序决定，这里不改">${H(st.code)}</span></td>
+      <td><input class="cell-in" data-f="name" maxlength="40"
+                 value="${H(st.name)}" placeholder="工序名称"></td>
+      <td><input class="cell-in" data-f="note" maxlength="200"
+                 value="${H(st.note || '')}" placeholder="这道工序做什么…"></td>
+      <td>${n
+        ? `<button class="cell-n on" data-jump="${H(st.id)}">${n} 项</button>`
+        : `<button class="cell-n" data-jump="${H(st.id)}">未配</button>`}</td>
+      <td><button class="cell-x" data-del="${H(st.id)}" title="删除这道工序">✕</button></td>
+    </tr>`;
+  }).join('');
+}
+
+$('stTableSearch').addEventListener('input', (e) => {
+  S.mdQuery = e.target.value;
+  clearTimeout(renderStTable._t);
+  renderStTable._t = setTimeout(renderStTable, 150);
+});
+
+// 改一格就存一格：change 只在"值真的变了且离开输入框"时触发，不会一路敲一路发请求
+$('stTbody').addEventListener('change', async (e) => {
+  const inp = e.target.closest('.cell-in');
+  if (!inp) return;
+  const tr = inp.closest('[data-row]');
+  const st = S.mdStations.find((x) => x.id === tr.dataset.row);
+  if (!st) return;
+
+  const f = inp.dataset.f;
+  const v = inp.value.trim();
+  if ((st[f] || '') === v) return;
+
+  inp.classList.add('saving');
+  try {
+    const out = await putJson('/api/stations/' + encodeURIComponent(st.id), { [f]: v });
+    Object.assign(st, out);
+    inp.classList.remove('saving');
+    inp.classList.add('saved');
+    setTimeout(() => inp.classList.remove('saved'), 1200);
+    renderMdList();          // 徽标跟着变
+    renderMdSummary();
+    renderStTable();
+  } catch (err) {
+    inp.value = st[f] || '';
+    inp.classList.remove('saving');
+    toast(err.message, 'err');
+  }
+});
+
+$('stTbody').addEventListener('click', async (e) => {
+  // 点「内容」列 → 切到媒体库并直接把那个工位选中
+  const jump = e.target.closest('[data-jump]');
+  if (jump) { await openInMedia(jump.dataset.jump); return; }
+
+  const del = e.target.closest('[data-del]');
+  if (!del) return;
+  const st = S.mdStations.find((x) => x.id === del.dataset.del);
+  if (!st) return;
+  if (st.items.length && !await ask('删除工序',
+    `「${st.code} ${st.name}」里还有 ${st.items.length} 项内容，删掉工序会一起删掉，确定吗？`,
+    '删除', true)) return;
+  try {
+    await api('/api/stations/' + encodeURIComponent(st.id), { method: 'DELETE' });
+    await loadMdStations();
+    toast('已删除工序 ' + st.code, 'ok');
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+/** 从机种设置跳到媒体库，落点就是刚点的那道工序 */
+async function openInMedia(stationId) {
+  S.tab = 'media';
+  S.modelId = S.mdModelId;
+  S.stLineId = S.mdLineId;
+  S.stPickId = stationId;
+  syncNav();
+  await loadStations();
+  renderTopStats();
 }
 
 const KIND_CN = { image: '图片', video: '视频', pdf: 'PDF' };
@@ -1144,11 +1316,21 @@ async function saveStation(sid, payload) {
   const out = await putJson('/api/stations/' + encodeURIComponent(sid), body);
   const i = S.stations.findIndex((x) => x.id === sid);
   if (i >= 0) S.stations[i] = out;
-  renderMdSummary();
-  // 索引上的项数与体积、顶部那条状态都跟着改，否则要刷新整页才对
+  // 索引上的项数与体积、顶部那行状态都跟着改，否则要刷新整页才对
+  refreshMediaSub();
   renderStIndex();
   renderStNav();
   return out;
+}
+
+/** 媒体库副标题：机种内容一改，已配数就变了 */
+function refreshMediaSub() {
+  const line = S.lines.find((x) => x.id === S.stLineId);
+  const el = $('mediaSub');
+  if (!el || !line) return;
+  const filled = S.stations.filter((x) => x.items.length > 0).length;
+  el.textContent = `${line.name} · ${S.stations.length} 个工位`
+    + (S.stations.length ? ` · 已配 ${filled}` : '');
 }
 
 // ---- 工位交互 ----
@@ -1301,12 +1483,78 @@ $('stations').addEventListener('drop', (e) => {
   }
 });
 
+// 从 Excel / CSV 导入工序清单：先让服务端解析成行给个预览，确认了才写库。
+// 不直接导入是因为工艺表格式五花八门，列一错位就得一条条删回来。
+$('stImportBtn').addEventListener('click', () => {
+  if (!S.mdModelId) return toast('先选一个机种', 'err');
+  if (!S.mdLineId) return toast('先选一条线体', 'err');
+
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = '.xlsx,.csv,.txt';
+  inp.onchange = async () => {
+    const f = inp.files && inp.files[0];
+    if (!f) return;
+
+    let d;
+    try {
+      d = await api('/api/import/parse?filename=' + encodeURIComponent(f.name), {
+        method: 'POST',
+        body: await f.arrayBuffer()
+      });
+    } catch (err) { return toast(err.message, 'err'); }
+
+    const pad = (r) => [0, 1, 2].map((i) => (r[i] === undefined ? '' : String(r[i]))).join('  |  ');
+    const more = d.total > d.preview.length ? `\n…… 还有 ${d.total - d.preview.length} 行` : '';
+
+    const r = await dialog({
+      title: `导入 ${d.total} 道工序`,
+      message: (d.header ? `已跳过标题行：${d.header.join(' / ')}\n\n` : '')
+        + `按「工序码 | 名称 | 做什么」三列读，预览：\n\n${d.preview.map(pad).join('\n')}${more}`
+        + '\n\n读出来的内容不对？多半是列的顺序不同，把表调成「工序码、名称、做什么」再导一次。',
+      html: `<div class="dlg-row">
+        <label for="impMode">已有同名工序</label>
+        <select id="impMode" class="dlg-sel">
+          <option value="merge">跳过，保留原有名称与说明</option>
+          <option value="update">覆盖名称与「做什么」，已配内容不动</option>
+        </select>
+      </div>`,
+      read: (body) => ({ mode: body.querySelector('#impMode').value }),
+      okText: '导入'
+    });
+    if (!r) return;
+
+    try {
+      const out = await postJson('/api/stations/import', {
+        modelId: S.mdModelId, lineId: S.mdLineId, rows: d.rows, mode: r.mode
+      });
+      await loadMdStations();
+
+      const bits = [`新增 ${out.created} 道`];
+      if (out.updated) bits.push(`更新 ${out.updated} 道`);
+      if (out.skipped) bits.push(`跳过 ${out.skipped} 道（已存在）`);
+      toast('导入完成：' + bits.join('，'), 'ok');
+
+      if (out.bad && out.bad.length) {
+        await dialog({
+          title: `${out.bad.length} 行没能导入`,
+          message: out.bad.join('\n'),
+          okText: '知道了',
+          hideCancel: true
+        });
+      }
+    } catch (err) { toast(err.message, 'err'); }
+  };
+  inp.click();
+});
+
+// 机种设置页：批量加工序（给这个机种在这条线上补工序定义）
 $('stAddBtn').addEventListener('click', async () => {
-  if (!S.modelId) return toast('先选一个机种', 'err');
-  if (!S.stLineId) return toast('先选一条线体', 'err');
+  if (!S.mdModelId) return toast('先选一个机种', 'err');
+  if (!S.mdLineId) return toast('先选一条线体', 'err');
   const text = await bulkDialog({
-    title: '批量添加工位',
-    message: '工位 = 这个机种在某条线上的某一块屏。编码要和这条线的工序码一致，那块屏才拉得到内容。',
+    title: '批量加工序',
+    message: '一行一条。工序码要和这条线「线体设置」里的工序码一致，那块屏才拉得到内容。',
     placeholder: 'OP10 压装\nOP20 焊接'
   });
   if (!text) return;
@@ -1314,21 +1562,17 @@ $('stAddBtn').addEventListener('click', async () => {
   if (!rows.length) return toast('没有可用的行', 'err');
 
   let okN = 0;
-  let lastId = '';
   const bad = [];
   for (const r of rows) {
     try {
-      const made = await postJson('/api/stations', {
-        modelId: S.modelId, lineId: S.stLineId, code: r.code, name: r.name
+      await postJson('/api/stations', {
+        modelId: S.mdModelId, lineId: S.mdLineId, code: r.code, name: r.name
       });
       okN += 1;
-      lastId = made?.id || lastId;
     } catch (err) { bad.push(`${r.code}：${err.message}`); }
   }
-  // 新加的工位直接切过去编，省得在索引里再找一遍
-  S.stPickId = lastId;
-  await loadStations();
-  if (okN) toast(`已添加 ${okN} 个工位`, 'ok');
+  await loadMdStations();
+  if (okN) toast(`已加 ${okN} 道工序`, 'ok');
   if (bad.length) {
     await dialog({
       title: `${bad.length} 个没加上`,
@@ -1360,7 +1604,7 @@ $('mdNewBtn').addEventListener('click', async () => {
 });
 
 $('mdRenameBtn').addEventListener('click', async () => {
-  const m = S.models.find((x) => x.id === S.modelId);
+  const m = S.models.find((x) => x.id === S.mdModelId);
   if (!m) return;
   const r = await dialog({
     title: '改机种',
@@ -1379,7 +1623,7 @@ $('mdRenameBtn').addEventListener('click', async () => {
 });
 
 $('mdDelBtn').addEventListener('click', async () => {
-  const m = S.models.find((x) => x.id === S.modelId);
+  const m = S.models.find((x) => x.id === S.mdModelId);
   if (!m) return;
   const ok = await dialog({
     title: `删除机种「${modelLabel(m)}」？`,
@@ -1391,7 +1635,7 @@ $('mdDelBtn').addEventListener('click', async () => {
   if (!ok) return;
   try {
     await api('/api/models/' + encodeURIComponent(m.id), { method: 'DELETE' });
-    S.modelId = '';
+    S.mdModelId = '';
     await loadModels();
     toast('已删除机种 ' + m.code, 'ok');
   } catch (err) { toast(err.message, 'err'); }
@@ -1400,20 +1644,20 @@ $('mdDelBtn').addEventListener('click', async () => {
 // 同步工序到线体：机种配了 5 个工位，线体只有 3 道工序时一键补齐
 // 按本线的工序补齐这个机种的工位（线体新加了工序，这里一键跟上）
 $('mdSyncBtn').addEventListener('click', async () => {
-  const m = S.models.find((x) => x.id === S.modelId);
-  const line = S.lines.find((x) => x.id === S.stLineId);
+  const m = S.models.find((x) => x.id === S.mdModelId);
+  const line = S.lines.find((x) => x.id === S.mdLineId);
   if (!m) return toast('先选一个机种', 'err');
   if (!line) return toast('先选一条线体', 'err');
 
   try {
     const out = await postJson('/api/stations/sync', { modelId: m.id, lineId: line.id });
     if (out.created.length) {
-      toast(`「${line.name}」补上 ${out.created.length} 个工位：${out.created.join('、')}`, 'ok');
+      toast(`「${line.name}」补上 ${out.created.length} 道工序：${out.created.join('、')}`, 'ok');
     } else {
-      toast(`已经对上了，本线 ${out.total} 个工位不用补`, 'ok');
+      toast(`已经对上了，本线 ${out.total} 道工序不用补`, 'ok');
     }
     await loadLines().catch(() => {});
-    await loadStations();
+    await loadMdStations();
   } catch (err) { toast(err.message, 'err'); }
 });
 
@@ -1774,10 +2018,8 @@ const desk = window.vwiDesktop;
 if (desk) {
   document.body.classList.add('is-desktop');
 
-  const modal = $('sysModal');
-
+  // 系统页跟其它视图一样切过来就渲染，不再是弹层
   const openSys = () => {
-    modal.classList.add('on');
     desk.info().then((info) => {
       $('sysVer').textContent = 'v' + info.version;
       $('sysPort').textContent = info.port;
@@ -1809,11 +2051,7 @@ if (desk) {
     });
   };
 
-  const closeSys = () => modal.classList.remove('on');
-
-  openSysPanel = openSys;
-  $('sysClose').addEventListener('click', closeSys);
-  modal.addEventListener('click', (e) => { if (e.target === modal) closeSys(); });
+  loadSysPanel = openSys;
 
   $('sysLan').addEventListener('click', async (e) => {
     const url = e.target.dataset && e.target.dataset.copy;
@@ -1835,11 +2073,10 @@ if (desk) {
     toast(real ? '已设为开机自动启动' : '已取消开机自动启动', 'ok');
   });
 
-  $('sysHide').addEventListener('click', () => { closeSys(); desk.hide(); });
+  $('sysHide').addEventListener('click', () => desk.hide());
 
   $('sysQuit').addEventListener('click', async () => {
     const n = S.board.reduce((s, l) => s + l.onlineCount, 0);
-    closeSys();
     if (n > 0) {
       const ok = await ask(
         '终端还在线',
@@ -1850,10 +2087,6 @@ if (desk) {
       if (!ok) return;
     }
     desk.quit();
-  });
-
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && modal.classList.contains('on')) closeSys();
   });
 
   desk.info().then((info) => {
