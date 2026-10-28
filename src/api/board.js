@@ -6,7 +6,7 @@
 // 那是工程部坐下来干的活，跟产线上盯着屏幕换型是两件事。
 import { q, lines, processesOf, setNextModel } from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
-import { getState, terminalsOf, switchTo, SWITCH_TIMEOUT_MS } from '../switch.js';
+import { getState, terminalsOf, switchTo, setCurrentModel, SWITCH_TIMEOUT_MS } from '../switch.js';
 import { now } from '../util.js';
 
 /** 客户端状态：一屏到底走到哪一步了 */
@@ -136,6 +136,28 @@ export function register(router) {
       throw badRequest(e.message);
     }
     sendJson(res, 200, { ok: true, nextModelCode: code });
+  });
+
+  /**
+   * POST /api/board/current
+   * 直接指定"这条线正在生产哪个机种"，不等终端下载、不走两段式。
+   * 用在：上线第一天屏还没装 / 现场已经换过料而管理端还停在老机种。
+   * 真要换型（等所有屏备好再一起翻）仍走 /api/board/switch。
+   */
+  router.post('/api/board/current', async (req, res) => {
+    const body = await readJsonBody(req);
+    const lineId = String(body.lineId || '').trim();
+    const code = String(body.modelCode || '').trim();
+    const line = q.get('SELECT * FROM line WHERE id = ?', lineId);
+    if (!line) throw badRequest('线体不存在');
+    if (!code) throw badRequest('缺少 modelCode');
+
+    const model = q.get('SELECT * FROM model WHERE code = ?', code);
+    if (!model) throw badRequest(`机种 ${code} 不存在`);
+
+    const r = setCurrentModel(line.id, model.id);
+    if (!r.ok) throw badRequest(r.message || '指定失败');
+    sendJson(res, 200, { ok: true, currentModelCode: code, same: !!r.same });
   });
 
   /**

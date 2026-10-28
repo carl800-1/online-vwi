@@ -57,8 +57,8 @@ function nextLineCode() {
 }
 
 /**
- * 机种编码自动生成：M1、M2…
- * 现场不想先想编码 —— 编码只是个不重复的标识，建完想改在「改编码/名称」里改。
+ * 机种编号自动生成：M1、M2…
+ * 现场不想先想编号 —— 它只是个不重复的标识，建完想改在「改编号/名称」里改。
  */
 function nextModelCode() {
   const used = new Set(q.all('SELECT code FROM model').map((r) => r.code));
@@ -194,7 +194,9 @@ export function register(router) {
             .map(([k, v]) => [k.split(':')[1], v])
         )
       })),
-      coverage: { total: cov.total, done: cov.done }
+      coverage: { total: cov.total, done: cov.done },
+      // 新建弹窗里「机种编号」的预填值：现场不想自己去想一个不重复的号
+      nextCode: nextModelCode()
     });
   });
 
@@ -207,7 +209,7 @@ export function register(router) {
     const body = await readJsonBody(req);
     const code = str(body.code, 32).trim() || nextModelCode();
     const name = str(body.name, 80).trim() || code;
-    if (!/^[A-Za-z0-9._-]{1,32}$/.test(code)) throw badRequest('机种编码只能用字母、数字、点、下划线、横线');
+    if (!/^[A-Za-z0-9._-]{1,32}$/.test(code)) throw badRequest('机种编号只能用字母、数字、点、下划线、横线');
     if (q.get('SELECT id FROM model WHERE code = ?', code)) throw badRequest(`机种 ${code} 已存在`);
 
     const maxSort = q.get('SELECT COALESCE(MAX(sort),0) s FROM model').s;
@@ -231,7 +233,7 @@ export function register(router) {
 
     if (body.code !== undefined) {
       const code = str(body.code, 32).trim();
-      if (!code) throw badRequest('机种编码不能为空');
+      if (!code) throw badRequest('机种编号不能为空');
       if (code !== m.code && q.get('SELECT id FROM model WHERE code = ?', code)) {
         throw badRequest(`机种 ${code} 已存在`);
       }

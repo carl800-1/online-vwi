@@ -153,10 +153,9 @@
               <div><b>运行中 / 停用 / 维修中 / 保养中</b>：只有「运行中」的线会让终端读它的内容。
               改成另外三种，这条线的屏会停在最后一屏，不会变成空白；要改回运行先去「线体设置」。</div></div>
             <div class="bh"><span class="bh-i">🔵</span>
-              <div><b>正在生产</b>：这条线当前下发的机种，屏上播的就是它。大字那个就是。</div></div>
+              <div><b>正在生产</b>：这条线当前下发的机种，屏上播的就是它，大字那个就是。<br>还没指定时是一个 <b>+ 指定正在生产的机种</b> —— 先把它填上，排产和换型才有起点；现场已经换过料、管理端还停在老机种时，点旁边的「改」对正。</div></div>
             <div class="bh"><span class="bh-i">➡️</span>
-              <div><b>下一个 / + 排产下一个机种</b>：提前把下一炉要做的机种排好，不用等真要换时才翻。
-              排在库里，关服务端也不丢；不想要了点 <b>✕</b> 取消。</div></div>
+              <div><b>下一个 / + 排产下一个机种</b>：提前把下一炉要做的机种排好，不用等真要换时才翻。排在库里，关服务端也不丢；不想要了点 <b>✕</b> 取消。没排产时「换型」按钮是灰的。</div></div>
             <div class="bh"><span class="bh-i">🔄</span>
               <div><b>换型</b>：排产只是记一笔，<b>点「换型」才真正下发</b>。点了按钮会变亮，
               显示「换型中 已就绪 3/5」—— 终端正在下载新内容。</div></div>
@@ -217,7 +216,7 @@
             <h2>机种</h2>
             <span class="sub" id="mdSub">选中一个机种，下面设它的工序</span>
             <div class="spacer"></div>
-            <input type="search" id="mdSearch" class="mini-search" placeholder="搜索机种">
+            <input type="search" id="mdSearch" class="mini-search" placeholder="搜机种编号 / 产品名称">
             <button class="btn sm primary" id="mdNewBtn">+ 新建机种</button>
           </div>
           <div class="md-chips" id="mdList"></div>
@@ -235,7 +234,7 @@
             <button class="btn sm" id="stAddBtn" title="可一次贴多行，批量建">+ 批量加工序</button>
           </div>
 
-          <!-- 机种信息条：编码、可生产线体、以及只有选中机种才出现的三个操作 -->
+          <!-- 机种信息条：机种编号、可生产线体、以及只有选中机种才出现的三个操作 -->
           <div class="md-meta" id="mdMeta"></div>
 
           <div class="table-wrap st-table-wrap">

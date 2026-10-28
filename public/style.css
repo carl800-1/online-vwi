@@ -2144,6 +2144,60 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
 .chk-line input { margin: 0; accent-color: var(--brand); }
 .chk-line small { color: var(--ink3); font-size: 11px; }
 
+/* 「使用线体」选择器：已选的挂成胶囊，右边 + 号拉一个下拉再加。
+   现场原话「使用线体要 + 按钮，然后下拉增加」—— 线多了不用勾一屏复选框。 */
+.lpk {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--line2); position: relative;
+}
+.lpk-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; flex: 1; min-width: 0; }
+.lpk-none { font-size: 12.5px; color: var(--ink3); }
+.lpk-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12.5px; padding: 3px 6px 3px 10px; border-radius: 999px;
+  background: var(--panel); color: var(--brand-ink); border: 1px solid var(--line);
+}
+.lpk-chip i {
+  font-style: normal; font-size: 11px; line-height: 1; cursor: pointer;
+  color: var(--ink3); padding: 2px 4px; border-radius: 999px;
+}
+.lpk-chip i:hover { color: var(--danger); background: var(--danger-bg); }
+
+.lpk-add {
+  font: inherit; font-size: 12.5px; color: var(--brand-ink); white-space: nowrap;
+  background: var(--panel); border: 1px dashed var(--brand); border-radius: 7px;
+  padding: 4px 11px; cursor: pointer;
+}
+.lpk-add:hover { background: var(--brand-bg); }
+
+.lpk-menu {
+  position: absolute; right: 8px; top: calc(100% - 2px); z-index: 20;
+  min-width: 210px; max-height: 208px; overflow: auto;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 4px;
+}
+.lpk-menu[hidden] { display: none; }
+/* 弹窗底部放不下就往上翻 —— 否则下拉会被 .dlg-body 的滚动区裁掉半截 */
+.lpk-menu.up { top: auto; bottom: calc(100% - 2px); }
+.lpk-item {
+  display: flex; align-items: baseline; gap: 8px; width: 100%;
+  font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+  background: transparent; border: 0; border-radius: 7px; padding: 7px 9px;
+}
+.lpk-item:hover { background: var(--brand-bg); }
+.lpk-item b { color: var(--ink); font-weight: 600; }
+.lpk-item small { color: var(--ink3); font-size: 11.5px; margin-left: auto; white-space: nowrap; }
+.lpk-empty { font-size: 12.5px; color: var(--ink3); padding: 8px 9px; }
+
+/* 总览页：「正在生产」那个「改」—— 改当前机种（对正现场已经换过料的情况） */
+.rl-edit {
+  font: inherit; font-size: 11.5px; color: var(--ink3);
+  background: transparent; border: 1px solid var(--line); border-radius: 6px;
+  padding: 1px 7px; cursor: pointer;
+}
+.rl-edit:hover { color: var(--brand-ink); border-color: var(--brand); background: var(--brand-bg); }
+
 /* 「可生产机种」点开后的清单 */
 .prod-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .prod-tag {

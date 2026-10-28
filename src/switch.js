@@ -209,6 +209,43 @@ export function switchTo(line, model, now = Date.now()) {
   return { ok: true, phase: 'prepare', activated: false };
 }
 
+/**
+ * 直接指定"这条线正在生产哪个机种"（v4.0.0 的「+ 指定正在生产的机种」）。
+ *
+ * 为什么不走 switchTo 那套两段式：
+ *   1. 上线第一天，屏还没装、内容也还是空的 —— 先得有个"当前机种"，
+ *      否则作业内容页只能显示"未指定"，排产也没有起点；
+ *   2. 现场纸质流转已经换过去了，管理端还停在老机种 —— 需要一次性对正。
+ * 这两种都不是"等所有屏下完再一起翻"，等下去只会一直卡在准备中。
+ *
+ * 它会 seq +1（和 activate 一样），所以在线终端下一轮轮询就会自己去取新清单并翻页。
+ */
+export function setCurrentModel(lineId, modelId) {
+  const row = lineRow(lineId);
+  if (row.pending_model_id) {
+    return { ok: false, message: '这条线正在换型中，先「放弃切换」再改当前机种' };
+  }
+  if (row.current_model_id === (modelId || '')) return { ok: true, same: true };
+
+  tx(() => {
+    patchLineState(lineId, {
+      current_model_id: modelId || '',
+      pending_model_id: '',
+      pending_deadline: 0,
+      seq: (Number(row.seq) || 0) + 1,
+      // 排产的正好就是刚指定的这个 → 排产没意义了，顺手清掉
+      next_model_id: row.next_model_id && row.next_model_id === modelId ? '' : (row.next_model_id || '')
+    });
+    setSetting('rev', String(++rev));
+  });
+
+  clearReady(lineId);
+  clearDeadline(lineId);
+  console.log(`[switch] ${lineId} current set to ${modelId || '(none)'} directly`);
+  bump();
+  return { ok: true };
+}
+
 // ---------- 终端举手 ----------
 export function markReady(lineId, op, modelId) {
   const row = lineRow(lineId);

@@ -26,6 +26,7 @@ const S = {
   boardTimer: null,
 
   models: [],
+  nextCode: '',   // 新建机种弹窗里「机种编号」的预填值（服务端扫空号给 M1、M2…）
 
   // 机种设置（定义层）：只看"有哪些工序、各做什么"，不碰内容
   mdModelId: '',
@@ -340,13 +341,18 @@ function renderBoard() {
     const left = l.deadline ? l.deadline - Date.now() : 0;
     const pct = l.clients.length ? Math.round(l.readyCount / l.clients.length * 100) : 0;
 
+    // 第一个 +：这条线正在生产哪个机种。没指定就给个加号 ——
+    // 上线第一天屏还没装、内容还空着，先得有个起点，否则"下一个"和"换型"都无从谈起。
+    // 已经有了就点「改」，用来对正"现场已经换过料、管理端还停在老机种"。
     const cur = l.currentModelCode
       ? `<b class="rl-big">${H(l.currentModelCode)}</b>
-         <span class="rl-nm">${H(l.currentModelName || '')}</span>`
+         <span class="rl-nm">${H(l.currentModelName || '')}</span>
+         <button class="rl-edit" data-pickcur="${H(l.id)}" title="改：这条线正在生产的机种">改</button>`
       : `<b class="rl-big none">未指定</b>
-         <span class="rl-nm">右边排产一个机种</span>`;
+         <button class="rl-add" data-pickcur="${H(l.id)}">+ 指定正在生产的机种</button>`;
 
-    // 换型中 → 进度条 + 亮着的按钮；排好了 → 浅色「换型」；没排 → 一个加号
+    // 第二个 +：排产下一个。排好了才给出「换型」——换型是"等所有屏备好再一起翻"，
+    // 没目标就没得换，所以按钮留着但点不动（比直接消失好找）。
     const next = preparing
       ? `<b class="rl-nx go">${H(l.pendingModelCode || '')}</b>
          <span class="rl-bar"><i style="width:${pct}%"></i></span>
@@ -357,7 +363,8 @@ function renderBoard() {
            <span class="rl-nm">${H(l.nextModelName || '')}</span>
            <button class="btn sm rl-sw" data-switch="${H(l.id)}">换型</button>
            <button class="rl-x" data-clearnext="${H(l.id)}" title="取消排产">✕</button>`
-        : `<button class="rl-add" data-picknext="${H(l.id)}">+ 排产下一个机种</button>`;
+        : `<button class="rl-add" data-picknext="${H(l.id)}">+ 排产下一个机种</button>
+           <button class="btn sm rl-sw" disabled title="先排产下一个机种，才有得换">换型</button>`;
 
     // 当前机种在这条线上有工序没配内容 —— 换型一定卡在那儿，提前亮出来
     const warn = l.currentModelCode && l.noContentCount > 0
@@ -411,7 +418,48 @@ async function pickNextModel(lineId) {
   } catch (e) { toast(e.message, 'err'); }
 }
 
+/**
+ * 指定「正在生产的机种」。直接落库、不等终端 ——
+ * 用在两个场合：① 上线第一天屏还没装、内容还空着；② 现场已经换过料，管理端还停在老机种。
+ * 要让所有屏备好再一起翻，用旁边的「换型」（那是两段式协议）。
+ */
+async function pickCurrentModel(lineId) {
+  const line = S.board.find((x) => x.id === lineId);
+  if (!line) return;
+  if (!S.models.length) await loadModels().catch(() => {});
+  if (line.phase === 'prepare') {
+    return toast('这条线正在换型中，先「放弃切换」再改当前机种', 'err');
+  }
+
+  const opts = S.models.filter((m) => m.enabled)
+    .map((m) => `<option value="${H(m.code)}"${m.code === line.currentModelCode ? ' selected' : ''}>${H(modelLabel(m))}</option>`)
+    .join('');
+  if (!opts) return toast('还没有机种，先去「机种设置」新建一个', 'err');
+
+  const pick = await dialog({
+    title: `指定：${line.name} 正在生产的机种`,
+    message: line.currentModelCode
+      ? `现在记的是 ${line.currentModelCode}，改成哪个？`
+      : '这一行现在显示「未指定」。先把正在做的机种填上，排产和换型才有起点。',
+    html: `<select id="curPick" class="dlg-sel">${opts}</select>
+           <div class="tip">这一步直接改「正在生产」，<b>不等屏下载完</b> —— 在线终端下一轮轮询
+             就会自己来取新内容。要让所有屏都备好再一起翻，回去点旁边的「换型」。</div>`,
+    okText: '确定',
+    read: (body) => body.querySelector('#curPick').value
+  });
+  if (!pick) return;
+
+  try {
+    await postJson('/api/board/current', { lineId, modelCode: pick });
+    toast(`已指定：${line.name} 正在生产 ${pick}`, 'ok');
+    await loadBoard();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
 $('board').addEventListener('click', async (e) => {
+  const pcur = e.target.closest('[data-pickcur]');
+  if (pcur) return pickCurrentModel(pcur.dataset.pickcur);
+
   const pick = e.target.closest('[data-picknext]');
   if (pick) return pickNextModel(pick.dataset.picknext);
 
@@ -752,6 +800,7 @@ $('dialog').addEventListener('click', (e) => {
 async function loadModels(keepId) {
   const d = await api('/api/models');
   S.models = d.models || [];
+  S.nextCode = d.nextCode || '';
   const want = keepId || S.mdModelId;
   S.mdModelId = (want && S.models.some((m) => m.id === want))
     ? want : ((S.models[0] && S.models[0].id) || '');
@@ -842,7 +891,7 @@ function renderMdMeta(m) {
   $('mdMeta').innerHTML = `
     <div class="mm-main">
       <div class="mm-blk">
-        <span class="mm-k">编码</span><b class="mono">${H(m.code)}</b>
+        <span class="mm-k">机种编号</span><b class="mono">${H(m.code)}</b>
       </div>
       <div class="mm-blk">
         <span class="mm-k">可生产线体</span>
@@ -860,7 +909,7 @@ function renderMdMeta(m) {
         <span><b>${items}</b> 个文件</span>
         <span>${bytes ? fmtBytes(bytes) : '—'}</span>
       </div>
-      <button class="btn sm" data-mact="ren">改编码/名称</button>
+      <button class="btn sm" data-mact="ren">改编号/名称</button>
       <button class="btn sm danger" data-mact="del">删除机种</button>
     </div>`;
 }
@@ -878,10 +927,10 @@ $('mdMeta').addEventListener('click', async (e) => {
   if (act.dataset.mact === 'ren') {
     const r = await dialog({
       title: '改机种',
-      message: '编码是终端和工艺文件里对外的标识；改编码不影响已配的内容。',
+      message: '机种编号是终端和工艺文件里对外的标识；改它不影响已配的内容。',
       fields: [
-        { key: 'code', label: '机种编码', value: m.code },
-        { key: 'name', label: '机种名称', value: m.name }
+        { key: 'code', label: '机种编号', value: m.code },
+        { key: 'name', label: '产品名称', value: m.name }
       ],
       okText: '保存'
     });
@@ -913,22 +962,93 @@ $('mdMeta').addEventListener('click', async (e) => {
   }
 });
 
+/* ---- 「使用线体」选择器（新建机种 / 改可生产线体两处共用） ----
+   现场原话：「使用线体要 + 按钮，然后下拉增加」。
+   所以不做一屏复选框（线一多就是一整页勾选框），改成：已选的挂成小胶囊，
+   右边「+ 添加线体」拉一个下拉，挑一条加一枚；胶囊上的 ✕ 摘掉。 */
+const LPK = { read: () => [], cleanup: () => {} };
+
+function linePickerHTML() {
+  return `<div class="lpk" id="lpk">
+      <div class="lpk-chips" id="lpkChips"></div>
+      <button type="button" class="lpk-add" id="lpkAdd">+ 添加线体</button>
+      <div class="lpk-menu" id="lpkMenu" hidden></div>
+    </div>`;
+}
+
+/** 挂上事件。dialog() 是先插 DOM 再返回 Promise，所以调完 dialog() 立刻就能挂。 */
+function mountLinePicker(picked) {
+  const box = $('lpk');
+  if (!box) return;
+  const chips = $('lpkChips');
+  const add = $('lpkAdd');
+  const menu = $('lpkMenu');
+  let sel = (picked || []).slice();
+
+  const draw = () => {
+    chips.innerHTML = sel.length
+      ? sel.map((id) => {
+          const l = S.lines.find((x) => x.id === id);
+          return `<span class="lpk-chip">${H(l ? l.name : '已删线体')}
+            <i data-lpkr="${H(id)}" title="移除">✕</i></span>`;
+        }).join('')
+      : '<span class="lpk-none">还没选线体</span>';
+
+    const rest = S.lines.filter((l) => !sel.includes(l.id));
+    menu.innerHTML = rest.length
+      ? rest.map((l) => `<button type="button" class="lpk-item" data-lpkadd="${H(l.id)}">
+          <b>${H(l.name)}</b>
+          <small>${H(l.code)} · ${l.slots || 0} 块屏${l.status === 'running' ? ' · 运行中' : ''}</small>
+        </button>`).join('')
+      : '<div class="lpk-empty">没有更多线体了</div>';
+  };
+  draw();
+
+  add.onclick = (e) => {
+    e.stopPropagation();
+    // 弹窗底部空间不够就往上翻，不然菜单会被 .dlg-body 的滚动区切掉半截
+    const body = $('dlgBody');
+    const room = body ? body.getBoundingClientRect().bottom - box.getBoundingClientRect().bottom : 999;
+    menu.classList.toggle('up', room < 196);
+    menu.hidden = !menu.hidden;
+  };
+  menu.onclick = (e) => {
+    const b = e.target.closest('[data-lpkadd]');
+    if (!b) return;
+    sel.push(b.dataset.lpkadd);
+    menu.hidden = true;
+    draw();
+  };
+  chips.onclick = (e) => {
+    const x = e.target.closest('[data-lpkr]');
+    if (!x) return;
+    sel = sel.filter((id) => id !== x.dataset.lpkr);
+    draw();
+  };
+
+  // 点别处把下拉收起来（弹窗关掉时 listener 由 LPK.cleanup 摘掉）
+  const away = (e) => { if (!box.contains(e.target)) menu.hidden = true; };
+  document.addEventListener('click', away);
+
+  LPK.read = () => sel.slice();
+  LPK.cleanup = () => document.removeEventListener('click', away);
+}
+
 /** 勾选「使用线体」：一个机种可以安排好几条线，工艺共用一套。 */
 async function editModelLines(m) {
   if (!S.lines.length) await loadLines().catch(() => {});
-  const have = new Set((S.mdLines || []).map((l) => l.id));
-  const r = await dialog({
+  const have = (S.mdLines || []).map((l) => l.id);
+  const p = dialog({
     title: `${m.code} 能生产于哪些线`,
-    message: '勾上的线可以在「作业内容」里排产这个机种。工艺只有一套，几条线共用。',
-    html: `<div class="dlg-lines">${S.lines.map((l) => `
-      <label class="chk-line">
-        <input type="checkbox" value="${H(l.id)}"${have.has(l.id) ? ' checked' : ''}>
-        <span>${H(l.name)}</span>
-        <small>${l.slots || 0} 块屏</small>
-      </label>`).join('') || '<span class="sub">还没有线体</span>'}</div>`,
-    read: (body) => [...body.querySelectorAll('.dlg-lines input:checked')].map((x) => x.value),
+    message: '加进来的线可以在「作业内容」里排产这个机种。工艺只有一套，几条线共用。',
+    html: `<div class="dlg-row"><label>使用线体</label>${linePickerHTML()}
+        <div class="tip">点「+ 添加线体」挑一条加进来，胶囊上的 ✕ 摘掉。</div></div>`,
+    read: () => LPK.read(),
     okText: '保存'
   });
+  mountLinePicker(have);
+  const r = await p;
+  LPK.cleanup();
   if (!r) return;
   try {
     await putJson('/api/models/' + encodeURIComponent(m.id), { lineIds: r });
@@ -940,30 +1060,38 @@ async function editModelLines(m) {
 
 $('mdNewBtn').addEventListener('click', async () => {
   if (!S.lines.length) await loadLines().catch(() => {});
-  const r = await dialog({
+
+  // 默认把"运行中"的线先放进去 —— 新建机种九成是给正在跑的那几条线加的
+  const picked = S.lines.filter((l) => l.status === 'running').map((l) => l.id);
+  const p = dialog({
     title: '新建机种',
-    message: '一次把「几道工序」和「在哪几条线做」都定下来。工序码默认 OP1、OP2…，名称建完再填。'
-      + '机种编码自动生成（M1、M2…），建完想改在下面的「改编码/名称」里改。',
+    message: '四件事一次定下来：机种编号、产品名称、几道工序、在哪些线做。'
+      + '工序码默认 OP1、OP2…，建完在下面逐道改名称。',
     html: `
-      <div class="dlg-row"><label for="nmName">机种名称</label>
-        <input type="text" id="nmName" placeholder="X300 型">
-        <div class="tip">留空就先叫机种编码，之后随时改。</div></div>
+      <div class="dlg-row"><label for="nmCode">机种编号</label>
+        <input type="text" id="nmCode" value="${H(S.nextCode || '')}" placeholder="如 X300">
+        <div class="tip">终端和工艺文件按它认这个机种。已经预填了一个没被占用的号，
+          不想改就用它；留空也会自动编号。</div></div>
+      <div class="dlg-row"><label for="nmName">产品名称</label>
+        <input type="text" id="nmName" placeholder="如 X300 前壳组件">
+        <div class="tip">留空就先叫编号，之后随时改。</div></div>
       <div class="dlg-row"><label for="nmCnt">几道工序</label>
         <input type="number" id="nmCnt" min="1" max="60" value="5">
         <div class="tip">默认生成 OP1…OPn，建完在下面逐道改名称。工序数别超过线体的工位数。</div></div>
-      <div class="dlg-row"><label>使用线体</label>
-        <div class="dlg-lines">${S.lines.map((l) => `
-          <label class="chk-line"><input type="checkbox" value="${H(l.id)}"${l.status === 'running' ? ' checked' : ''}>
-            <span>${H(l.name)}</span><small>${l.slots || 0} 块屏</small></label>`).join('')
-          || '<span class="sub">还没有线体，可以之后再安排</span>'}</div>
-        <div class="tip">可多选。几条线做同一个机种时，工序和内容是一套，不用重复录。</div></div>`,
+      <div class="dlg-row"><label>使用线体</label>${linePickerHTML()}
+        <div class="tip">点「+ 添加线体」挑，可以加好几条。几条线做同一个机种时，
+          工序和内容是一套，不用重复录。</div></div>`,
     read: (body) => ({
+      code: body.querySelector('#nmCode').value.trim(),
       name: body.querySelector('#nmName').value.trim(),
       processCount: Number(body.querySelector('#nmCnt').value) || 5,
-      lineIds: [...body.querySelectorAll('.dlg-lines input:checked')].map((x) => x.value)
+      lineIds: LPK.read()
     }),
     okText: '创建'
   });
+  mountLinePicker(picked);
+  const r = await p;
+  LPK.cleanup();
   if (!r) return;
   try {
     const made = await postJson('/api/models', r);
