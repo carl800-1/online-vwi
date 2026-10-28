@@ -1,10 +1,12 @@
-// 读工序表（.xlsx / .csv），只取单元格文本，样式一律不管。
+// 读写工序表（.xlsx / .csv）。
 //
-// 为什么自己解 ZIP 而不装库：整个项目只有一个运行时依赖 mupdf（PDF 拆页），
+// 为什么自己解/自己拼 ZIP 而不装库：整个项目只有一个运行时依赖 mupdf（PDF 拆页），
 // xlsx 说到底是「ZIP 里放几份 XML」，node:zlib 够用，省掉一个几百 KB 的包，
 // 现场部署也不用多带一份 node_modules。
 //
-// 支持：store / deflate 两种压缩、sharedStrings、inlineStr、数值、公式结果文本、CSV/TSV（UTF-8 与 GBK）。
+// 读：store / deflate 两种压缩、sharedStrings、inlineStr、数值、公式结果文本、CSV/TSV（UTF-8 与 GBK）。
+// 写：只用 inlineStr（不建 sharedStrings 表，少一层索引）、ZIP 一律 store 不压缩
+//     —— 工序表就几 KB，deflate 省不下什么，代码却能少一半。
 // 不支持：.xls（97-2003 二进制，它不是 ZIP）、加密文件、zip64（>4 GB，工序表不可能这么大）。
 // 遇到不支持的会抛一句人话，让界面直接提示，而不是静默读到空表。
 
@@ -201,4 +203,200 @@ export function parseSheet(buf) {
     path = first;
   }
   return tidy(parseSheetXml(files.get(path).toString('utf8'), sst));
+}
+
+// ============================================================
+// 写：把二维数组拼成 .xlsx
+// ============================================================
+
+const CRC_TABLE = (() => {
+  const t = new Int32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let c = i;
+    for (let k = 0; k < 8; k += 1) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    t[i] = c;
+  }
+  return t;
+})();
+
+function crc32(buf) {
+  let c = -1;
+  for (let i = 0; i < buf.length; i += 1) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ -1) >>> 0;
+}
+
+/**
+ * 打包成 ZIP，全部 store（method 0，不压缩）。
+ * 顺序有讲究：[Content_Types].xml 排第一 —— 老版本 Excel 认死这个位置。
+ */
+function zipStore(files) {
+  const now = new Date();
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+  const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+
+  const parts = [];
+  const centrals = [];
+  let offset = 0;
+
+  for (const [name, text] of files) {
+    const nameBuf = Buffer.from(name, 'utf8');
+    const data = Buffer.from(text, 'utf8');
+    const crc = crc32(data);
+
+    const loc = Buffer.alloc(30);
+    loc.writeUInt32LE(SIG_LOC, 0);
+    loc.writeUInt16LE(20, 4);            // 解压所需版本 2.0
+    loc.writeUInt16LE(0x0800, 6);        // 文件名按 UTF-8（全 ASCII 也不碍事）
+    loc.writeUInt16LE(0, 8);             // method 0 = store
+    loc.writeUInt16LE(dosTime, 10);
+    loc.writeUInt16LE(dosDate, 12);
+    loc.writeUInt32LE(crc, 14);
+    loc.writeUInt32LE(data.length, 18);  // 压缩后
+    loc.writeUInt32LE(data.length, 22);  // 原始
+    loc.writeUInt16LE(nameBuf.length, 26);
+    loc.writeUInt16LE(0, 28);            // extra len
+
+    const cen = Buffer.alloc(46);
+    cen.writeUInt32LE(SIG_CEN, 0);
+    cen.writeUInt16LE(20, 4);            // version made by
+    cen.writeUInt16LE(20, 6);            // version needed
+    cen.writeUInt16LE(0x0800, 8);
+    cen.writeUInt16LE(0, 10);
+    cen.writeUInt16LE(dosTime, 12);
+    cen.writeUInt16LE(dosDate, 14);
+    cen.writeUInt32LE(crc, 16);
+    cen.writeUInt32LE(data.length, 20);
+    cen.writeUInt32LE(data.length, 24);
+    cen.writeUInt16LE(nameBuf.length, 28);
+    cen.writeUInt16LE(0, 30);            // extra
+    cen.writeUInt16LE(0, 32);            // comment
+    cen.writeUInt16LE(0, 34);            // disk start
+    cen.writeUInt16LE(0, 36);            // internal attrs
+    cen.writeUInt32LE(0, 38);            // external attrs
+    cen.writeUInt32LE(offset, 42);       // 本地头偏移
+
+    parts.push(loc, nameBuf, data);
+    centrals.push(cen, nameBuf);
+    offset += 30 + nameBuf.length + data.length;
+  }
+
+  const cenBuf = Buffer.concat(centrals);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(SIG_EOCD, 0);
+  eocd.writeUInt16LE(0, 4);
+  eocd.writeUInt16LE(0, 6);
+  eocd.writeUInt16LE(files.length, 8);
+  eocd.writeUInt16LE(files.length, 10);
+  eocd.writeUInt32LE(cenBuf.length, 12);
+  eocd.writeUInt32LE(offset, 16);
+  eocd.writeUInt16LE(0, 20);
+
+  return Buffer.concat([...parts, cenBuf, eocd]);
+}
+
+/** XML 转义。顺手剔掉 XML 1.0 不允许的控制字符，否则 Excel 会报"文件已损坏" */
+function escXml(s) {
+  return String(s)
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/** 0 → A，25 → Z，26 → AA */
+function colName(i) {
+  let s = '';
+  let n = i + 1;
+  while (n > 0) {
+    s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
+function sheetXml(rows, widths, freeze) {
+  const cols = (widths && widths.length)
+    ? '<cols>' + widths.map((w, i) =>
+        `<col min="${i + 1}" max="${i + 1}" width="${w}" customWidth="1"/>`).join('') + '</cols>'
+    : '';
+
+  // 全部用 inlineStr：不建 sharedStrings 表，而且「0010」这种带前导零的工序码
+  // 不会被 Excel 当成数字吃掉
+  const body = rows.map((r, ri) => {
+    const cells = (r || []).map((v, ci) => {
+      if (v === null || v === undefined || v === '') return '';
+      return `<c r="${colName(ci)}${ri + 1}" t="inlineStr"><is><t xml:space="preserve">${
+        escXml(v)}</t></is></c>`;
+    }).join('');
+    return `<row r="${ri + 1}">${cells}</row>`;
+  }).join('');
+
+  // 冻结首行：25 道工序往下滚时表头还在，跟界面上的表格一个体验
+  const views = freeze === false
+    ? '<sheetViews><sheetView workbookViewId="0"/></sheetViews>'
+    : '<sheetViews><sheetView workbookViewId="0">'
+      + '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
+      + '</sheetView></sheetViews>';
+
+  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    + '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+    + views
+    + '<sheetFormatPr defaultRowHeight="15"/>'
+    + cols
+    + `<sheetData>${body}</sheetData>`
+    + '</worksheet>';
+}
+
+/**
+ * 入口：拼一个 xlsx 出来。
+ * @param {Array<{name:string, rows:string[][], widths?:number[], freeze?:boolean}>} sheets
+ *   name 由调用方负责合法化（≤31 字符、无 : \ / ? * [ ]、不重名）
+ * @returns {Buffer}
+ */
+export function buildWorkbook(sheets) {
+  if (!Array.isArray(sheets) || !sheets.length) throw new Error('没有可导出的工作表');
+
+  const CT = 'application/vnd.openxmlformats-officedocument';
+  const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
+
+  const contentTypes = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    + '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+    + '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+    + '<Default Extension="xml" ContentType="application/xml"/>'
+    + `<Override PartName="/xl/workbook.xml" ContentType="${CT}.spreadsheetml.sheet.main+xml"/>`
+    + sheets.map((s, i) =>
+        `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="${CT}.spreadsheetml.worksheet+xml"/>`
+      ).join('')
+    + '</Types>';
+
+  const rootRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    + `<Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/>`
+    + '</Relationships>';
+
+  const workbook = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    + '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+    + `xmlns:r="${REL}">`
+    + '<sheets>' + sheets.map((s, i) =>
+        `<sheet name="${escXml(s.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join('')
+    + '</sheets></workbook>';
+
+  const wbRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+    + '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    + sheets.map((s, i) =>
+        `<Relationship Id="rId${i + 1}" Type="${REL}/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`
+      ).join('')
+    + '</Relationships>';
+
+  return zipStore([
+    ['[Content_Types].xml', contentTypes],
+    ['_rels/.rels', rootRels],
+    ['xl/workbook.xml', workbook],
+    ['xl/_rels/workbook.xml.rels', wbRels],
+    ...sheets.map((s, i) => [
+      `xl/worksheets/sheet${i + 1}.xml`,
+      sheetXml(s.rows || [], s.widths, s.freeze)
+    ])
+  ]);
 }

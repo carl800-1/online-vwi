@@ -7,6 +7,7 @@
 // 运行：node test/run.mjs    （自动起一个临时数据目录的实例，跑完清理）
 
 import zlib from 'node:zlib';
+import { parseSheet } from '../src/xlsx.js';   // 导出回来的文件用它读，验「导出→导入」闭环
 
 const BASE = process.env.BASE || 'http://127.0.0.1:8093';
 
@@ -27,6 +28,15 @@ async function j(path, opt) {
   let d = null;
   try { d = text ? JSON.parse(text) : null; } catch { d = { raw: text }; }
   return { status: r.status, ok: r.ok, body: d };
+}
+
+/** 拿二进制响应（导出的 xlsx），顺带把文件名从 Content-Disposition 里抠出来 */
+async function bin(path) {
+  const r = await fetch(BASE + path);
+  const buf = Buffer.from(await r.arrayBuffer());
+  const disp = r.headers.get('Content-Disposition') || '';
+  const m = /filename\*=UTF-8''([^;]+)/i.exec(disp);
+  return { status: r.status, ok: r.ok, buf, name: m ? decodeURIComponent(m[1]) : '' };
 }
 
 const post = (p, body) => j(p, {
@@ -558,6 +568,51 @@ async function upload(buf, name) {
   const back = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id)).body.stations;
   ok(!back.some((x) => x.code === 'OP300' || x.code === 'OP310' || x.code === 'OP330'),
     '删掉导入的工序后恢复原样');
+
+  // ========== 14. 工序清单导出（xlsx） ==========
+  console.log('\n14. 工序清单导出 / 模板（Excel）');
+
+  const tpl = await bin('/api/export/template.xlsx');
+  ok(tpl.ok && tpl.buf[0] === 0x50 && tpl.buf[1] === 0x4b, '模板下载回来是 xlsx（ZIP 头 PK）');
+  ok(tpl.name === '工序清单导入模板.xlsx', '模板文件名带中文（RFC 5987 编码）', tpl.name);
+
+  const tplRows = parseSheet(tpl.buf);
+  ok(tplRows.length === 2 && tplRows[0][0] === '工序码' && tplRows[1][0] === 'OP10',
+    '模板 = 标题行 + 一行示例', tplRows);
+  ok(tpl.buf.toString('utf8').includes('填写说明'),
+    '说明单独占一页，不混在数据区里（混进去会被当成一道工序）');
+
+  const all = await bin('/api/export/stations.xlsx');
+  ok(all.ok && all.buf[0] === 0x50, '全部机种导出成功');
+  ok(/^工序清单-全部机种-\d{8}-\d{4}\.xlsx$/.test(all.name), '文件名带「全部机种」+ 时间戳', all.name);
+
+  // workbook.xml 是明文（store 不压缩），直接数 sheet 标签就知道有几个工作表
+  const sheetNames = (b) => [...b.toString('utf8').matchAll(/<sheet name="([^"]+)"/g)].map((m) => m[1]);
+  const allNames = sheetNames(all.buf);
+  const modelCount = Object.keys(M).length;
+  ok(allNames.length >= modelCount,
+    `每个机种至少一个工作表（共 ${allNames.length} 个，机种 ${modelCount} 个）`, allNames);
+  ok(new Set(allNames).size === allNames.length, '工作表名不重复');
+  ok(allNames.every((n) => n.length <= 31 && !/[:\\/?*[\]]/.test(n)),
+    '工作表名都 ≤31 字符、不含 Excel 禁用字符', allNames);
+
+  // 单机种 + 单线：只出一个表，名字就是机种名，且内容能原样读回来（导出→导入闭环）
+  const one = await bin('/api/export/stations.xlsx?modelId=' + M.X200.id + '&lineId=' + L1id);
+  const oneNames = sheetNames(one.buf);
+  ok(oneNames.length === 1 && oneNames[0] === M.X200.name,
+    '单机种 + 单线：只有一个工作表，名字就是机种名', oneNames);
+
+  const oneRows = parseSheet(one.buf);
+  const stNow = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id)).body.stations;
+  ok(oneRows.length === stNow.length + 1,
+    `导出的行数 = 工序数 + 标题（${oneRows.length} = ${stNow.length} + 1）`);
+  ok(stNow.every((s, i) => {
+    const r = oneRows[i + 1] || [];
+    return r[0] === s.code && (r[1] || '') === (s.name || '') && (r[2] || '') === (s.note || '') ;
+  }), '导出 → 读回 逐行一致（工序码 / 名称 / 做什么）');
+
+  ok((await fetch(BASE + '/api/export/stations.xlsx?modelId=md_not_exist')).status === 400,
+    '机种不存在时返回 400，而不是给一张空表');
 
   // ---------- 汇总 ----------
   console.log('\n────────────────────────────');

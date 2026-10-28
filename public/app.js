@@ -1483,6 +1483,43 @@ $('stations').addEventListener('drop', (e) => {
   }
 });
 
+// 导出 / 模板：都走这条。用 fetch 拿 blob 而不是直接把地址丢给浏览器，
+// 是因为服务端拒绝时（比如"还没有配过工序"）返回的是 JSON，
+// 直接跳转会在新标签页里显示一段 JSON 报错，现场看不懂。
+async function downloadFile(url, fallback) {
+  const r = await fetch(url, { credentials: 'same-origin' });
+  if (!r.ok) {
+    let msg = `下载失败（${r.status}）`;
+    try { const j = await r.json(); msg = j.error || msg; } catch { /* 不是 JSON 就用默认话术 */ }
+    throw new Error(msg);
+  }
+  const cd = r.headers.get('Content-Disposition') || '';
+  const m = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+  const name = m ? decodeURIComponent(m[1]) : fallback;
+
+  const blob = await r.blob();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  toast(`已下载 ${name}`, 'ok');
+}
+
+// 导出全部机种：每个「机种 × 线体」一个工作表，三列跟导入一致
+$('stExportBtn').addEventListener('click', async () => {
+  try { await downloadFile('/api/export/stations.xlsx', '工序清单.xlsx'); }
+  catch (err) { toast(err.message, 'err'); }
+});
+
+// 导入模板：标题行 + 一行示例，说明放在第二页
+$('stTplBtn').addEventListener('click', async () => {
+  try { await downloadFile('/api/export/template.xlsx', '工序清单导入模板.xlsx'); }
+  catch (err) { toast(err.message, 'err'); }
+});
+
 // 从 Excel / CSV 导入工序清单：先让服务端解析成行给个预览，确认了才写库。
 // 不直接导入是因为工艺表格式五花八门，列一错位就得一条条删回来。
 $('stImportBtn').addEventListener('click', () => {

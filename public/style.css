@@ -1520,6 +1520,10 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
   border: 1px solid var(--line); border-radius: 7px; font-size: 12.5px;
 }
 
+/* 工序清单卡片头：搜索框 + 导入/导出/模板/批量加工序 挤在一行。
+   不收窄的话 1280 宽的屏会把最后一个按钮挤到第二行，卡片头凭空高一截。 */
+.card-head .mini-search.st-head { width: 132px; margin: 0; }
+
 .md-summary { padding: 12px 14px 14px; }
 .ms { display: flex; gap: 30px; flex-wrap: wrap; }
 .ms-item { display: flex; flex-direction: column; }

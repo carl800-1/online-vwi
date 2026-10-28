@@ -1,6 +1,6 @@
 {
   "name": "online-vwi",
-  "version": "3.2.1",
+  "version": "3.3.0",
   "private": true,
   "description": "ESOP 发布系统 —— 机种 × 线体 × 工位 播放清单，线体总览换型",
   "type": "module",
