@@ -56,6 +56,19 @@ function nextLineCode() {
   return `L${Date.now()}`;
 }
 
+/**
+ * 机种编码自动生成：M1、M2…
+ * 现场不想先想编码 —— 编码只是个不重复的标识，建完想改在「改编码/名称」里改。
+ */
+function nextModelCode() {
+  const used = new Set(q.all('SELECT code FROM model').map((r) => r.code));
+  for (let i = 1; i < 9999; i += 1) {
+    const c = `M${i}`;
+    if (!used.has(c)) return c;
+  }
+  return `M${Date.now()}`;
+}
+
 function mustModel(id) {
   const m = q.get('SELECT * FROM model WHERE id = ?', String(id || '').trim());
   if (!m) throw badRequest('机种不存在');
@@ -186,14 +199,14 @@ export function register(router) {
   });
 
   /**
-   * 新建机种。body: { code, name, processCount, lineIds[] }
+   * 新建机种。body: { name, processCount, lineIds[], code? }
    * 一次把"几道工序"和"在哪几条线做"都定下来 —— 这正是用户要的新建弹窗。
+   * code 不传就自动给 M1、M2…（界面新建弹窗不显示编码，建完可在「改编码/名称」里改）。
    */
   router.post('/api/models', async (req, res) => {
     const body = await readJsonBody(req);
-    const code = str(body.code, 32).trim();
+    const code = str(body.code, 32).trim() || nextModelCode();
     const name = str(body.name, 80).trim() || code;
-    if (!code) throw badRequest('机种编码不能为空');
     if (!/^[A-Za-z0-9._-]{1,32}$/.test(code)) throw badRequest('机种编码只能用字母、数字、点、下划线、横线');
     if (q.get('SELECT id FROM model WHERE code = ?', code)) throw badRequest(`机种 ${code} 已存在`);
 

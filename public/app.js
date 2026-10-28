@@ -942,12 +942,12 @@ $('mdNewBtn').addEventListener('click', async () => {
   if (!S.lines.length) await loadLines().catch(() => {});
   const r = await dialog({
     title: '新建机种',
-    message: '一次把「几道工序」和「在哪几条线做」都定下来。工序码默认 OP1、OP2…，名称建完再填。',
+    message: '一次把「几道工序」和「在哪几条线做」都定下来。工序码默认 OP1、OP2…，名称建完再填。'
+      + '机种编码自动生成（M1、M2…），建完想改在下面的「改编码/名称」里改。',
     html: `
-      <div class="dlg-row"><label for="nmCode">机种编码</label>
-        <input type="text" id="nmCode" placeholder="X300"></div>
       <div class="dlg-row"><label for="nmName">机种名称</label>
-        <input type="text" id="nmName" placeholder="X300 型"></div>
+        <input type="text" id="nmName" placeholder="X300 型">
+        <div class="tip">留空就先叫机种编码，之后随时改。</div></div>
       <div class="dlg-row"><label for="nmCnt">几道工序</label>
         <input type="number" id="nmCnt" min="1" max="60" value="5">
         <div class="tip">默认生成 OP1…OPn，建完在下面逐道改名称。工序数别超过线体的工位数。</div></div>
@@ -958,7 +958,6 @@ $('mdNewBtn').addEventListener('click', async () => {
           || '<span class="sub">还没有线体，可以之后再安排</span>'}</div>
         <div class="tip">可多选。几条线做同一个机种时，工序和内容是一套，不用重复录。</div></div>`,
     read: (body) => ({
-      code: body.querySelector('#nmCode').value.trim(),
       name: body.querySelector('#nmName').value.trim(),
       processCount: Number(body.querySelector('#nmCnt').value) || 5,
       lineIds: [...body.querySelectorAll('.dlg-lines input:checked')].map((x) => x.value)
@@ -966,7 +965,6 @@ $('mdNewBtn').addEventListener('click', async () => {
     okText: '创建'
   });
   if (!r) return;
-  if (!r.code) return toast('机种编码不能为空', 'err');
   try {
     const made = await postJson('/api/models', r);
     await loadModels(made.id);

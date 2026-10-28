@@ -49,6 +49,7 @@ const put = (p, body) => j(p, {
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(body || {})
 });
+const del = (p) => j(p, { method: 'DELETE' });
 
 const state = async () => (await j('/api/state?since=0')).body;
 
@@ -352,6 +353,17 @@ async function upload(buf, name) {
   ok(tp.processes.every((p) => p.items.length === 0), '新工序都是空的，等内容');
   ok(tp.processes.every((p) => p.reqs.some((x) => x.kind === 'image')),
     '新工序默认允许图片（现场最常见的起点）');
+
+  // 编码自动生成：界面新建弹窗不再问编码（4.0.0）
+  const auto1 = await post('/api/models', { name: '', processCount: 1, lineIds: [] });
+  ok(auto1.ok && /^M\d+$/.test(auto1.body.code), '不传编码时自动给 M1、M2…');
+  ok(auto1.body.name === auto1.body.code, '名称留空时先用编码顶上');
+  const auto2 = await post('/api/models', { processCount: 1 });
+  ok(auto2.body.code !== auto1.body.code, '自动编码不重复');
+  await del('/api/models/' + auto1.body.id);
+  await del('/api/models/' + auto2.body.id);
+  ok((await j('/api/models')).body.models.every((m) => !/^M\d+$/.test(m.code)),
+    '自动编号的机种删干净后不再占号');
 
   // 可生产线体多选：工艺只有一套，几条线共用
   const l2b = await post('/api/lines', { name: '二线', slots: 5 });
