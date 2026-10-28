@@ -1483,9 +1483,47 @@ $('stations').addEventListener('drop', (e) => {
   }
 });
 
-// 导出 / 模板：都走这条。用 fetch 拿 blob 而不是直接把地址丢给浏览器，
-// 是因为服务端拒绝时（比如"还没有配过工序"）返回的是 JSON，
-// 直接跳转会在新标签页里显示一段 JSON 报错，现场看不懂。
+// ---------- 导出 / 导入 / 模板：工序清单（全厂一张表） ----------
+// 导出的表和导入模板逐列同构：机种 | 线体 | 工序码 | 名称 | 做什么。
+// 导出来改完，用「导入」能整份导回去 —— 这是这套东西存在的唯一理由。
+
+const IMP_LIMIT = 300;   // 预览最多渲染这么多行，再多就只剩统计有意义
+const IMP_BADGE = {
+  new: '<span class="badge ok">新增</span>',
+  diff: '<span class="badge warn">有变化</span>',
+  same: '<span class="badge muted">没变化</span>',
+  bad: '<span class="badge danger">不合要求</span>'
+};
+const IMP_FIELD = { code: '工序码', name: '名称', note: '做什么', model: '机种', line: '线体' };
+
+function blobSave(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+}
+
+// 前端自己拼 CSV：未导入明细要当场能存，不值得为它多开一条接口。
+// \ufeff 是 BOM —— 不加的话 Excel 双击打开中文全是乱码；CRLF 同理。
+function saveCsv(name, rows) {
+  const line = (r) => r.map((v) => {
+    const s = v == null ? '' : String(v);
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  }).join(',');
+  blobSave(new Blob(['\ufeff' + rows.map(line).join('\r\n')], { type: 'text/csv;charset=utf-8' }), name);
+}
+
+function fileStamp() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}`;
+}
+
+// 用 fetch 拿 blob 而不是把地址直接丢给浏览器：服务端拒绝时（比如"还没配过工序"）
+// 返回的是 JSON，直接跳转会在新标签页里显示一段 JSON 报错，现场看不懂。
 async function downloadFile(url, fallback) {
   const r = await fetch(url, { credentials: 'same-origin' });
   if (!r.ok) {
@@ -1496,36 +1534,44 @@ async function downloadFile(url, fallback) {
   const cd = r.headers.get('Content-Disposition') || '';
   const m = /filename\*=UTF-8''([^;]+)/i.exec(cd);
   const name = m ? decodeURIComponent(m[1]) : fallback;
-
-  const blob = await r.blob();
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  blobSave(await r.blob(), name);
   toast(`已下载 ${name}`, 'ok');
 }
 
-// 导出全部机种：每个「机种 × 线体」一个工作表，三列跟导入一致
+// 导出：先问范围。以前只能整厂导，想单独看一个机种得把整份文件翻一半。
 $('stExportBtn').addEventListener('click', async () => {
-  try { await downloadFile('/api/export/stations.xlsx', '工序清单.xlsx'); }
+  const m = S.models.find((x) => x.id === S.mdModelId);
+  const ln = (S.lines || []).find((x) => x.id === S.mdLineId);
+  const opts = ['<option value="all">全厂 —— 所有机种、所有线体</option>'];
+  if (m) opts.push(`<option value="model">只导出「${H(m.name)}」</option>`);
+  if (m && ln) opts.push(`<option value="one">只导出「${H(m.name)} · ${H(ln.name)}」</option>`);
+
+  const r = await dialog({
+    title: '导出工序清单',
+    message: '五列：机种 / 线体 / 工序码 / 名称 / 做什么。在 Excel 里改完，可以用「导入」整份导回来。',
+    html: `<div class="dlg-row"><label for="expRange">导出范围</label>
+      <select id="expRange" class="dlg-sel">${opts.join('')}</select></div>`,
+    read: (b) => b.querySelector('#expRange').value,
+    okText: '下载'
+  });
+  if (!r) return;
+
+  const qs = r === 'one'
+    ? `?modelId=${encodeURIComponent(S.mdModelId)}&lineId=${encodeURIComponent(S.mdLineId)}`
+    : r === 'model' ? `?modelId=${encodeURIComponent(S.mdModelId)}` : '';
+  try { await downloadFile('/api/export/stations.xlsx' + qs, '工序清单.xlsx'); }
   catch (err) { toast(err.message, 'err'); }
 });
 
-// 导入模板：标题行 + 一行示例，说明放在第二页
+// 导入模板：与导出的表逐列同构，多两行示例 + 一页填写说明
 $('stTplBtn').addEventListener('click', async () => {
   try { await downloadFile('/api/export/template.xlsx', '工序清单导入模板.xlsx'); }
   catch (err) { toast(err.message, 'err'); }
 });
 
-// 从 Excel / CSV 导入工序清单：先让服务端解析成行给个预览，确认了才写库。
-// 不直接导入是因为工艺表格式五花八门，列一错位就得一条条删回来。
+// 导入：选文件 → 服务端只解析不落库 → 预览逐行判定 → 确认才写。
+// 不直接导入是因为工艺表格式五花八门，行一错位就得一条条删回来。
 $('stImportBtn').addEventListener('click', () => {
-  if (!S.mdModelId) return toast('先选一个机种', 'err');
-  if (!S.mdLineId) return toast('先选一条线体', 'err');
-
   const inp = document.createElement('input');
   inp.type = 'file';
   inp.accept = '.xlsx,.csv,.txt';
@@ -1533,56 +1579,188 @@ $('stImportBtn').addEventListener('click', () => {
     const f = inp.files && inp.files[0];
     if (!f) return;
 
+    // 带上当前选中的机种线体：老的三列文件（没有机种/线体列）要靠它定位。
+    // 全厂表自带这两列，服务端优先用表里的。
+    const qs = new URLSearchParams({ filename: f.name });
+    if (S.mdModelId) qs.set('modelId', S.mdModelId);
+    if (S.mdLineId) qs.set('lineId', S.mdLineId);
+
     let d;
     try {
-      d = await api('/api/import/parse?filename=' + encodeURIComponent(f.name), {
-        method: 'POST',
-        body: await f.arrayBuffer()
-      });
+      d = await api('/api/import/parse?' + qs.toString(), { method: 'POST', body: await f.arrayBuffer() });
     } catch (err) { return toast(err.message, 'err'); }
-
-    const pad = (r) => [0, 1, 2].map((i) => (r[i] === undefined ? '' : String(r[i]))).join('  |  ');
-    const more = d.total > d.preview.length ? `\n…… 还有 ${d.total - d.preview.length} 行` : '';
-
-    const r = await dialog({
-      title: `导入 ${d.total} 道工序`,
-      message: (d.header ? `已跳过标题行：${d.header.join(' / ')}\n\n` : '')
-        + `按「工序码 | 名称 | 做什么」三列读，预览：\n\n${d.preview.map(pad).join('\n')}${more}`
-        + '\n\n读出来的内容不对？多半是列的顺序不同，把表调成「工序码、名称、做什么」再导一次。',
-      html: `<div class="dlg-row">
-        <label for="impMode">已有同名工序</label>
-        <select id="impMode" class="dlg-sel">
-          <option value="merge">跳过，保留原有名称与说明</option>
-          <option value="update">覆盖名称与「做什么」，已配内容不动</option>
-        </select>
-      </div>`,
-      read: (body) => ({ mode: body.querySelector('#impMode').value }),
-      okText: '导入'
-    });
-    if (!r) return;
-
-    try {
-      const out = await postJson('/api/stations/import', {
-        modelId: S.mdModelId, lineId: S.mdLineId, rows: d.rows, mode: r.mode
-      });
-      await loadMdStations();
-
-      const bits = [`新增 ${out.created} 道`];
-      if (out.updated) bits.push(`更新 ${out.updated} 道`);
-      if (out.skipped) bits.push(`跳过 ${out.skipped} 道（已存在）`);
-      toast('导入完成：' + bits.join('，'), 'ok');
-
-      if (out.bad && out.bad.length) {
-        await dialog({
-          title: `${out.bad.length} 行没能导入`,
-          message: out.bad.join('\n'),
-          okText: '知道了',
-          hideCancel: true
-        });
-      }
-    } catch (err) { toast(err.message, 'err'); }
+    await showImportPreview(d);
   };
   inp.click();
+});
+
+/** 导入预览：一张逐行状态表 + 一个处理方式下拉。看清楚了才让点确认。 */
+async function showImportPreview(d) {
+  const c = d.counts;
+  const flat = d.mode === 'flat';
+  const cols = Object.keys(IMP_FIELD)
+    .filter((f) => d.mapping[f] !== undefined)
+    .map((f) => IMP_FIELD[f]).join(' · ');
+  const scope = flat
+    ? `表里带机种/线体，按行分到 <b>${d.targets.length}</b> 个「机种 · 线体」`
+    : `表里没有机种/线体列，全部导到 <b>${H(d.targets[0].modelName)} · ${H(d.targets[0].lineName)}</b>`;
+
+  const shown = d.rows.slice(0, IMP_LIMIT);
+  const canImport = c.new + c.diff + c.same;
+
+  const html = `
+    <div class="imp-meta">
+      <div>来源 <b>${H(d.filename)}</b> ｜ ${d.header ? `第 ${d.headerRow} 行是表头` : '没有表头，按前三列读'} ｜ 认到 <b>${H(cols)}</b></div>
+      <div>${scope}</div>
+    </div>
+    <div class="imp-sum">
+      <span class="imp-k ok"><b>${c.new}</b> 道新增</span>
+      <span class="imp-k warn"><b>${c.diff}</b> 道有变化</span>
+      <span class="imp-k"><b>${c.same}</b> 道没变化</span>
+      ${c.bad ? `<span class="imp-k bad"><b>${c.bad}</b> 行不合要求</span>` : ''}
+    </div>
+    <div class="imp-wrap">
+      <table class="imp-table">
+        <thead><tr>
+          <th style="width:46px">行号</th><th style="width:74px">状态</th>
+          ${flat ? '<th>机种</th><th>线体</th>' : ''}
+          <th style="width:82px">工序码</th><th>名称</th><th>说明</th>
+        </tr></thead>
+        <tbody>${shown.map((r) => `
+          <tr class="${r.status === 'bad' ? 'is-bad' : ''}">
+            <td class="imp-no">${r.row}</td>
+            <td>${IMP_BADGE[r.status] || H(r.status)}</td>
+            ${flat ? `<td class="imp-dim">${H(r.modelName || '')}</td><td class="imp-dim">${H(r.lineName || '')}</td>` : ''}
+            <td class="imp-code">${H(r.code || '—')}</td>
+            <td>${H(r.name || '')}</td>
+            <td class="imp-why">${H(r.reason || r.detail || '')}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    ${d.rows.length > shown.length ? `<p class="imp-more">表里共 ${d.rows.length} 行，预览只列前 ${shown.length} 行，导入按全表走。</p>` : ''}
+    ${c.bad ? '<p class="imp-more">不合要求的行不会导入，导入完成后可以一键导出明细（带原因）。</p>' : ''}
+    <div class="dlg-row" style="margin-top:12px">
+      <label for="impMode">已存在的工序怎么处理</label>
+      <select id="impMode" class="dlg-sel">
+        <option value="update"${c.diff ? ' selected' : ''}>加新的 + 更新有变化的（${c.diff} 道）</option>
+        <option value="merge"${c.diff ? '' : ' selected'}>只加新的，已存在的一律跳过</option>
+        <option value="update-only">只更新已存在的，不新建工序</option>
+      </select>
+    </div>`;
+
+  const r = await dialog({
+    title: canImport ? `导入预览 · ${canImport} 道可导` : '导入预览 · 没有可导的行',
+    html,
+    read: (b) => b.querySelector('#impMode').value,
+    okText: '确认导入'
+  });
+  if (!r) return;
+
+  const send = d.rows
+    .filter((x) => x.status !== 'bad')
+    .map(({ row, modelId, lineId, code, name, note }) => ({ row, modelId, lineId, code, name, note }));
+
+  let out;
+  try { out = await postJson('/api/stations/import', { rows: send, mode: r }); }
+  catch (err) { return toast(err.message, 'err'); }
+
+  await loadMdStations();
+  await showImportResult(out, d);
+}
+
+/** 导入结果：写进去多少 + 没导进去的逐行原因 + 导出明细 / 撤销本次导入 */
+async function showImportResult(out, d) {
+  const bad = d.rows.filter((x) => x.status === 'bad').map((x) => ({
+    row: x.row, model: x.modelName || '', line: x.lineName || '',
+    code: x.code || '', name: x.name || '', reason: x.reason
+  }));
+  // 落库阶段又失败的（预览本该拦住，兜底留证，别只留一个数字）
+  (out.bad || []).forEach((b) => bad.push({
+    row: b.row, model: '', line: '', code: b.code || '', name: '', reason: b.reason
+  }));
+
+  const parts = [];
+  if (out.created) parts.push(`新增 <b>${out.created}</b> 道`);
+  if (out.updated) parts.push(`更新 <b>${out.updated}</b> 道`);
+  if (out.kept) parts.push(`没变化 <b>${out.kept}</b> 道`);
+  if (out.skipped) parts.push(`跳过 <b>${out.skipped}</b> 道`);
+  if (!parts.length) parts.push('没有需要写库的行');
+
+  const list = bad.slice(0, 200).map((b) => `
+    <tr><td class="imp-no">${b.row}</td>
+      <td class="imp-code">${H(b.code || '—')}</td>
+      <td>${H(b.name || '')}</td>
+      <td class="imp-why">${H(b.reason)}</td></tr>`).join('');
+
+  const acts = `
+      ${bad.length ? '<button class="btn sm" data-imp="csv">导出未导入明细 CSV</button>' : ''}
+      ${out.batchId ? `<button class="btn sm danger" data-imp="undo" data-batch="${H(out.batchId)}" data-n="${out.created}">撤销本次导入（${out.created} 道）</button>` : ''}`;
+
+  const html = `
+    <div class="imp-meta"><div>${parts.join(' ｜ ')}</div></div>
+    ${bad.length ? `
+      <div class="imp-sub">没导进去的 ${bad.length} 行</div>
+      <div class="imp-wrap">
+        <table class="imp-table">
+          <thead><tr><th style="width:46px">行号</th><th style="width:82px">工序码</th><th>名称</th><th>原因</th></tr></thead>
+          <tbody>${list}</tbody>
+        </table>
+      </div>
+      ${bad.length > 200 ? '<p class="imp-more">只列前 200 行，导出的 CSV 里是全的。</p>' : ''}` : ''}
+    <div class="imp-acts">${acts}</div>`;
+
+  window.__impBad = bad;
+  window.__impActs = acts;   // 「算了」时把按钮换回来
+  await dialog({ title: '导入完成', html, okText: '知道了', hideCancel: true });
+}
+
+// 结果窗口里的两个动作走委托，不给 HTML 塞内联 onclick ——
+// 以后加按钮只改 data-imp，不用再挂一个 window 全局函数。
+$('dlgBody').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-imp]');
+  if (!btn) return;
+
+  if (btn.dataset.imp === 'csv') {
+    const rows = window.__impBad || [];
+    if (!rows.length) return toast('这次没有未导入的行', 'warn');
+    saveCsv('未导入明细_' + fileStamp() + '.csv', [
+      ['行号', '机种', '线体', '工序码', '名称', '未导入原因'],
+      ...rows.map((x) => [x.row, x.model, x.line, x.code, x.name, x.reason])
+    ]);
+    toast(`已导出 ${rows.length} 条未导入明细`, 'ok');
+    return;
+  }
+
+  if (btn.dataset.imp === 'undo') {
+    // 二次确认直接在结果窗里换按钮，不再弹一层 ——
+    // 所有对话框共用 #dialog 这一个元素，叠一层会把结果窗连同未导入明细一起冲掉。
+    const n = Number(btn.dataset.n) || 0;
+    btn.parentElement.innerHTML =
+      `<div class="imp-warn">会把这次新建的 ${n} 道工序删掉，已经配上去的图片/视频也一起没；改过名字的工序不会还原。</div>
+       <button class="btn sm danger" data-imp="undo-do" data-batch="${H(btn.dataset.batch)}">确定撤销</button>
+       <button class="btn sm" data-imp="undo-cancel">算了</button>`;
+    return;
+  }
+
+  if (btn.dataset.imp === 'undo-cancel') {
+    const html = window.__impActs || '';
+    btn.parentElement.innerHTML = html;
+    return;
+  }
+
+  if (btn.dataset.imp === 'undo-do') {
+    btn.disabled = true;
+    try {
+      const r = await postJson('/api/stations/import/undo', { batchId: btn.dataset.batch });
+      toast(`已撤销 ${r.deleted} 道工序`, 'ok');
+      await loadMdStations();
+      $('dlgOk').click();   // 把结果窗收掉，别让人对着一个已经过期的数字
+    } catch (err) {
+      btn.disabled = false;
+      toast(err.message, 'err');
+    }
+  }
 });
 
 // 机种设置页：批量加工序（给这个机种在这条线上补工序定义）

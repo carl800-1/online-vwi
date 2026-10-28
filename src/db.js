@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS station (
   max_mb      INTEGER NOT NULL DEFAULT 0, -- 单文件体积上限（MB），0 = 不限
   note        TEXT NOT NULL DEFAULT '',
   created_at  INTEGER NOT NULL,
+  import_batch TEXT NOT NULL DEFAULT '', -- 导入批次号，空 = 手工建的；撤销本次导入按它精确回滚
   UNIQUE(model_id, line_id, code)
 );
 CREATE INDEX IF NOT EXISTS idx_station_model ON station(model_id, line_id, sort, code);
@@ -210,6 +211,12 @@ function migrate() {
   const item = colsOf('item');
   if (!item.has('fit')) db.exec("ALTER TABLE item ADD COLUMN fit TEXT NOT NULL DEFAULT 'contain'");
   if (!item.has('zoom')) db.exec('ALTER TABLE item ADD COLUMN zoom INTEGER NOT NULL DEFAULT 100');
+
+  // v3.4.0：导入批次号。加列而不是加表 —— 只是给 station 挂一个标记，
+  // 没这一列时撤销导入只能"凭时间猜"，删错了收不回来。
+  const station = colsOf('station');
+  if (!station.has('import_batch')) db.exec("ALTER TABLE station ADD COLUMN import_batch TEXT NOT NULL DEFAULT ''");
+  db.exec('CREATE INDEX IF NOT EXISTS idx_station_batch ON station(import_batch)');
 
   // ---- 线体（v1.7.0）：老库里的工序全部归到默认线体，行为和升级前完全一致 ----
   const dft = ensureDefaultLine();
@@ -500,7 +507,7 @@ function rebuildStationTable() {
 }
 
 /** 找工位，没有就建一个。迁移和种子都用它，保证 (model, line, code) 只存在一份。 */
-export function ensureStation(modelId, lineId, code, name, sort, maxMb, note, ts) {
+export function ensureStation(modelId, lineId, code, name, sort, maxMb, note, ts, batch) {
   const c = String(code || '').trim().toUpperCase();
   const lid = String(lineId || '');
   const hit = q.get('SELECT * FROM station WHERE model_id = ? AND line_id = ? AND code = ?', modelId, lid, c);
@@ -511,8 +518,9 @@ export function ensureStation(modelId, lineId, code, name, sort, maxMb, note, ts
   const useSort = Number(sort) > 0 ? Number(sort) : maxSort + 10;
   const id = uid('st');
   q.run(
-    'INSERT INTO station(id,model_id,line_id,code,name,sort,max_mb,note,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
-    id, modelId, lid, c, (String(name || '').trim() || c), useSort, int(maxMb, 0), str(note, 200), ts || now()
+    'INSERT INTO station(id,model_id,line_id,code,name,sort,max_mb,note,created_at,import_batch) VALUES(?,?,?,?,?,?,?,?,?,?)',
+    id, modelId, lid, c, (String(name || '').trim() || c), useSort, int(maxMb, 0), str(note, 200), ts || now(),
+    String(batch || '')
   );
   return q.get('SELECT * FROM station WHERE id = ?', id);
 }

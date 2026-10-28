@@ -215,8 +215,8 @@ npm run gui:dist     # 打包 portable exe
 ### 日常操作
 
 1. **建工序**：机种设置 → 左边选机种 → 顶部选线体 → 表格里点「名称」「做什么」直接改；
-   整表导入点「导入」（`工序码 / 名称 / 做什么` 三列，先预览再入库）；
-   不知道什么格式点「模板」下一个；想把现有的拿出来改，点「导出」
+   整表维护点「导出」拿全厂一张表（`机种 / 线体 / 工序码 / 名称 / 做什么`）→ 在 Excel 里改 →
+   点「导入」整份传回去；不知道什么格式点「模板」下一个
 2. **配内容**：媒体库 → 选机种 → 左「工位索引」点一个工序（或按「下一个」顺序过）
    → 勾「允许类型」→ 拖入图片 / 视频 / PDF → 排序、设停留秒数 → 保存
 3. **换型**：作业内容（总览）→ 在线体卡片里选机种 → 点「换型」→ 等各屏举手 → 全线同时翻
@@ -243,11 +243,14 @@ PUT    /api/stations/:id          整批覆盖保存（要求 + 内容；校验�
 DELETE /api/stations/:id          删工位（有内容会拒绝）
 POST   /api/stations/sync         按本线工序补齐该机种的工位（缺的补，多的不删）
 POST   /api/stations/copy         从另一条线整套复制（{modelId, fromLineId, toLineId, overwrite?}）
-POST   /api/import/parse          解析 xlsx / csv，只回预览不落库（?filename=，body 是文件本身）
-POST   /api/stations/import       按确认过的行批量建/更新工序（{modelId, lineId, rows, mode: merge|update}）
-GET    /api/export/stations.xlsx  导出工序清单，三列与导入一致。不带参数=全部机种
-                                  （每个「机种 × 线体」一个工作表）；带 ?modelId=&lineId= 只导一个
-GET    /api/export/template.xlsx  导入模板：标题行 + 一行示例，第二页是填写说明
+POST   /api/import/parse          解析 xlsx / csv，只回预览与逐行判定，不落库
+                                  （?filename= 文件名；?modelId=&lineId= 供没有机种列的老表兜底）
+POST   /api/stations/import       按确认过的行批量建/更新工序
+                                  （{rows:[{row,modelId,lineId,code,name,note}], mode: merge|update|update-only}）
+POST   /api/stations/import/undo   撤销某批次新建的工序（{batchId}，只删新建、不回滚改名）
+GET    /api/export/stations.xlsx  导出工序清单：全厂一张表，五列（机种 / 线体 / 工序码 / 名称 / 做什么）
+                                  与导入模板逐列同构，改完能整份导回；?modelId=&lineId= 可只导一块
+GET    /api/export/template.xlsx  导入模板：标题行 + 两行示例，第二页是填写说明
 
 GET    /api/lines                 线体列表
 POST   /api/lines                 新建线体
@@ -405,7 +408,9 @@ cd terminal && node test/sync-test.cjs   # 终端：19 项数据层断言（连�
 
 ## 八、当前状态
 
-**v3.3.0**：工序清单能导出 Excel 了 —— 「导出」一次拿走全部机种（每个「机种 × 线体」一个工作表，三列与导入一致），另有「模板」可下；导出来改完能直接导回去。
+**v3.4.0**：工序清单改「全厂一张表」—— 导出五列（`机种 / 线体 / 工序码 / 名称 / 做什么`），在 Excel 里改完能整份导回；导入改按**表头名**认列（前插一列「序号」也不错位），预览逐行标「新增 / 有变化 / 没变化 / 不合要求」，不合要求的逐行给原因并可导出明细 CSV，导错了能「撤销本次导入」。
+
+**v3.3.0**：工序清单能导出 Excel 了（v3.4.0 起改为全厂一张表），另有「模板」可下。
 
 **v3.2.1**：修复系统页空白（3.2.0 把系统页改成独立视图时，`desk-only` 那组例外规则只认 `.modal`、漏了 `.view`，导致视图被压成 0 高度）。
 
@@ -428,7 +433,7 @@ cd terminal && node test/sync-test.cjs   # 终端：19 项数据层断言（连�
 | **工序清单导出 Excel（全部机种 / 单机种）+ 导入模板下载** | ✅ 3.3.0 |
 | 文件查询 / 终端监控 / 系统 | ✅ |
 | 浏览器版播放页 | ✅ 调试用 |
-| 协议级端到端测试 | ✅ **133/133** |
+| 协议级端到端测试 | ✅ **158/158** |
 | **终端 exe（kiosk、自启、看门狗、本地缓存、sha 校验）** | ✅ 19/19（接口契约未变，1.7.1 可直接用） |
 | 打包 portable exe | ✅ 单文件，A6 装机 10.3 秒 |
 | 5 台真机部署与验收 A1–A10 | ⏳ 现场（本机已过 A1/A2/A3/A5/A6/A8/A9/A10，A4/A7 待现场） |

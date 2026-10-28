@@ -1,16 +1,91 @@
-// 工序表导入：先解析成行给界面看，确认之后再整批写库。
+// 工序表导入：先解析成行给界面看，确认之后整批写库。
 //
 // 为什么分两步：工艺表是现场自己做的，格式千差万别（有表头没表头、三列四列、
 // 序号列在最前）。直接解析即入库，一旦列错位就得一条条删回来；先预览一眼，
 // 发现不对就换个文件，什么都不用收拾。
-import { q, tx, stationsOf, ensureStation } from '../db.js';
+//
+// 认列只认**表头名**，不认列号。现场常常在模板前面插一列「序号」，或者把
+// 「做什么」调到第二列 —— 按位置读的话整表错位，而表头名是稳的。
+// 认不出表头（纯三列、没有标题行）才退回按位置读，老文件照样能导。
+//
+// 全厂一张表：导出的是「机种 | 线体 | 工序码 | 名称 | 做什么」，
+// 文件里带机种/线体两列就按行分流到各自机种线体；没有这两列才退回
+// 「导到界面当前选中的机种 + 线体」—— 老的三列文件不用改也能导。
+import { q, tx, ensureStation } from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
 import { notifyContentChanged } from '../switch.js';
-import { now, str } from '../util.js';
+import { now, str, uid } from '../util.js';
 import { parseSheet } from '../xlsx.js';
 
 /** 工序码：字母或数字开头，允许 - _ . 。中文工序码现场也有，所以不强制字母 */
 const CODE_RE = /^[\w\u4e00-\u9fa5][\w\u4e00-\u9fa5.-]{0,15}$/;
+
+/**
+ * 表头别名表。键归一化后匹配（去空格、去括号备注、去标点、转小写），
+ * 值是要映射到的字段。一个字段挂多少个叫法都不算多 —— 工艺表从谁手里
+ * 出来，表头就长谁的样。
+ *
+ * 刻意**不收**「序号」「行号」：那是 Excel 自己的行序号，收进来当工序码
+ * 就是灾难（一表工序码变成 1、2、3）。不收，它自然被忽略。
+ */
+const ALIAS = {
+  model: ['机种', '机种名称', '机种编码', '机种代号', '机型', '产品', '产品名称', 'model'],
+  line: ['线体', '线体名称', '线体编码', '产线', '产线名称', '生产线', 'line'],
+  code: ['工序码', '工序号', '工序编码', '工序编号', '工位码', '工位编号', '编号', 'code', 'op', 'opcode'],
+  name: ['名称', '工序名称', '工位名称', '工序名', 'name'],
+  note: ['做什么', '工序内容', '工位内容', '内容', '说明', '描述', '备注', '用途', '要求', 'note', 'remark', 'desc']
+};
+
+const FIELDS = ['model', 'line', 'code', 'name', 'note'];
+
+function normHeader(s) {
+  return String(s == null ? '' : s)
+    .trim()
+    .toLowerCase()
+    .replace(/[\s\u3000]/g, '')
+    .replace(/[（(][^）)]*[）)]/g, '') // 「工序码（必填）」→「工序码」
+    .replace(/[：:、,，;；*＊]/g, '');
+}
+
+const FIELD_OF = new Map();
+for (const f of FIELDS) for (const a of ALIAS[f]) FIELD_OF.set(normHeader(a), f);
+
+/** 表头行识别：前几行里挑「能认出最多字段」的那一行，至少认出两个（且得有工序码）才算 */
+function findHeader(rows) {
+  let best = null;
+  const limit = Math.min(rows.length, 5);
+  for (let i = 0; i < limit; i += 1) {
+    const r = rows[i] || [];
+    const map = {};
+    r.forEach((cell, ci) => {
+      const f = FIELD_OF.get(normHeader(cell));
+      if (f && map[f] === undefined) map[f] = ci;
+    });
+    const n = Object.keys(map).length;
+    if (!n) continue;
+    if (map.code === undefined && n < 2) continue;
+    if (!best || n > best.n) best = { index: i, map, n };
+  }
+  // 只认出一个字段（比如整表第一格恰好叫「名称」）容易误判成标题行，要求至少两个
+  return best && best.n >= 2 ? best : null;
+}
+
+/** 按名字或编码找机种/线体；同一个键命中多条时记为 null（重名歧义） */
+function indexTargets(list) {
+  const hits = new Map();
+  for (const r of list) {
+    for (const k of [r.code, r.name]) {
+      const key = String(k == null ? '' : k).trim().toLowerCase();
+      if (!key) continue;
+      const arr = hits.get(key) || [];
+      if (!arr.includes(r)) arr.push(r);
+      hits.set(key, arr);
+    }
+  }
+  const out = new Map();
+  for (const [k, arr] of hits) out.set(k, arr.length === 1 ? arr[0] : null);
+  return out;
+}
 
 function readBuf(req, limit = 8 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
@@ -30,91 +105,257 @@ function readBuf(req, limit = 8 * 1024 * 1024) {
   });
 }
 
-/** 首行是不是标题行：看着不像工序码就当标题丢掉 */
-function looksLikeHeader(cell) {
-  const v = String(cell || '').trim();
-  if (!v) return true;
-  if (/^(code|op|no\.?|序号|工序|编号|名称)/i.test(v)) return true;
-  return !/^[\w\u4e00-\u9fa5]/.test(v);
-}
+const cellAt = (row, i) => (i === undefined || i === null ? '' : str(row && row[i], 500).trim());
 
 export function register(router) {
-  // 第一步：只解析，不落库
+  // 第一步：只解析、只判定，不落库
   router.post('/api/import/parse', async (req, res, ctx) => {
     let filename = 'workbook.xlsx';
     try { filename = decodeURIComponent(String(ctx.query.filename || filename)); } catch { /* 明文就用原样 */ }
 
+    // 老的三列文件没有机种/线体列时，用界面上选中的那一个兜底
+    const selModelId = String(ctx.query.modelId || '').trim();
+    const selLineId = String(ctx.query.lineId || '').trim();
+
     const buf = await readBuf(req);
     if (!buf.length) throw badRequest('文件是空的');
 
-    let rows;
+    let all;
     try {
-      rows = parseSheet(buf);
+      all = parseSheet(buf);
     } catch (e) {
       throw badRequest(e.message || '读不出这个文件，请确认是 .xlsx 或 .csv');
     }
-    if (!rows.length) throw badRequest('这张表里没有读到任何内容');
+    if (!all.length) throw badRequest('这张表里没有读到任何内容');
 
-    const header = looksLikeHeader(rows[0][0]) ? rows[0] : null;
-    const body = header ? rows.slice(1) : rows;
+    const head = findHeader(all);
+    // 认不出表头就按位置读：0 工序码 / 1 名称 / 2 做什么，与 3.3.0 完全一致
+    const map = head ? head.map : { code: 0, name: 1, note: 2 };
+    const body = head ? all.slice(head.index + 1) : all;
     if (!body.length) throw badRequest('只有标题行，没有工序数据');
+    if (map.code === undefined) map.code = 0;
+
+    const flat = map.model !== undefined && map.line !== undefined;
+
+    const models = q.all('SELECT * FROM model');
+    const lines = q.all('SELECT * FROM line');
+    const byModel = indexTargets(models);
+    const byLine = indexTargets(lines);
+    const selModel = selModelId ? models.find((m) => m.id === selModelId) : null;
+    const selLine = selLineId ? lines.find((l) => l.id === selLineId) : null;
+
+    if (!flat && (!selModel || !selLine)) {
+      throw badRequest('这张表里没有「机种」「线体」两列 —— 先在左上角选好机种和线体再导，或者在表里补上这两列');
+    }
+
+    const seen = new Map(); // "modelId|lineId|code" → 首次出现的行号
+    const out = [];
+
+    body.forEach((r, i) => {
+      const rowNo = (head ? head.index + 1 : 0) + i + 1; // 回到 Excel 里的真实行号
+      const code = cellAt(r, map.code).toUpperCase();
+      const name = cellAt(r, map.name);
+      const note = cellAt(r, map.note);
+      const rec = { row: rowNo, code, name, note, status: 'new', reason: '' };
+
+      // 整行空白：直接忽略，不算"不合要求"（表格末尾常有空行）
+      if (!code && !name && !note) { return; }
+
+      if (flat) {
+        const mv = cellAt(r, map.model);
+        const lv = cellAt(r, map.line);
+        rec.modelName = mv;
+        rec.lineName = lv;
+
+        if (!mv) { rec.status = 'bad'; rec.reason = '没有填机种'; out.push(rec); return; }
+        if (!lv) { rec.status = 'bad'; rec.reason = '没有填线体'; out.push(rec); return; }
+
+        const m = byModel.get(mv.toLowerCase());
+        const l = byLine.get(lv.toLowerCase());
+        if (m === undefined) { rec.status = 'bad'; rec.reason = `机种「${mv}」还没建档`; out.push(rec); return; }
+        if (m === null) { rec.status = 'bad'; rec.reason = `机种「${mv}」有重名，请改用机种编码`; out.push(rec); return; }
+        if (l === undefined) { rec.status = 'bad'; rec.reason = `线体「${lv}」还没建档`; out.push(rec); return; }
+        if (l === null) { rec.status = 'bad'; rec.reason = `线体「${lv}」有重名，请改用线体编码`; out.push(rec); return; }
+
+        rec.modelId = m.id; rec.lineId = l.id;
+        rec.modelName = m.name; rec.lineName = l.name;
+      } else {
+        rec.modelId = selModel.id; rec.lineId = selLine.id;
+        rec.modelName = selModel.name; rec.lineName = selLine.name;
+      }
+
+      if (!code) { rec.status = 'bad'; rec.reason = '没有工序码'; out.push(rec); return; }
+      if (!CODE_RE.test(code)) {
+        rec.status = 'bad';
+        rec.reason = '工序码只能用字母、数字、中文和 - _ . ，最长 16 个字符';
+        out.push(rec);
+        return;
+      }
+
+      const key = `${rec.modelId}|${rec.lineId}|${code}`;
+      if (seen.has(key)) {
+        rec.status = 'bad';
+        rec.reason = `与第 ${seen.get(key)} 行工序码重复`;
+        out.push(rec);
+        return;
+      }
+      seen.set(key, rowNo);
+
+      const old = q.get('SELECT * FROM station WHERE model_id = ? AND line_id = ? AND code = ?',
+        rec.modelId, rec.lineId, code);
+      if (!old) {
+        rec.status = 'new';
+      } else {
+        const sameName = (old.name || '') === (name || code);
+        const sameNote = (old.note || '') === note;
+        rec.status = sameName && sameNote ? 'same' : 'diff';
+        if (rec.status === 'diff') {
+          const bits = [];
+          if (!sameName) bits.push(`名称 ${old.name || '—'} → ${name || code}`);
+          if (!sameNote) bits.push('「做什么」有改动');
+          rec.detail = bits.join('，');
+        }
+      }
+      out.push(rec);
+    });
+
+    if (!out.length) throw badRequest('这张表里没有读到任何工序行');
+
+    const counts = { new: 0, same: 0, diff: 0, bad: 0 };
+    for (const r of out) counts[r.status] += 1;
+
+    // 涉及哪些机种线体，弹窗顶部要报出来
+    const targetMap = new Map();
+    for (const r of out) {
+      if (r.status === 'bad') continue;
+      const k = `${r.modelId}|${r.lineId}`;
+      const t = targetMap.get(k) || { modelId: r.modelId, lineId: r.lineId, modelName: r.modelName, lineName: r.lineName, n: 0 };
+      t.n += 1;
+      targetMap.set(k, t);
+    }
 
     sendJson(res, 200, {
       filename,
-      header,
-      total: body.length,
-      // 预览只回前 12 行：界面弹窗里看个样子就够，整表可能在几百行
-      preview: body.slice(0, 12),
-      rows: body
+      header: head ? (all[head.index] || []) : null,
+      headerRow: head ? head.index + 1 : 0,
+      mapping: map,
+      positional: !head,
+      mode: flat ? 'flat' : 'single',
+      total: out.length,
+      counts,
+      targets: [...targetMap.values()],
+      rows: out
     });
   });
 
   // 第二步：按确认过的行批量建/更新
+  //
+  // mode：
+  //   merge        只加库里没有的，已存在的一律跳过（最安全，重复导同一份表不会动任何东西）
+  //   update       加新的 + 覆盖已存在的名称与「做什么」（不动已配内容）
+  //   update-only  只改已存在的，不建新工序（表里混了草稿行时用这个）
   router.post('/api/stations/import', async (req, res) => {
     const body = await readJsonBody(req);
-    const modelId = String(body.modelId || '').trim();
-    const lineId = String(body.lineId || '').trim();
-    const rows = Array.isArray(body.rows) ? body.rows : [];
-    const mode = body.mode === 'update' ? 'update' : 'merge';
+    const mode = ['merge', 'update', 'update-only'].includes(body.mode) ? body.mode : 'merge';
 
-    const model = q.get('SELECT * FROM model WHERE id = ?', modelId);
-    if (!model) throw badRequest('机种不存在');
-    const line = q.get('SELECT * FROM line WHERE id = ?', lineId);
-    if (!line) throw badRequest('线体不存在');
+    // 兼容 3.3.0 的调用方式：rows 是「三列数组 + 顶层 modelId/lineId」。
+    // 现在界面已经改成每行自带机种线体，但脚本/老文档里的写法还能跑。
+    let rows = Array.isArray(body.rows) ? body.rows : [];
+    if (rows.length && Array.isArray(rows[0])) {
+      rows = rows.map((r, i) => ({
+        row: i + 1,
+        modelId: body.modelId,
+        lineId: body.lineId,
+        code: r[0], name: r[1], note: r[2]
+      }));
+    }
     if (!rows.length) throw badRequest('没有可导入的行');
 
-    const stat = { created: 0, updated: 0, skipped: 0, bad: [] };
+    const models = new Map(q.all('SELECT * FROM model').map((m) => [m.id, m]));
+    const lines = new Map(q.all('SELECT * FROM line').map((l) => [l.id, l]));
+
+    const stat = { created: 0, updated: 0, kept: 0, skipped: 0, bad: [] };
+    const batchId = uid('b');
     const ts = now();
+    const touched = new Set();
 
     // 整批一个事务：中途出错整批回滚，不会留下"导了一半"的工序表
     tx(() => {
       rows.forEach((r, i) => {
-        const cell = (n) => str(Array.isArray(r) ? r[n] : r[['code', 'name', 'note'][n]], 200);
-        const code = cell(0).trim().toUpperCase();
-        const name = cell(1).trim();
-        const note = cell(2).trim();
+        const rowNo = Number(r && r.row) || i + 1;
+        const modelId = String((r && r.modelId) || '').trim();
+        const lineId = String((r && r.lineId) || '').trim();
+        const code = str(r && r.code, 40).trim().toUpperCase();
+        const name = str(r && r.name, 40).trim();
+        const note = str(r && r.note, 200).trim();
 
-        if (!code) { stat.bad.push(`第 ${i + 1} 行：没有工序码`); return; }
-        if (!CODE_RE.test(code)) { stat.bad.push(`第 ${i + 1} 行「${code}」：工序码里有不支持的字符`); return; }
+        if (!models.has(modelId)) { stat.bad.push({ row: rowNo, code, reason: '机种不存在' }); return; }
+        if (!lines.has(lineId)) { stat.bad.push({ row: rowNo, code, reason: '线体不存在' }); return; }
+        if (!code) { stat.bad.push({ row: rowNo, code, reason: '没有工序码' }); return; }
+        if (!CODE_RE.test(code)) {
+          stat.bad.push({ row: rowNo, code, reason: '工序码只能用字母、数字、中文和 - _ . ，最长 16 个字符' });
+          return;
+        }
 
         const old = q.get('SELECT * FROM station WHERE model_id = ? AND line_id = ? AND code = ?',
           modelId, lineId, code);
 
         if (!old) {
+          if (mode === 'update-only') { stat.skipped += 1; return; }
           // ensureStation 自己算 sort（排在最后），顺便把码规范化
-          ensureStation(modelId, lineId, code, name || code, undefined, undefined, note, ts);
+          ensureStation(modelId, lineId, code, name || code, undefined, undefined, note, ts, batchId);
           stat.created += 1;
-        } else if (mode === 'update') {
-          q.run('UPDATE station SET name = ?, note = ? WHERE id = ?',
-            str(name || old.name, 40), str(note, 200), old.id);
-          stat.updated += 1;
-        } else {
-          stat.skipped += 1;
+          touched.add(modelId + '|' + lineId);
+          return;
         }
+
+        if (mode === 'merge') { stat.skipped += 1; return; }
+
+        const nextName = str(name || old.name, 40);
+        if ((old.name || '') === nextName && (old.note || '') === note) {
+          stat.kept += 1; // 内容一模一样，不算更新，省得库里白改一遍
+          return;
+        }
+        q.run('UPDATE station SET name = ?, note = ? WHERE id = ?', nextName, note, old.id);
+        stat.updated += 1;
+        touched.add(modelId + '|' + lineId);
       });
     });
 
     if (stat.created || stat.updated) notifyContentChanged();
-    sendJson(res, 200, { ...stat, stations: stationsOf(modelId, lineId) });
+    sendJson(res, 200, {
+      ...stat,
+      mode,
+      // 没有新建任何工序时不发批次号 —— 界面上就不会出现一个点了没反应的「撤销」
+      batchId: stat.created ? batchId : '',
+      touched: [...touched]
+    });
+  });
+
+  // 撤销本次导入：按批次号精确删除这一批**新建**的工序。
+  // 更新过的（改名/改说明）不回滚 —— 旧值没留底，硬编一个"还原"更容易错。
+  router.post('/api/stations/import/undo', async (req, res) => {
+    const body = await readJsonBody(req);
+    const batchId = String(body.batchId || '').trim();
+    if (!batchId) throw badRequest('缺少批次号');
+
+    const sts = q.all('SELECT * FROM station WHERE import_batch = ?', batchId);
+    if (!sts.length) throw badRequest('这个批次没有可撤销的工序了（可能已经撤过）');
+
+    const ids = sts.map((s) => s.id);
+    const holes = ids.map(() => '?').join(',');
+    const withContent = q.get(
+      `SELECT COUNT(DISTINCT station_id) c FROM item WHERE station_id IN (${holes})`, ...ids
+    ).c;
+
+    let deleted = 0;
+    tx(() => {
+      // station_req 与 item 都是 ON DELETE CASCADE，跟着一起走
+      const r = q.run('DELETE FROM station WHERE import_batch = ?', batchId);
+      deleted = Number(r && r.changes) || ids.length;
+    });
+
+    notifyContentChanged();
+    sendJson(res, 200, { deleted, withContent });
   });
 }

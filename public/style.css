@@ -1836,3 +1836,48 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
 /* 索引底部那行说明（"工序的增删改在机种设置"） */
 .si-foot { padding: 9px 10px 4px; text-align: center; }
 .si-foot .sub { font-size: 11.5px; color: var(--ink3); }
+
+/* ---------- 导入预览 / 导入结果（v3.4.0，全厂工序表） ----------
+   七列的表塞不进 460px 的默认对话框宽度，靠 :has() 按内容撑开 ——
+   和上面 .dlg-card:has(.dlg-ta) 是同一套办法，不新增对话框种类。 */
+.dlg-card:has(.imp-wrap) { width: 880px; }
+
+.imp-meta { font-size: 12.5px; color: var(--ink2); line-height: 1.8; margin-bottom: 10px; }
+.imp-meta b { color: var(--ink); font-weight: 600; }
+.imp-sub { font-size: 12.5px; color: var(--ink2); margin: 14px 0 8px; }
+
+.imp-sum { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.imp-k {
+  font-size: 12px; padding: 3px 10px; border-radius: 999px;
+  background: #eef2f7; color: var(--ink2);
+}
+.imp-k b { font-variant-numeric: tabular-nums; color: inherit; }
+.imp-k.ok { background: var(--ok-bg); color: #15803d; }
+.imp-k.warn { background: var(--warn-bg); color: #8a4b06; }
+.imp-k.bad { background: var(--danger-bg); color: var(--danger); }
+
+.imp-wrap { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+.imp-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.imp-table th {
+  position: sticky; top: 0; z-index: 1;
+  text-align: left; font-weight: 600; white-space: nowrap;
+  padding: 7px 9px; background: #f7f9fc; color: var(--ink2);
+  border-bottom: 1px solid var(--line);
+}
+.imp-table td { padding: 6px 9px; border-bottom: 1px solid var(--line2); vertical-align: top; }
+.imp-table tr:last-child td { border-bottom: 0; }
+.imp-table tr.is-bad { background: #fffbfb; }
+.imp-no { color: var(--ink3); font-variant-numeric: tabular-nums; }
+.imp-dim { color: var(--ink2); }
+.imp-code { font-family: ui-monospace, SFMono-Regular, Consolas, 'Courier New', monospace; }
+.imp-why { color: var(--ink2); word-break: break-word; }
+.imp-table tr.is-bad .imp-why { color: var(--danger); }
+.imp-more { font-size: 11.5px; color: var(--ink3); margin: 8px 0 0; }
+.imp-acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+/* 「撤销本次导入」的二次确认：警告单独占一行，按钮在它下面 */
+.imp-warn {
+  flex-basis: 100%;
+  font-size: 12px; line-height: 1.7; color: #8a4b06;
+  background: var(--warn-bg); border: 1px solid #f0d3a8; border-radius: 8px;
+  padding: 8px 11px;
+}

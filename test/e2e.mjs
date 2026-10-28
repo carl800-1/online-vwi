@@ -7,7 +7,7 @@
 // 运行：node test/run.mjs    （自动起一个临时数据目录的实例，跑完清理）
 
 import zlib from 'node:zlib';
-import { parseSheet } from '../src/xlsx.js';   // 导出回来的文件用它读，验「导出→导入」闭环
+import { parseSheet, buildWorkbook } from '../src/xlsx.js';   // 导出回来的文件用它读，验「导出→导入」闭环
 
 const BASE = process.env.BASE || 'http://127.0.0.1:8093';
 
@@ -467,7 +467,7 @@ async function upload(buf, name) {
   const op40b = t2.terminals.find((x) => x.op === 'OP40');
   ok(op40b.res === '3840x2160', '心跳 query 里的分辨率同样能更新档案（老终端不改代码也够用）');
 
-  // ========== 13. 工序清单导入（xlsx / csv） ==========
+  // ========== 13. 工序清单导入（Excel / CSV） ==========
   console.log('\n13. 工序清单导入（Excel / CSV）');
 
   // 现场没有现成 xlsx，测试里现造一个：ZIP(store) + sharedStrings + sheet1
@@ -501,6 +501,15 @@ async function upload(buf, name) {
     return Buffer.concat([...locals, cd, eocd]);
   }
 
+  const linesResp = await j('/api/lines');
+  const lineList = Array.isArray(linesResp.body) ? linesResp.body : (linesResp.body.lines || []);
+  const L1 = lineList.find((l) => l.id === L1id) || lineList[0];
+  const stBefore = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id)).body.stations;
+  const s10 = stBefore.find((s) => s.code === 'OP10');
+  const s20 = stBefore.find((s) => s.code === 'OP20');
+
+  // ---- 13.1 老格式：三列、带中文标题、没有机种/线体列 ----
+  // 3.3.0 之前做的表不改成五列也能导，靠 ?modelId&lineId 定位
   const rows = [['工序号', '工序名称', '做什么'], ['OP10', '压装（改）', '压轴承到位'], ['OP300', '气密', '打气测漏'], ['OP310', '贴标', '']];
   const sst = [];
   const sid = (s) => { if (!sst.includes(s)) sst.push(s); return sst.indexOf(s); };
@@ -516,58 +525,140 @@ async function upload(buf, name) {
       `<sst>${sst.map((s) => `<si><t>${s}</t></si>`).join('')}</sst>`]
   ]);
 
-  const upXlsx = await j('/api/import/parse?filename=' + encodeURIComponent('工序.xlsx'), {
-    method: 'POST', body: xlsx
-  });
+  const legacyUrl = '/api/import/parse?filename=' + encodeURIComponent('工序.xlsx')
+    + '&modelId=' + M.X200.id + '&lineId=' + L1id;
+  const upXlsx = await j(legacyUrl, { method: 'POST', body: xlsx });
   ok(upXlsx.status === 200 && upXlsx.body.total === 3, 'xlsx 解析出 3 行（标题行自动跳过）');
-  ok(Array.isArray(upXlsx.body.header) && upXlsx.body.header[0] === '工序号', '认出并回传标题行');
-  ok(upXlsx.body.preview[0][0] === 'OP10' && upXlsx.body.preview[1][1] === '气密',
+  ok(upXlsx.body.mode === 'single', '没有机种/线体列 → 走「导到当前选中机种线体」这条路');
+  ok(Array.isArray(upXlsx.body.header) && upXlsx.body.header[0] === '工序号' && upXlsx.body.headerRow === 1,
+    '认出并回传标题行（含它在第几行）');
+  ok(upXlsx.body.mapping.code === 0 && upXlsx.body.mapping.name === 1 && upXlsx.body.mapping.note === 2,
+    '表头映射：工序号→工序码、工序名称→名称、做什么→说明', upXlsx.body.mapping);
+  ok(upXlsx.body.rows[0].code === 'OP10' && upXlsx.body.rows[1].name === '气密',
     '单元格文本按 sharedStrings 正确还原');
+  ok(upXlsx.body.counts.new === 2 && upXlsx.body.counts.bad === 0,
+    '两道是新工序（OP300 / OP310），没有不合要求的行', upXlsx.body.counts);
 
   const csvBuf = Buffer.from('工序号,工序名称,做什么\nOP10,压装,说明\nOP320,打磨,砂纸\n', 'utf8');
-  const upCsv = await j('/api/import/parse?filename=a.csv', { method: 'POST', body: csvBuf });
-  ok(upCsv.body.total === 2 && upCsv.body.preview[1][0] === 'OP320', 'CSV 同样能读');
+  const upCsv = await j(legacyUrl, { method: 'POST', body: csvBuf });
+  ok(upCsv.body.total === 2 && upCsv.body.rows[1].code === 'OP320', 'CSV 同样能读');
 
   const imp1 = await post('/api/stations/import', {
-    modelId: M.X200.id, lineId: L1id, rows: upXlsx.body.rows, mode: 'merge'
+    rows: upXlsx.body.rows.filter((r) => r.status !== 'bad'), mode: 'merge'
   });
   ok(imp1.ok && imp1.body.created === 2 && imp1.body.skipped === 1,
     '导入按「有就跳过」：新建 2 道、OP10 已存在跳过 1 道');
+  ok(/^b_/.test(imp1.body.batchId), '新建过工序才发批次号（撤销要用）', imp1.body.batchId);
 
   const imp2 = await post('/api/stations/import', {
-    modelId: M.X200.id, lineId: L1id, rows: upXlsx.body.rows, mode: 'merge'
+    rows: upXlsx.body.rows.filter((r) => r.status !== 'bad'), mode: 'merge'
   });
-  ok(imp2.body.created === 0 && imp2.body.skipped === 3, '同名再导一次不重复建（幂等）');
+  ok(imp2.body.created === 0 && imp2.body.skipped === 3, '同一份表再导一次不重复建（幂等）');
+  ok(imp2.body.batchId === '', '一行都没建时不发批次号，界面上不会出现点不动的「撤销」');
 
-  const imp3 = await post('/api/stations/import', {
-    modelId: M.X200.id, lineId: L1id, rows: upXlsx.body.rows, mode: 'update'
+  // ---- 13.2 全厂五列：表头乱序、前面还插了一列「序号」，照样得认 ----
+  const flatRows = [
+    ['序号', '线体', '做什么', '机种', '名称', '工序码'],
+    [1, L1.name, '改过的说明', M.X200.name, '压装改名', 'OP10'],        // 有变化
+    [2, L1.name, s20.note || '', M.X200.name, s20.name, 'OP20'],        // 一模一样
+    [3, L1.name, '新工序', M.X200.name, '镭雕', 'OP99'],                // 新增
+    [4, '不存在的三线', '', M.X200.name, 'X', 'OP98'],                  // 线体没建档
+    [5, L1.name, '', 'X9999', 'X', 'OP97'],                             // 机种没建档
+    [6, L1.name, '', M.X200.name, '重复', 'OP10'],                      // 与第 2 行重码
+    [7, L1.name, '', M.X200.name, '怪码', 'OP 10!'],                    // 工序码不合法
+    [8, L1.name, '', '', '没机种', 'OP96']                              // 机种栏空着
+  ];
+  const flatBuf = buildWorkbook([{ name: '工序清单', rows: flatRows }]);
+  const upFlat = await j('/api/import/parse?filename=' + encodeURIComponent('全厂.xlsx'),
+    { method: 'POST', body: flatBuf });
+  ok(upFlat.body.mode === 'flat', '带机种/线体两列 → 全厂模式，按行分流到各自机种线体');
+  ok(upFlat.body.mapping.code === 5 && upFlat.body.mapping.model === 3 && upFlat.body.mapping.note === 2,
+    '前插「序号」、列顺序打乱，仍按表头名认出每一列', upFlat.body.mapping);
+  ok(upFlat.body.counts.new === 1 && upFlat.body.counts.diff === 1 && upFlat.body.counts.same === 1,
+    '逐行判定：1 新增 / 1 有变化 / 1 没变化', upFlat.body.counts);
+  ok(upFlat.body.counts.bad === 5, '5 行不合要求', upFlat.body.counts);
+
+  const badReasons = upFlat.body.rows.filter((r) => r.status === 'bad').map((r) => r.reason);
+  ok(badReasons.some((x) => x.includes('线体「不存在的三线」还没建档')), '线体没建档的行单独指出来', badReasons);
+  ok(badReasons.some((x) => x.includes('机种「X9999」还没建档')), '机种没建档的行单独指出来');
+  ok(badReasons.some((x) => x.includes('与第 2 行工序码重复')), '文件内重码，指出跟第几行撞了');
+  ok(badReasons.some((x) => x.includes('工序码只能用')), '工序码字符不合法');
+  ok(badReasons.some((x) => x === '没有填机种'), '机种栏空着');
+  ok(!upFlat.body.rows.some((r) => r.status === 'bad' && r.code === 'OP99'),
+    '不合要求的行不影响合格行');
+
+  const impFlat = await post('/api/stations/import', {
+    rows: upFlat.body.rows.filter((r) => r.status !== 'bad'), mode: 'merge'
   });
+  ok(impFlat.ok && impFlat.body.created === 1 && impFlat.body.skipped === 2,
+    '合并导入：只加 OP99，两道已存在的跳过');
+
+  const impUpd = await post('/api/stations/import', {
+    rows: upFlat.body.rows.filter((r) => r.status !== 'bad'), mode: 'update'
+  });
+  ok(impUpd.body.updated === 1 && impUpd.body.kept === 2 && impUpd.body.created === 0,
+    '更新导入：只动真变了的那 1 道，没变化的算「没改动」不重写', impUpd.body);
+
   const op10After = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
     .body.stations.find((s) => s.code === 'OP10');
-  ok(imp3.body.updated === 3 && op10After.name === '压装（改）' && op10After.note === '压轴承到位',
-    'update 模式覆盖名称与「做什么」');
+  ok(op10After.name === '压装改名' && op10After.note === '改过的说明', 'update 模式覆盖名称与「做什么」');
 
+  const impOnly = await post('/api/stations/import', {
+    rows: [{ row: 1, modelId: M.X200.id, lineId: L1id, code: 'OP95', name: '不该建', note: '' }],
+    mode: 'update-only'
+  });
+  ok(impOnly.body.created === 0 && impOnly.body.skipped === 1,
+    'update-only 不新建工序（表里混了草稿行时用）');
+
+  // ---- 13.3 落库阶段的校验兜底 ----
   const impBad = await post('/api/stations/import', {
-    modelId: M.X200.id, lineId: L1id,
-    rows: [['', '没有码'], ['OP!@#', '乱码', ''], ['OP330', '合格', '']], mode: 'merge'
+    rows: [
+      { row: 1, modelId: M.X200.id, lineId: L1id, code: '', name: '没有码' },
+      { row: 2, modelId: M.X200.id, lineId: L1id, code: 'OP!@#', name: '乱码' },
+      { row: 3, modelId: M.X200.id, lineId: L1id, code: 'OP330', name: '合格', note: '' }
+    ],
+    mode: 'merge'
   });
   ok(impBad.body.created === 1 && impBad.body.bad.length === 2,
     '坏行单独列出来，不影响其它行入库');
+  ok(impBad.body.bad[0].row === 1 && typeof impBad.body.bad[0].reason === 'string',
+    '坏行带着原始行号和原因，能对回 Excel 那一行', impBad.body.bad[0]);
 
   const impWrong = await post('/api/stations/import', {
-    modelId: 'md_not_exist', lineId: L1id, rows: [['OP1', 'x']], mode: 'merge'
+    rows: [{ row: 1, modelId: 'md_not_exist', lineId: L1id, code: 'OP1', name: 'x' }], mode: 'merge'
   });
-  ok(!impWrong.ok && impWrong.status === 400, '机种不存在时整批拒绝');
+  ok(impWrong.body.bad.length === 1 && impWrong.body.created === 0,
+    '机种不存在：整行不入库并写明原因');
 
-  // 清理：删掉这一节加的几道，别影响后面的覆盖率断言
-  for (const code of ['OP300', 'OP310', 'OP330']) {
+  // 老调用方式（顶层 modelId/lineId + 三列数组）还能跑，脚本不用改
+  const impLegacy = await post('/api/stations/import', {
+    modelId: M.X200.id, lineId: L1id, rows: [['OP340', '老写法', '']], mode: 'merge'
+  });
+  ok(impLegacy.body.created === 1, '兼容 3.3.0 的调用方式（三列数组 + 顶层机种线体）');
+
+  // ---- 13.4 撤销本次导入 ----
+  const undo = await post('/api/stations/import/undo', { batchId: imp1.body.batchId });
+  ok(undo.ok && undo.body.deleted === 2, '撤销本次导入：按批次精确删掉那一批新建的 2 道');
+  const no99 = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id)).body.stations;
+  ok(!no99.some((x) => x.code === 'OP300' || x.code === 'OP310'), '被撤销的工序确实没了');
+  ok(no99.some((x) => x.code === 'OP99'), '撤销只删本批次新建的，后来导入的不受影响');
+
+  const undoAgain = await post('/api/stations/import/undo', { batchId: imp1.body.batchId });
+  ok(!undoAgain.ok && undoAgain.status === 400, '同一批次撤两次：第二次给出人话，不是静默成功');
+
+  // 清理：把这一节造的工序删掉，把 OP10 改回原样，别影响后面的断言
+  for (const code of ['OP99', 'OP320', 'OP330', 'OP340']) {
     const st = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
       .body.stations.find((x) => x.code === code);
     if (st) await j('/api/stations/' + st.id, { method: 'DELETE' });
   }
+  await post('/api/stations/import', {
+    rows: [{ row: 1, modelId: M.X200.id, lineId: L1id, code: 'OP10', name: s10.name, note: s10.note || '' }],
+    mode: 'update'
+  });
   const back = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id)).body.stations;
-  ok(!back.some((x) => x.code === 'OP300' || x.code === 'OP310' || x.code === 'OP330'),
-    '删掉导入的工序后恢复原样');
+  ok(back.length === stBefore.length && back.find((x) => x.code === 'OP10').name === s10.name,
+    '删掉导入的工序、改回原名后恢复原样');
 
   // ========== 14. 工序清单导出（xlsx） ==========
   console.log('\n14. 工序清单导出 / 模板（Excel）');
@@ -577,39 +668,39 @@ async function upload(buf, name) {
   ok(tpl.name === '工序清单导入模板.xlsx', '模板文件名带中文（RFC 5987 编码）', tpl.name);
 
   const tplRows = parseSheet(tpl.buf);
-  ok(tplRows.length === 2 && tplRows[0][0] === '工序码' && tplRows[1][0] === 'OP10',
-    '模板 = 标题行 + 一行示例', tplRows);
+  ok(tplRows.length === 3 && tplRows[0].length === 5, '模板 = 标题行 + 两行示例，五列', tplRows[0]);
+  ok(tplRows[0].join('|') === '机种|线体|工序码|名称|做什么',
+    '模板表头与导出的表逐列同构（导出来改完能直接导回去）', tplRows[0]);
   ok(tpl.buf.toString('utf8').includes('填写说明'),
     '说明单独占一页，不混在数据区里（混进去会被当成一道工序）');
 
   const all = await bin('/api/export/stations.xlsx');
-  ok(all.ok && all.buf[0] === 0x50, '全部机种导出成功');
+  ok(all.ok && all.buf[0] === 0x50, '全厂导出成功');
   ok(/^工序清单-全部机种-\d{8}-\d{4}\.xlsx$/.test(all.name), '文件名带「全部机种」+ 时间戳', all.name);
 
-  // workbook.xml 是明文（store 不压缩），直接数 sheet 标签就知道有几个工作表
-  const sheetNames = (b) => [...b.toString('utf8').matchAll(/<sheet name="([^"]+)"/g)].map((m) => m[1]);
-  const allNames = sheetNames(all.buf);
-  const modelCount = Object.keys(M).length;
-  ok(allNames.length >= modelCount,
-    `每个机种至少一个工作表（共 ${allNames.length} 个，机种 ${modelCount} 个）`, allNames);
-  ok(new Set(allNames).size === allNames.length, '工作表名不重复');
-  ok(allNames.every((n) => n.length <= 31 && !/[:\\/?*[\]]/.test(n)),
-    '工作表名都 ≤31 字符、不含 Excel 禁用字符', allNames);
+  const allRows = parseSheet(all.buf);
+  ok(allRows[0].length === 5 && allRows[0][2] === '工序码', '全厂一张表，五列', allRows[0]);
+  ok(allRows.length > 1 && allRows.slice(1).every((r) => r[0] && r[1] && r[2]),
+    `每一行都带机种 / 线体 / 工序码（共 ${allRows.length - 1} 行）`);
+  ok(allRows.length > 1 && new Set(allRows.slice(1).map((r) => r[0])).size >= Object.keys(M).length - 1,
+    '所有机种都在同一张表里，不再按 sheet 拆');
 
-  // 单机种 + 单线：只出一个表，名字就是机种名，且内容能原样读回来（导出→导入闭环）
   const one = await bin('/api/export/stations.xlsx?modelId=' + M.X200.id + '&lineId=' + L1id);
-  const oneNames = sheetNames(one.buf);
-  ok(oneNames.length === 1 && oneNames[0] === M.X200.name,
-    '单机种 + 单线：只有一个工作表，名字就是机种名', oneNames);
-
   const oneRows = parseSheet(one.buf);
   const stNow = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id)).body.stations;
   ok(oneRows.length === stNow.length + 1,
-    `导出的行数 = 工序数 + 标题（${oneRows.length} = ${stNow.length} + 1）`);
+    `单机种单线导出：行数 = 工序数 + 标题（${oneRows.length} = ${stNow.length} + 1）`);
   ok(stNow.every((s, i) => {
     const r = oneRows[i + 1] || [];
-    return r[0] === s.code && (r[1] || '') === (s.name || '') && (r[2] || '') === (s.note || '') ;
-  }), '导出 → 读回 逐行一致（工序码 / 名称 / 做什么）');
+    return r[0] === M.X200.name && r[1] === L1.name && r[2] === s.code
+      && (r[3] || '') === (s.name || '') && (r[4] || '') === (s.note || '');
+  }), '导出 → 读回 逐行一致（机种 / 线体 / 工序码 / 名称 / 做什么）');
+
+  // 闭环：导出的文件原样导回去，应该一道都不动
+  const rt = await j('/api/import/parse?filename=rt.xlsx', { method: 'POST', body: one.buf });
+  ok(rt.body.mode === 'flat' && rt.body.counts.new === 0 && rt.body.counts.bad === 0
+    && rt.body.counts.same === stNow.length,
+    '导出文件原样导回：全部判定「没变化」，不重复建也不误改', rt.body.counts);
 
   ok((await fetch(BASE + '/api/export/stations.xlsx?modelId=md_not_exist')).status === 400,
     '机种不存在时返回 400，而不是给一张空表');
