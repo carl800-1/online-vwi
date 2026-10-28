@@ -966,6 +966,18 @@ tr.row-cur td.model { box-shadow: inset 3px 0 0 var(--brand); }
 .dlg-row .tip { font-size: 11.5px; color: var(--ink3); margin-top: 4px; }
 .dlg-msg { font-size: 13.5px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
 
+/* 批量输入：一行一条，从 Excel 两列粘进来就能用 */
+.dlg-card:has(.dlg-ta) { width: 560px; }
+.dlg-ta {
+  width: 100%; min-height: 240px; max-height: 46vh; resize: vertical;
+  padding: 9px 11px; font-size: 13px; line-height: 1.85;
+  font-family: ui-monospace, SFMono-Regular, Consolas, 'Courier New', monospace;
+  border: 1px solid var(--line); border-radius: 8px; background: #fff;
+  white-space: pre; overflow: auto; tab-size: 4;
+}
+.dlg-ta:focus { border-color: var(--brand); outline: none; box-shadow: 0 0 0 3px var(--brand-bg); }
+.dlg-ta + .tip { font-size: 11.5px; color: var(--ink3); margin-top: 6px; line-height: 1.6; }
+
 .toolbar {
   display: flex;
   align-items: center;
@@ -1574,7 +1586,90 @@ body.is-desktop .modal.desk-only.on { display: flex !important; }
   padding: 12px; text-align: center; color: var(--ink3); font-size: 12.5px;
   border: 1px dashed var(--line); border-radius: 8px;
 }
-.st-addrow { margin-top: 12px; }
+
+/* ---------- 工位工作区：左索引 + 右单个编辑 ----------
+   一个机种常有 15–25 道工序。全摊成一列要滚几千像素，还会让"哪个还没配"
+   淹没在长页面里；所以拆成「索引（一屏看完）+ 只编一个（高度固定）」。 */
+.st-work {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+  align-items: start;
+}
+
+.st-index {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+  max-height: calc(100vh - 200px);
+  position: sticky; top: 12px;
+}
+.si-head {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 11px 12px 7px;
+}
+.si-head strong { font-size: 13.5px; }
+.si-count { margin-left: auto; font-size: 11.5px; color: var(--ink3); }
+.si-count b { font-size: 13px; color: var(--ink); }
+.si-bar { height: 3px; background: #eef2f7; margin: 0 12px 9px; border-radius: 99px; overflow: hidden; }
+.si-bar i { display: block; height: 100%; width: 0; background: var(--ok); transition: width .2s; }
+.st-index .mini-search { margin: 0 10px 7px; }
+
+.si-filter { display: flex; gap: 4px; padding: 0 10px 8px; }
+.si-f {
+  flex: 1; padding: 3px 0; font-size: 11.5px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 6px; background: #fff; color: var(--ink2);
+}
+.si-f:hover { border-color: var(--brand-line, #bfd3f5); }
+.si-f.on { background: var(--brand-bg); border-color: var(--brand); color: var(--brand-ink); font-weight: 600; }
+
+.si-list { overflow: auto; flex: 1; padding: 0 6px 6px; }
+.si-row {
+  display: grid; grid-template-columns: 7px 46px minmax(0, 1fr) auto;
+  align-items: center; gap: 7px;
+  width: 100%; padding: 5px 7px; border: none; border-radius: 7px;
+  background: none; cursor: pointer; text-align: left; font: inherit;
+}
+.si-row:hover { background: #f6f8fb; }
+.si-row.on { background: var(--brand-bg); }
+.si-code {
+  font-weight: 600; font-size: 12px; color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.si-row.on .si-code { color: var(--brand-ink); }
+.si-name { font-size: 12px; color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.si-n {
+  font-size: 10.5px; color: var(--ink3); background: #eef2f7;
+  border-radius: 999px; padding: 0 6px; min-width: 17px; height: 16px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.si-row.on .si-n { background: #fff; }
+.si-dot { width: 7px; height: 7px; border-radius: 99px; background: #cbd5e1; }
+.si-dot.ok { background: var(--ok); }
+.si-dot.warn { background: var(--warn); }
+.si-dot.idle { background: #cbd5e1; }
+.si-empty { padding: 14px 10px; font-size: 12px; color: var(--ink3); text-align: center; }
+.si-foot { padding: 8px 10px 10px; border-top: 1px solid var(--line); }
+.si-foot .btn { width: 100%; }
+
+.st-edit { min-width: 0; }
+.se-nav {
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 2px 9px; font-size: 12.5px; color: var(--ink2); min-height: 26px;
+}
+.se-nav b { color: var(--ink); }
+.se-pos { font-size: 11.5px; color: var(--ink3); font-variant-numeric: tabular-nums; }
+.se-warn { color: var(--warn); }
+
+/* 窄屏（1366 一线）把索引压窄一点，给编辑区留宽度 */
+@media (max-width: 1440px) {
+  .st-work { grid-template-columns: 186px minmax(0, 1fr); }
+  .si-row { grid-template-columns: 7px 42px minmax(0, 1fr) auto; }
+}
 
 /* ---------- 行内小控件 ---------- */
 .inl { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink2); }
@@ -1606,3 +1701,43 @@ body.is-desktop .modal.desk-only.on { display: flex !important; }
 
 /* 工位已经有内容时，把大拖拽区收成一条：5 个工位都占 44px 的话一屏放不下 */
 .station.has-items .st-drop { padding: 6px 10px; text-align: left; font-size: 12px; }
+
+/* ---------- 机种设置：线体选择条（v3.0.0） ----------
+   「先选机种、再选线体」里的后半句。同一个机种在不同线体是两套工位，
+   所以这一排必须显眼，不能做成藏在下拉里的东西。 */
+.line-pick {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  padding: 8px 12px 2px; border-top: 1px solid var(--line2);
+}
+.lp-lbl { font-size: 12px; color: var(--ink3); margin-right: 2px; }
+.lp {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px;
+  background: #fff; color: var(--ink2); font-size: 12.5px; cursor: pointer;
+  line-height: 1.5;
+}
+.lp:hover { border-color: var(--brand); color: var(--brand-ink); }
+.lp.on {
+  border-color: var(--brand); background: var(--brand-bg);
+  color: var(--brand-ink); font-weight: 600;
+}
+.lp small { color: var(--ink3); font-weight: 400; }
+.lp.on small { color: var(--brand-ink); opacity: .75; }
+.lp-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--line); flex: none;
+}
+.lp-dot.live { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
+.lp.on .lp-dot:not(.live) { background: var(--brand); }
+
+/* 复制来源/同步目标的单选列表（对话框里用） */
+.linepick { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.linepick-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px;
+  cursor: pointer; background: #fff;
+}
+.linepick-row:hover { border-color: var(--brand); background: var(--brand-bg); }
+.lp-name { font-size: 13px; color: var(--ink); }
+.lp-name small { color: var(--ink3); margin-left: 6px; font-size: 11.5px; }
+.lp-meta { margin-left: auto; font-size: 12px; color: var(--ink3); }

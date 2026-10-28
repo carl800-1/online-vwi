@@ -35,15 +35,15 @@ export function register(router) {
       const cur = st.currentModelId ? q.get('SELECT code, name FROM model WHERE id = ?', st.currentModelId) : null;
       const pend = st.pendingModelId ? q.get('SELECT code FROM model WHERE id = ?', st.pendingModelId) : null;
 
-      // 该机种每个工位有没有内容：换型前就看出来"OP40 这套机种压根没配"
+      // 该机种**在这条线上**每个工位有没有内容：换型前就看出来"OP40 这套机种压根没配"
       const have = new Map(
         (cur
           ? q.all(
               `SELECT s.code, COUNT(i.id) n
                  FROM station s JOIN item i ON i.station_id = s.id
-                WHERE s.model_id = ?
+                WHERE s.model_id = ? AND s.line_id = ?
                 GROUP BY s.code`,
-              st.currentModelId
+              st.currentModelId, l.id
             )
           : []
         ).map((r) => [r.code, r.n])

@@ -1,8 +1,8 @@
-// 播放清单（兼容接口）：按「机种 × 工位」读写
+// 播放清单（兼容接口）：按「机种 × 线体 × 工位」读写
 //
-// v2.0.0 起内容的宿主是工位，但老调用方（脚本、旧页面）传的是 processId。
-// 这里把 process.code 映射到该机种的同码工位 —— 语义没变
-// （"这个机种在这道工序上该播什么"），只是不再按线体复制。
+// 内容的宿主是工位，但老调用方（脚本、旧页面）传的是 processId。
+// 这里把 process 展开成 (line_id, code) 再找工位 —— 语义没变
+// （"这个机种在这条线的这道工序上该播什么"）。
 // 新代码请直接用 /api/stations/:id。
 import { q, stationsOf, saveStation } from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
@@ -14,9 +14,11 @@ function resolveStation(modelId, { stationId, processId }) {
     return q.get('SELECT * FROM station WHERE id = ? AND model_id = ?', stationId, modelId) || null;
   }
   if (processId) {
+    // 工序属于某条线体，所以 process 足够定位到「机种 × 线体 × 码」
     const p = q.get('SELECT * FROM process WHERE id = ?', processId);
     if (!p) return null;
-    return q.get('SELECT * FROM station WHERE model_id = ? AND code = ?', modelId, p.code) || null;
+    return q.get('SELECT * FROM station WHERE model_id = ? AND line_id = ? AND code = ?',
+      modelId, p.line_id, p.code) || null;
   }
   return null;
 }
@@ -58,7 +60,7 @@ export function register(router) {
       stationId: String(ctx.query.stationId || ''),
       processId: String(ctx.query.processId || '')
     });
-    if (!station) throw badRequest('这个机种在这道工序上还没有工位');
+    if (!station) throw badRequest('这个机种在这条线的这道工序上还没有工位');
 
     const items = loadItems(station.id);
     sendJson(res, 200, {
@@ -84,7 +86,7 @@ export function register(router) {
       stationId: String(body.stationId || ''),
       processId: String(body.processId || '')
     });
-    if (!station) throw badRequest('这个机种在这道工序上还没有工位');
+    if (!station) throw badRequest('这个机种在这条线的这道工序上还没有工位');
 
     const list = body.items;
     if (!Array.isArray(list)) throw badRequest('items 必须是数组');
@@ -112,11 +114,12 @@ export function register(router) {
     sendJson(res, 200, { ok: true, count: rows.length, items: loadItems(station.id) });
   });
 
-  // 机种的全部工位（含内容），机种设置页一次取完
+  // 机种在一条线上的全部工位（含内容），机种设置页一次取完
   router.get('/api/playlist/all', (req, res, ctx) => {
     const modelId = String(ctx.query.modelId || '');
+    const lineId = String(ctx.query.lineId || '');
     const model = q.get('SELECT * FROM model WHERE id = ?', modelId);
     if (!model) throw badRequest('型号不存在');
-    sendJson(res, 200, { model, stations: stationsOf(modelId) });
+    sendJson(res, 200, { model, stations: stationsOf(modelId, lineId) });
   });
 }

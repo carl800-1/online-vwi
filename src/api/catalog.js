@@ -3,9 +3,9 @@
 // v1.7.0 起多了一层「线体」：每天的活不一定在同一条产线上，
 // 昨天用一线、今天用二线是常态。所以线体要能建、能启停，
 // 工序挂在具体线体下（一线 OP30 和二线 OP30 是两份不同的内容）。
-import { q, tx, coverage, processesOf, cloneStandardProcesses, enableOnlyLine, lines } from '../db.js';
+import { q, tx, coverage, processesOf, cloneStandardProcesses, enableOnlyLine, lines, ensureStationsForLine, ensureAllModelStations } from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
-import { getState, resetLine } from '../switch.js';
+import { getState, resetLine, notifyContentChanged } from '../switch.js';
 import { now, uid, str, int } from '../util.js';
 
 function lineStats(l) {
@@ -51,6 +51,10 @@ export function register(router) {
       // 新线体照标准 5 道工序起一份，名字可以之后改
       cloneStandardProcesses(id);
     });
+    // 立刻给所有机种在这条线上长出一套空工位：否则新线的每块屏都要人去
+    // 「机种设置」逐个机种点一次"补齐"才能配内容，一上线就是空的。
+    // 放在上面的事务之外 —— 它自己会开事务，套着开 SQLite 会直接报错。
+    ensureStationsForLine(id);
     sendJson(res, 200, lineStats(q.get('SELECT * FROM line WHERE id = ?', id)));
   });
 
@@ -96,14 +100,19 @@ export function register(router) {
     if (l.enabled) throw badRequest('这条线体正在启用，先停用再删除');
     if (q.get('SELECT COUNT(*) n FROM line').n <= 1) throw badRequest('至少保留一条线体');
 
-    // v2.0.0 起内容挂在「机种工位」上，跟线体没有外键关系，
-    // 所以删线体不会丢内容 —— 只是这条线上那几块屏以后没人读了。
+    // v3.0.0 起工位带线体维度：这条线的工位（和要求、内容）是**这条线专属**的，
+    // 线没了就没人读了，跟着一起删 —— 否则会留下永远看不见的孤儿数据。
+    // 别的线的工位不受影响（各存各的）。
+    const stCount = q.get('SELECT COUNT(*) n FROM station WHERE line_id = ?', l.id).n;
     tx(() => {
+      q.run('DELETE FROM item WHERE station_id IN (SELECT id FROM station WHERE line_id = ?)', l.id);
+      q.run('DELETE FROM station_req WHERE station_id IN (SELECT id FROM station WHERE line_id = ?)', l.id);
+      q.run('DELETE FROM station WHERE line_id = ?', l.id);
       q.run('DELETE FROM process WHERE line_id = ?', l.id);
       q.run('DELETE FROM line_state WHERE line_id = ?', l.id);
       q.run('DELETE FROM line WHERE id = ?', l.id);
     });
-    sendJson(res, 200, { ok: true });
+    sendJson(res, 200, { ok: true, stations: stCount });
   });
 
   // ---------- 型号 ----------
@@ -112,15 +121,15 @@ export function register(router) {
     const lineId = String(ctx.query.lineId || '').trim() || pickActiveLineId();
     const models = q.all('SELECT * FROM model ORDER BY sort, code');
     const cov = coverage(lineId);
-    // 机种自己的工位完成度：机种设置页看的是"这个机种配了几块屏"，
-    // 跟"在当前这条线上备了几块屏"是两件事，两个数都要给。
+    // 机种在**该线体上**的工位完成度，给机种设置页左列表打徽标用。
+    // 必须按线统计：同一个机种在一线 5 个工位、二线可能只有 3 个。
     const stMap = new Map(
       q.all(`
         SELECT s.model_id,
                COUNT(*) total,
                SUM(CASE WHEN EXISTS(SELECT 1 FROM item i WHERE i.station_id = s.id) THEN 1 ELSE 0 END) done
-          FROM station s GROUP BY s.model_id
-      `).map((r) => [r.model_id, { total: r.total, done: r.done || 0 }])
+          FROM station s WHERE s.line_id = ? GROUP BY s.model_id
+      `, lineId).map((r) => [r.model_id, { total: r.total, done: r.done || 0 }])
     );
     sendJson(res, 200, {
       lineId,
@@ -133,7 +142,7 @@ export function register(router) {
         // 完成度按"这套型号在本线体有几道工序已经有内容"算，分母是线体的工序数
         done: cov.byModel[m.id]?.done ?? 0,
         total: cov.byModel[m.id]?.total ?? 0,
-        // 这个机种自己的工位完成度（跟线体无关）
+        // 这个机种在本线体上的工位完成度（换线会变）
         stDone: stMap.get(m.id)?.done ?? 0,
         stTotal: stMap.get(m.id)?.total ?? 0,
         cells: Object.fromEntries(
@@ -160,7 +169,11 @@ export function register(router) {
     const id = uid('md');
     q.run('INSERT INTO model(id,code,name,enabled,sort,created_at) VALUES(?,?,?,?,?,?)',
       id, code, name, 1, maxSort + 10, now());
-    sendJson(res, 200, { id, code, name });
+    // 新机种要立刻在各条线上都有工位，否则进机种设置是一片空白，
+    // 还得逐条线点「按本线工序补齐」—— 现场一条线十几二十道工序，点一遍就是二十次。
+    // 注意 ensureStationsForLine 内部自带事务，必须放在任何外层事务之外调用。
+    const stations = ensureAllModelStations();
+    sendJson(res, 200, { id, code, name, stations });
   });
 
   router.put('/api/models/:id', async (req, res) => {
@@ -226,7 +239,11 @@ export function register(router) {
     const id = uid('pr');
     q.run('INSERT INTO process(id,line_id,code,name,sort,created_at) VALUES(?,?,?,?,?,?)',
       id, lineId, code, name, maxSort + 10, now());
-    sendJson(res, 200, { id, code, name });
+    // 加了工序就等于这条线多了一块屏：所有机种都要长出对应的空工位，
+    // 否则那块屏装了终端也永远没地方配内容（「机种设置」里根本没有这张卡）。
+    const added = ensureStationsForLine(lineId);
+    notifyContentChanged();
+    sendJson(res, 200, { id, code, name, stations: added });
   });
 
   router.put('/api/processes/:id', async (req, res) => {
@@ -234,22 +251,46 @@ export function register(router) {
     const p = q.get('SELECT * FROM process WHERE id = ?', req.params.id);
     if (!p) throw badRequest('工序不存在');
 
-    if (body.code !== undefined) {
-      const code = str(body.code, 16).trim().toUpperCase();
-      if (!code) throw badRequest('工序编码不能为空');
-      if (code !== p.code &&
-          q.get('SELECT id FROM process WHERE line_id = ? AND code = ?', p.line_id, code)) {
-        throw badRequest(`这条线体上已经有工序 ${code}`);
+  let renamed = 0;
+  let clash = 0;
+  let changed = false;
+
+  if (body.code !== undefined) {
+    const code = str(body.code, 16).trim().toUpperCase();
+    if (!code) throw badRequest('工序编码不能为空');
+    if (code !== p.code &&
+        q.get('SELECT id FROM process WHERE line_id = ? AND code = ?', p.line_id, code)) {
+      throw badRequest(`这条线体上已经有工序 ${code}`);
+    }
+    if (code !== p.code) {
+      // 工位靠 code 与本线工序对位，工序码一改就得带着工位一起改，
+      // 否则老码的工位（连同里面的内容）当场变成"对不上"的孤儿，屏上就是空白。
+      // 若某个机种已经有新码的工位，跳过它不覆盖 —— 撞唯一键会整条 500，也比悄悄丢内容好。
+      for (const s of q.all('SELECT id, model_id FROM station WHERE line_id = ? AND code = ?', p.line_id, p.code)) {
+        const take = q.get('SELECT id FROM station WHERE model_id = ? AND line_id = ? AND code = ?',
+          s.model_id, p.line_id, code);
+        if (take) { clash += 1; continue; }
+        q.run('UPDATE station SET code = ? WHERE id = ?', code, s.id);
+        renamed += 1;
       }
       q.run('UPDATE process SET code = ? WHERE id = ?', code, p.id);
+      changed = true;
     }
-    if (body.name !== undefined) {
-      const name = str(body.name, 40).trim();
-      if (!name) throw badRequest('工序名称不能为空');
+  }
+  if (body.name !== undefined) {
+    const name = str(body.name, 40).trim();
+    if (!name) throw badRequest('工序名称不能为空');
+    if (name !== p.name) {
       q.run('UPDATE process SET name = ? WHERE id = ?', name, p.id);
+      // 工位名跟着工序名走，只在"工位名还是旧工序名"时才改，避免覆盖人为改过的名字。
+      q.run('UPDATE station SET name = ? WHERE line_id = ? AND code = ? AND name = ?',
+        name, p.line_id, (body.code !== undefined ? str(body.code, 16).trim().toUpperCase() : p.code), p.name);
+      changed = true;
     }
-    sendJson(res, 200, { ok: true });
-  });
+  }
+  if (changed) notifyContentChanged();
+  sendJson(res, 200, { ok: true, renamed, clash });
+});
 
   router.del('/api/processes/:id', (req, res) => {
     const p = q.get('SELECT * FROM process WHERE id = ?', req.params.id);

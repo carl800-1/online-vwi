@@ -289,11 +289,12 @@ async function upload(buf, name) {
   const readyNoLine = await post('/api/ready', { op: 'OP30', modelId: M.X230.id });
   ok(readyNoLine.ok && readyNoLine.body.state.lineId === L2, '举手不带 line 时落到当前启用线体');
 
-  // v2.0.0：内容挂在「机种工位」上，跟线体没有外键关系，所以"有内容不许删线体"
-  // 这条保护随内容模型一起取消了 —— 删线体只删那几块屏的身份，不动 SOP。
-  // 这里确认一下现状：机种内容确实存在，且不依赖线体。
-  const covBefore = (await j('/api/models')).body.coverage.done;
-  ok(covBefore > 0, '机种里有内容（不依赖线体存在）');
+  // v3.0.0：内容挂在「机种 × 线体 × 工位」上，完成度也按线体各算各的。
+  // 二线刚建出来、还没配任何内容，它的完成度就是 0 —— 这才对，不能借用一线。
+  const covL1 = (await j('/api/models?lineId=' + ls.find((l) => l.code === 'L1').id)).body.coverage.done;
+  const covL2 = (await j('/api/models?lineId=' + L2)).body.coverage.done;
+  ok(covL1 > 0, '一线上的机种内容还在（41 条老内容迁过来后按线归位）');
+  ok(covL2 === 0, '二线的完成度是 0：内容是各条线自己的，不共用');
 
   // 收拾：停用并删掉测试线体
   await put('/api/lines/' + L2, { enabled: false });
@@ -302,14 +303,17 @@ async function upload(buf, name) {
   await put('/api/lines/' + ls.find((l) => l.code === 'L1').id, { enabled: true });
   ok((await j('/api/lines')).body.lines.length === 1, '删除后只剩一线，且恢复启用');
 
-  // ---------- 12. 工位（机种设置） ----------
-  // v2.0.0 的核心变化：内容从「线体工序」搬到「机种工位」，全厂一份。
-  // 这一节验证：工位与工序码对位、类型闸门、跨线共用、同步工序、总览接口。
+  // ---------- 12. 工位（机种设置）：机种 × 线体 × 工序码 ----------
+  // v3.0.0 的核心变化：工位带线体维度。同一个机种在一线和二线的工艺路线可以
+  // 完全不同（工序数量不同，甚至同一串 OP 号的含义都不同），所以两套内容各存各的，
+  // 不再靠工序码跨线对位。两条线大体相同时用「复制」整套搬过来再改。
   const L1id = (await j('/api/lines')).body.lines.find((l) => l.code === 'L1').id;
-  const stAll = (await j('/api/stations?modelId=' + M.X200.id)).body;
-  ok(stAll.stations.length === 5, '机种自带 5 个标准工位');
+
+  const stAll = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id)).body;
+  ok(stAll.stations.length === 5, '机种在一线上有 5 个工位（按这条线自己的工序长出来）');
   ok(stAll.stations.map((s) => s.code).join(',') === 'OP10,OP20,OP30,OP40,OP50',
-    '工位码与线体工序码一一对位（OP10 ↔ OP10）');
+    '工位码与本线工序码一致（OP10 ↔ OP10）');
+  ok(stAll.stations.every((s) => s.lineId === L1id), '每个工位都带线体归属');
 
   const st30 = stAll.stations.find((s) => s.code === 'OP30');
   ok(st30.items.length === 2, 'OP30 上有前面写入的 2 项（内容已迁到工位）');
@@ -324,37 +328,96 @@ async function upload(buf, name) {
     reqs: [{ kind: 'image', minCount: 1, minWidth: 1280, minHeight: 720 }]
   });
 
-  // 跨线共用：同一机种在一线和三线播同一套（不再按线各存一份）
+  // 跨线独立：新线有同名工序，但是另一套空工位
   const madeL3 = await post('/api/lines', { code: 'L3', name: '三线' });
   const L3 = madeL3.body.id;
+  const stL3 = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L3)).body.stations;
+  ok(stL3.length === 5 && stL3.every((s) => s.items.length === 0),
+    '新线体自动长出同一批空工位（不用逐个机种点补齐）');
+  ok(stL3[0].id !== stAll.stations[0].id, '两条线的工位是两条独立记录，不是同一条');
+
   const plL1 = (await j('/display/playlist?op=OP30&line=L1&model=X200')).body;
   const plL3 = (await j('/display/playlist?op=OP30&line=L3&model=X200')).body;
-  ok(plL1.count === 2 && plL3.count === 2,
-    '同一机种在不同线体上取到同一套内容（全厂一份 SOP，换线不用重传）');
+  ok(plL1.count === 2 && plL3.count === 0,
+    '同一机种在另一条线上是独立的一套，不会借用一线的内容');
+  ok(plL3.noStation === false, '"有工位但没内容"和"压根没工位"能分开（noStation=false）');
+
+  // 跨线复制：目标线空着的工位直接填上
+  const cp = await post('/api/stations/copy', { modelId: M.X200.id, fromLineId: L1id, toLineId: L3 });
+  ok(cp.ok && cp.body.filled.includes('OP30'), '可以把一线有内容的工位复制到三线（空工位直接填上）');
+  ok(cp.body.empty.length === 5 - cp.body.filled.length,
+    '来源线本来就空的工位记进 empty，不算搬过（也不会把空壳当成功）');
+  ok((await j('/display/playlist?op=OP30&line=L3&model=X200')).body.count === 2,
+    '复制后三线取到同一份内容');
+
+  const cp2 = await post('/api/stations/copy', { modelId: M.X200.id, fromLineId: L1id, toLineId: L3 });
+  ok(cp2.body.filled.length === 0 && cp2.body.skipped.length === cp.body.filled.length,
+    '再复制一次不会叠一份（目标线已有内容默认跳过）');
+
+  // 复制出来是完全独立的两份：改三线不动一线
+  const st3op30 = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L3))
+    .body.stations.find((s) => s.code === 'OP30');
+  await put('/api/stations/' + st3op30.id, { items: [{ mediaId: st3op30.items[0].mediaId }] });
+  ok((await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
+    .body.stations.find((s) => s.code === 'OP30').items.length === 2,
+    '改三线的 OP30 不影响一线（两份内容各存各的）');
+
   await j('/api/lines/' + L3, { method: 'DELETE' });
+  ok((await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L3)).status === 400,
+    '删掉线体后它的工位跟着消失（不留连不上的孤儿数据）');
 
-  // 加工位 / 重码拒绝
-  const madeSt = await post('/api/stations', { modelId: M.X200.id, code: 'OP60', name: '老化' });
+  // 加工位 / 同线内重码拒绝（跨线可以同名）
+  const madeSt = await post('/api/stations', { modelId: M.X200.id, lineId: L1id, code: 'OP60', name: '老化' });
   ok(madeSt.ok && madeSt.body.code === 'OP60' && madeSt.body.reqs.some((r) => r.kind === 'image'),
-    '可以给机种加工位（默认允许图片）');
-  ok((await post('/api/stations', { modelId: M.X200.id, code: 'OP60' })).status === 400,
-    '同一机种工位码不能重复');
+    '可以给「机种 × 线体」加工位（默认允许图片）');
+  ok((await post('/api/stations', { modelId: M.X200.id, lineId: L1id, code: 'OP60' })).status === 400,
+    '同一条线上工位码不能重复');
 
-  // 同步到线体：缺的补上，多出来的不删
-  const sync = await post('/api/stations/sync', { modelId: M.X200.id, lineId: L1id });
-  ok(sync.ok && sync.body.created.some((x) => x.code === 'OP60'),
-    '可以把机种工位同步成线体工序（缺的补上）');
-  ok(sync.body.processes === 6, '同步后一线有 6 道工序');
+  // 线体加工序 → 所有机种自动长出对应工位；sync 仍是修复手段
+  const addProc = await post('/api/processes', { lineId: L1id, code: 'OP70', name: '包装复核' });
+  ok(addProc.ok && addProc.body.stations >= 1, '线体上加一道工序，各机种自动补出对应工位');
+  ok((await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
+    .body.stations.some((s) => s.code === 'OP70'),
+    '新工位立刻出现在机种设置里（不用手动同步）');
+
+  const st70 = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
+    .body.stations.find((s) => s.code === 'OP70');
+  await j('/api/stations/' + st70.id, { method: 'DELETE' });
+  const syncRes = await post('/api/stations/sync', { modelId: M.X200.id, lineId: L1id });
+  ok(syncRes.ok && syncRes.body.created.includes('OP70'), '「按本线工序补齐」能把缺掉的工位补回来');
+
+  // 改工序码：工位靠 code 与本线工序对位，工序码一改，本线工位必须跟着改，
+  // 否则老码那个工位（连同里面的内容）当场变成"对不上"的孤儿，屏上就是空白。
+  const pr70b = (await j('/api/processes?lineId=' + L1id)).body.processes.find((x) => x.code === 'OP70');
+  const st70b = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
+    .body.stations.find((s) => s.code === 'OP70');
+  await put('/api/stations/' + st70b.id, { items: [{ mediaId: u1.body.id }] });
+  const rn = await put('/api/processes/' + pr70b.id, { code: 'OP75', name: '包装复核' });
+  ok(rn.ok && rn.body.renamed >= 1, '改工序码时本线工位跟着改（renamed ≥ 1）', rn.body);
+  const afterRn = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id)).body.stations;
+  ok(!afterRn.some((s) => s.code === 'OP70') && afterRn.some((s) => s.code === 'OP75' && s.items.length === 1),
+    '改码后内容还在（没变成对不上的孤儿）', afterRn.map((s) => s.code + ':' + s.items.length));
+
+  // 同一条线上，不同机种各有各的工位：X210 的 OP30 是它自己那 1 项，
+  // 不会因为 X200 在同一位置放了 2 项而被带上
+  const stX210 = (await j('/api/stations?modelId=' + M.X210.id + '&lineId=' + L1id)).body.stations;
+  const x210op30 = stX210.find((s) => s.code === 'OP30');
+  ok(stX210.length === 6 && x210op30.items.length === 1,
+    '同一线的另一个机种是它自己的工位与内容（X210 的 OP30 仍是 1 项）');
+  ok(x210op30.id !== st30.id, '两个机种同一道工序的工位是两条独立记录');
 
   // 有内容的工位不许直接删（会丢内容）
   const delBusySt = await j('/api/stations/' + st30.id, { method: 'DELETE' });
   ok(delBusySt.status === 400, '有内容的工位不允许直接删');
 
-  // 清理：删掉空的 OP60，把一线工序恢复成 5 道
-  const st60 = (await j('/api/stations?modelId=' + M.X200.id)).body.stations.find((s) => s.code === 'OP60');
-  await j('/api/stations/' + st60.id, { method: 'DELETE' });
-  const p60 = (await j('/api/processes?lineId=' + L1id)).body.processes.find((p) => p.code === 'OP60');
-  await j('/api/processes/' + p60.id, { method: 'DELETE' });
+  // 清理：删掉 OP60 / OP75 两道工序和对应工位，一线恢复成 5 道
+  for (const code of ['OP60', 'OP75']) {
+    const s = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
+      .body.stations.find((x) => x.code === code);
+    if (s) await j('/api/stations/' + s.id, { method: 'DELETE' });
+    const pr = (await j('/api/processes?lineId=' + L1id)).body.processes.find((x) => x.code === code);
+    if (pr) await j('/api/processes/' + pr.id, { method: 'DELETE' });
+  }
   ok((await j('/api/processes?lineId=' + L1id)).body.processes.length === 5, '一线恢复 5 道工序');
 
   // 总览接口：线体 + 机种 + 客户端状态一次给全

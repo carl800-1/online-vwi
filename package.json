@@ -1,8 +1,8 @@
 {
   "name": "online-vwi",
-  "version": "2.0.0",
+  "version": "3.1.0",
   "private": true,
-  "description": "ESOP 发布系统 —— 机种 × 工位 播放清单，线体总览换型",
+  "description": "ESOP 发布系统 —— 机种 × 线体 × 工位 播放清单，线体总览换型",
   "type": "module",
   "main": "server-gui/main.js",
   "author": "Frank",

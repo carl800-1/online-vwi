@@ -1,17 +1,22 @@
 // 终端接口：身份 = 线体 + 工序，不鉴权（内网 + 一期不做权限）
 //
-// 为什么身份要加线体：一线和二线的 OP30 是两块屏，服务端要知道是谁在问。
-// 但**内容**从 v2.0.0 起不再按线体存：线体的工序只决定"这条线上有几块屏"，
-// 播什么由「机种 × 工位」决定，全厂一份。所以同一机种换线不用重传。
+// 终端报的 line + op 现在直接决定内容：工位是「机种 × 线体 × 工序码」，
+// 一线和二线的同名工序是两套独立内容，不会再串台。
 // 不带 line 时由 router.js 回落到当前启用线体，现场老终端照常工作。
 import { q } from '../db.js';
 import { sendJson, badRequest } from '../router.js';
 import { touch, getState } from '../switch.js';
 import { termMeta } from '../util.js';
 
-/** 机种里 code 等于这道工序的工位。没有就是"这个机种没配这块屏"，要显式告警。 */
-export function stationOf(modelId, code) {
-  return q.get('SELECT * FROM station WHERE model_id = ? AND code = ?', String(modelId || ''), String(code || ''));
+/**
+ * 机种在某条线体上 code 等于这道工序的工位。
+ * 没有就是"这个机种在这条线上没配这块屏"，要显式告警 —— 不能当成"没内容"糊过去。
+ */
+export function stationOf(modelId, lineId, code) {
+  return q.get(
+    'SELECT * FROM station WHERE model_id = ? AND line_id = ? AND code = ?',
+    String(modelId || ''), String(lineId || ''), String(code || '')
+  );
 }
 
 export function register(router) {
@@ -42,7 +47,7 @@ export function register(router) {
       }
     }
 
-    const station = stationOf(model.id, process.code);
+    const station = stationOf(model.id, line.id, process.code);
 
     const rows = station
       ? q.all(
@@ -99,7 +104,7 @@ export function register(router) {
     touch(line.id, process.code, termMeta(ctx));
     const st = getState(line.id);
     const cur = st.currentModelId ? q.get('SELECT code, name FROM model WHERE id = ?', st.currentModelId) : null;
-    const station = cur ? stationOf(cur.id, process.code) : null;
+    const station = cur ? stationOf(cur.id, line.id, process.code) : null;
     const have = station
       ? q.get('SELECT COUNT(*) n FROM item WHERE station_id = ?', station.id).n
       : 0;

@@ -157,7 +157,7 @@
               线体
               <select id="procLinePick"></select>
             </label>
-            <button class="btn sm" id="procAddBtn">+ 添加工序</button>
+            <button class="btn sm" id="procAddBtn" title="可一次贴多行，批量建">+ 批量加工序</button>
           </div>
           <div class="table-wrap">
             <table class="data-table" id="procTable">
@@ -202,15 +202,44 @@
                 <span class="sub" id="mdSub">左边选一个机种</span>
                 <div class="spacer"></div>
                 <button class="btn sm" id="mdRenameBtn">改编码/名称</button>
-                <button class="btn sm" id="mdSyncBtn">同步工序到线体…</button>
+                <button class="btn sm" id="mdCopyBtn">从其它线复制…</button>
+                <button class="btn sm" id="mdSyncBtn">按本线工序补齐</button>
                 <button class="btn sm danger" id="mdDelBtn">删除机种</button>
               </div>
+
+              <!-- 线体选择：同一个机种在不同线体的工艺路线可以完全不同，
+                   所以工位必须先定线体再看。顺序是「先机种（左列表）→ 再线体（这里）」。 -->
+              <div class="line-pick" id="mdLines"></div>
+
               <div class="md-summary" id="mdSummary"></div>
             </div>
 
-            <div class="stations" id="stations"></div>
-            <div class="st-addrow">
-              <button class="btn sm" id="stAddBtn">+ 添加工位</button>
+            <!-- 工位工作区：左边索引、右边只放当前这一个。
+                 一个机种常有 15–25 道工序，全展开成一列要滚几千像素，
+                 索引让"有哪些、哪个还没配"一眼看全，编辑区高度也不再随工序数增长。 -->
+            <div class="st-work">
+              <aside class="st-index">
+                <div class="si-head">
+                  <strong>工位</strong>
+                  <span class="si-count" id="stCount">0</span>
+                </div>
+                <div class="si-bar"><i id="stBar"></i></div>
+                <input type="search" id="stSearch" class="mini-search" placeholder="找工序码或名称">
+                <div class="si-filter" id="stFilter">
+                  <button class="si-f on" data-sf="all">全部</button>
+                  <button class="si-f" data-sf="has">有内容</button>
+                  <button class="si-f" data-sf="empty">空</button>
+                </div>
+                <div class="si-list" id="stList"></div>
+                <div class="si-foot">
+                  <button class="btn sm" id="stAddBtn" title="可一次贴多行，批量建">+ 批量加工位</button>
+                </div>
+              </aside>
+
+              <div class="st-edit">
+                <div class="se-nav" id="stNav"></div>
+                <div class="stations" id="stations"></div>
+              </div>
             </div>
           </div>
         </div>
