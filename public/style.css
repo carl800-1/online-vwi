@@ -1008,8 +1008,11 @@ tr.row-cur td.model { box-shadow: inset 3px 0 0 var(--brand); }
    所以同一套界面既能当浏览器管理页、也能当桌面程序，逻辑不重复。 */
 .desk-only { display: none !important; }
 body.is-desktop .nav-item.desk-only { display: flex !important; }
-body.is-desktop .modal.desk-only { display: none !important; }
-body.is-desktop .modal.desk-only.on { display: flex !important; }
+/* 3.2.0 起「系统」是独立视图，不再是 .modal 弹层，所以必须单列一条 .view 的例外。
+   漏了这条，.desk-only 的 none !important 会把整个视图压成空白 —— 点「系统」一片白。 */
+body.is-desktop .view.desk-only { display: block !important; }
+/* 特异性更高，保证切到别的页时 hide 仍然压得住 */
+body.is-desktop .view.desk-only.hide { display: none !important; }
 
 .modal {
   position: fixed; inset: 0;

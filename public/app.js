@@ -2048,6 +2048,9 @@ if (desk) {
           (lan.length > 1 ? '<div class="lan-tip">有多张网卡时，选名字对得上现场网线的那张。' +
             '带 vEthernet / VMnet / WSL 的是虚拟网卡，填了终端连不上。</div>' : '')
         : '<div class="lan-item">没有检测到局域网地址，请确认网线已插、IP 已配置</div>';
+    }).catch((err) => {
+      // 拿不到桌面信息时至少给句人话，别留一片「—」
+      toast('读取系统信息失败：' + (err && err.message ? err.message : err), 'err');
     });
   };
 

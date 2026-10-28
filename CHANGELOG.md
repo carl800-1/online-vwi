@@ -17,6 +17,7 @@
 
 | tag | Release | 附件 |
 |---|---|---|
+| `v3.2.1` | 修复系统页空白（`.desk-only` 漏了 `.view` 的例外规则）（服务端 3.2.1） | ESOP-Server.exe、ESOP-Client.exe |
 | `v3.2.0` | 定义与内容分离：机种设置只留工序清单、媒体库按序上传、新增文件查询页、系统页去弹框、Excel 导入（服务端 3.2.0） | ESOP-Server.exe、ESOP-Client.exe |
 | `v3.1.0` | 机种设置改「工位索引 + 单工位编辑」+ 批量加工序/工位（服务端 3.1.0） | ESOP-Server.exe、ESOP-Client.exe |
 | `v3.0.0` | 工位带线体维度 + 机种设置先选机种再选线体（服务端 3.0.0） | ESOP-Server.exe、ESOP-Client.exe |
@@ -30,6 +31,52 @@
 
 上传用 `tools/create-release.py`（建 Release 壳）+ `tools/upload-release.py`（传附件 / 改说明），
 两者都读 `~/.workbuddy/secrets/github_pat.txt`，不需要 `gh`。
+
+---
+
+## [3.2.1] — 2026-10-28 · 修复系统页空白
+
+**定为修订号**：只补了一处 CSS 选择器遗漏 + 一个 `.catch`，接口、数据表、界面结构一概没动。
+
+**现象**：桌面程序里点左侧「系统」，右侧主内容区一片空白，什么都不显示。
+
+**根因**：3.2.0 把系统页从 `.modal` 弹层改成了独立视图 `#view-system`，
+但 `desk-only` 那组「只在桌面程序里显示」的例外规则只写了 `.nav-item` 和 `.modal` 两种：
+
+```css
+.desk-only { display: none !important; }
+body.is-desktop .nav-item.desk-only { display: flex !important; }
+body.is-desktop .modal.desk-only { ... }        /* 改成视图后这两条已经没有元素使用了 */
+```
+
+`#view-system` 是 `.view.desk-only`，两条都不匹配 → `display: none !important` 恒生效。
+导航项因为匹配 `.nav-item` 所以照常显示、照常高亮，但切过去的视图被压成 0 高度，
+看上去就是「点了没反应 / 界面是空的」。
+
+**改法**：补一条 `.view` 的例外，外加一条 `.hide` 的兜底（否则切到别的页时系统页会盖在上面）：
+
+```css
+body.is-desktop .view.desk-only { display: block !important; }
+body.is-desktop .view.desk-only.hide { display: none !important; }
+```
+
+顺手删掉两条已无元素使用的 `.modal.desk-only` 死规则，
+并给 `openSys()` 里的 `desk.info()` 补 `.catch`（原来失败会静默留一片「—」，看不出是报错）。
+
+**验证**（Electron 取 `getComputedStyle`。本机 headless 浏览器全废，截图不可用）：
+
+| 场景 | 期望 | 实测 |
+|---|---|---|
+| 浏览器版 · 视图 | none | none ✅ |
+| 浏览器版 · 导航项 | none | none ✅ |
+| 桌面版 · 切到系统页 | block | block ✅ |
+| 桌面版 · 切走 | none | none ✅ |
+| 系统页 7 个字段 id | 全在 | 全在 ✅ |
+
+反向对照：把新规则换回 3.2.0 那一版、跑同一套断言，结果为 `none` —— 确认这套验证能抓出原 bug。
+
+**教训**：DOM 桩只验得了「innerHTML 里有多少行」，验不了「这块东西到底显示没显示」。
+视图可见性必须用 Electron 取 `getComputedStyle` 实测。
 
 ---
 
