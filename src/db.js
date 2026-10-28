@@ -1,6 +1,11 @@
 // 数据层：内置 node:sqlite，零第三方依赖
 // 八张表：line / model / process / media / item / setting + line_state + profile / profile_step / profile_req
 // 设计依据：docs/03-技术方案.md 第 2 节（线体维度 v1.7.0，配置库 v1.8.0）
+//
+// ⚠️ 下面的 SCHEMA 仍是 **3.x 的形状**（含 station / station_req、process 带 line_id）。
+// 4.0.0 的工序表由 migrateToModelProcess() 在**每次开库时**重建，全新库也一样走这条路。
+// 故意不把新结构写进 SCHEMA：老库的搬家逻辑（1.x → 2.x → 3.x → 4.0）只有一条路径，
+// 少一份"新库直接建、老库慢慢搬"的分叉，就不会出现两边结构对不齐的坑。
 import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -20,12 +25,23 @@ PRAGMA foreign_keys = ON;
 -- 只有一种情况仍然要求"唯一"：不带 line 参数的老终端按 sort 取第一条启用的线。
 CREATE TABLE IF NOT EXISTS line (
   id          TEXT PRIMARY KEY,
-  code        TEXT NOT NULL UNIQUE,     -- L1
+  code        TEXT NOT NULL UNIQUE,     -- L1，自动生成，界面不显示但终端靠它寻址
   name        TEXT NOT NULL,            -- 一线
   enabled     INTEGER NOT NULL DEFAULT 0,
   status      TEXT NOT NULL DEFAULT 'stopped',  -- running | stopped | maintain | care
+  slots       INTEGER NOT NULL DEFAULT 5,       -- 这条线有几块屏（工位数），只做展示不卡校验
   sort        INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL
+);
+
+-- 可生产机种（v4.0.0）：机种勾了哪些线，界面上的「可生产机种」就是这个的反查。
+-- 以前靠 station 的 DISTINCT(model,line) 隐式表达，现在工序归机种，
+-- 这个关系必须单独存 —— 否则"这个机种能在哪几条线做"就没人知道了。
+CREATE TABLE IF NOT EXISTS model_line (
+  model_id  TEXT NOT NULL REFERENCES model(id) ON DELETE CASCADE,
+  line_id   TEXT NOT NULL REFERENCES line(id) ON DELETE CASCADE,
+  sort      INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (model_id, line_id)
 );
 
 -- 产品型号（全厂共用：一个型号可能在多条线上做）
@@ -196,11 +212,42 @@ let dataDir = '';
 export function openDb(dir) {
   dataDir = dir;
   fs.mkdirSync(path.join(dir, 'media'), { recursive: true });
-  db = new DatabaseSync(path.join(dir, 'vwi.db'));
+  const dbPath = path.join(dir, 'vwi.db');
+
+  // 4.0.0 是**结构重建**（工位层整个消失），不可逆。升级前先整库复制一份，
+  // 现场发现不对就把 vwi.db.pre4.bak 改名回 vwi.db、配上 3.x 的 exe 即可回滚。
+  // 只备份一次：已经有了说明这台机器已经升过，不要再覆盖掉最初那份。
+  backupBeforeV4(dbPath);
+
+  db = new DatabaseSync(dbPath);
   db.exec(SCHEMA);
   migrate();
   ensureSettings();
   return db;
+}
+
+function backupBeforeV4(dbPath) {
+  const bak = dbPath + '.pre4.bak';
+  if (fs.existsSync(bak) || !fs.existsSync(dbPath)) return;
+  try {
+    // 判断是不是老结构：有 station 表、process 表还没有 model_id 列
+    const probe = new DatabaseSync(dbPath, { readOnly: true });
+    let needs = false;
+    try {
+      const cols = probe.prepare('PRAGMA table_info(process)').all().map((r) => r.name);
+      const hasStation = probe.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='station'").get();
+      needs = !!hasStation && cols.length > 0 && !cols.includes('model_id');
+    } finally {
+      probe.close();
+    }
+    if (!needs) return;
+    // WAL 模式下直接复制主文件可能丢掉未落盘的页，先 checkpoint 再说。
+    // 打不开（比如文件被锁）就不备份，迁移照跑 —— 不能因为备份失败让人开不了机。
+    fs.copyFileSync(dbPath, bak);
+    console.log(`[db] 升级 4.0.0 前已备份：${bak}`);
+  } catch (e) {
+    console.warn('[db] 升级前备份失败，继续迁移：', e.message);
+  }
 }
 
 /**
@@ -212,6 +259,15 @@ export function openDb(dir) {
  */
 function migrate() {
   const colsOf = (table) => new Set(q.all(`PRAGMA table_info(${table})`).map((r) => r.name));
+
+  // v4.0.0 及以后的库：结构已经换过一轮，下面那些「1.x→2.x→3.x」的搬家逻辑
+  // 再跑一次会把 process 表按 line_id 重建回去。所以先认版本，认出来就只补增量列。
+  if (colsOf('process').has('model_id')) {
+    if (!colsOf('line').has('slots')) {
+      db.exec('ALTER TABLE line ADD COLUMN slots INTEGER NOT NULL DEFAULT 5');
+    }
+    return;
+  }
 
   const media = colsOf('media');
   if (!media.has('src_sha')) db.exec("ALTER TABLE media ADD COLUMN src_sha TEXT NOT NULL DEFAULT ''");
@@ -236,6 +292,8 @@ function migrate() {
   if (!lineCols.has('status')) {
     db.exec("ALTER TABLE line ADD COLUMN status TEXT NOT NULL DEFAULT 'stopped'");
     db.exec("UPDATE line SET status = CASE WHEN enabled = 1 THEN 'running' ELSE 'stopped' END");
+  } else if (!lineCols.has('slots')) {
+    db.exec('ALTER TABLE line ADD COLUMN slots INTEGER NOT NULL DEFAULT 5');
   }
 
   // v3.5.0：下一个要生产的机种（排产）。pending_model_id 是"正在切"，这个是"排好了还没切"。
@@ -256,6 +314,9 @@ function migrate() {
   // 提前建会直接抛 "no such column"，库都打不开。
   db.exec('CREATE INDEX IF NOT EXISTS idx_item_ms ON item(model_id, station_id, ord)');
   db.exec('CREATE INDEX IF NOT EXISTS idx_item_media ON item(media_id)');
+
+  // 最后一步：3.x → 4.0.0，工位层整个消失，工序归到机种。
+  migrateToModelProcess();
 }
 
 /**
@@ -684,8 +745,8 @@ function ensureDefaultLine() {
   if (hit) return hit;
   const id = uid('ln');
   q.run(
-    'INSERT INTO line(id,code,name,enabled,sort,created_at) VALUES(?,?,?,?,?,?)',
-    id, 'L1', '一线', 1, 10, now()
+    'INSERT INTO line(id,code,name,enabled,status,slots,sort,created_at) VALUES(?,?,?,?,?,?,?,?)',
+    id, 'L1', '一线', 1, 'running', 5, 10, now()
   );
   return q.get('SELECT * FROM line WHERE id = ?', id);
 }
@@ -720,6 +781,179 @@ function rebuildProcessWithLine(lineId) {
     db.exec('PRAGMA foreign_keys = ON');
   }
   console.log('[db] process 表已重建：工序归属线体');
+}
+/**
+ * v4.0.0 迁移：工位层整个消失，工序（= 一块屏的内容槽位）直接归机种。
+ *
+ * 为什么砍掉工位表：工位原本是「机种 × 线体 × 工序码」的三元组，存在的理由是
+ * 同一机种在一线和二线的工艺可以不同。现场实际不是这样 —— 工艺是跟着产品走的，
+ * 一条机种就一套工序，多条线做同一个产品时工艺相同。于是"每线一套工位"变成
+ * 纯粹的管理负担：新建线体要长出 N×M 个空壳，改一道工序要改所有线的同码工位。
+ *
+ * 新的关系：
+ *   model  --(model_line)--  line        这个机种能在哪几条线做
+ *   model  --(process)----   工序 OP1/OP2…  这个机种有几道工序、各叫什么
+ *   process --(item)------   每道工序播什么
+ * 终端要内容时按：线 → 当前机种 → 该机种的工序（按 op 码）→ 清单。
+ *
+ * 合并规则（同机种同码在多条线都有工位时）：
+ *   工序名 / 排序 / 体积上限 / 说明 取**排序最靠前的线**那一份；
+ *   要求按 kind 取最大值；内容按 ord 顺序拼接，同一份文件重复的只留一条。
+ *   被丢掉的条数会打日志 —— 这是不可逆的，用户升级前有整库备份兜底。
+ *
+ * 老库升级前 openDb 会先把 vwi.db 复制一份 .pre4.bak，回滚时换回去即可。
+ */
+function migrateToModelProcess() {
+  const colsOf = (t) => new Set(q.all(`PRAGMA table_info(${t})`).map((r) => r.name));
+  if (colsOf('process').has('model_id')) return;
+
+  const hasStation = colsOf('station').size > 0 && colsOf('station').has('id');
+  const t = now();
+  let merged = 0;   // 被合并掉的（机种, 工序码）组合数
+  let dropped = 0;  // 跨线重复内容丢掉条数
+
+  db.exec('PRAGMA foreign_keys = OFF');
+  try {
+    db.exec('BEGIN');
+
+    db.exec(`CREATE TABLE process_v4 (
+      id            TEXT PRIMARY KEY,
+      model_id      TEXT NOT NULL REFERENCES model(id) ON DELETE CASCADE,
+      code          TEXT NOT NULL,
+      name          TEXT NOT NULL,
+      sort          INTEGER NOT NULL DEFAULT 0,
+      max_mb        INTEGER NOT NULL DEFAULT 0,
+      note          TEXT NOT NULL DEFAULT '',
+      play_mode     TEXT NOT NULL DEFAULT 'loop',
+      import_batch  TEXT NOT NULL DEFAULT '',
+      created_at    INTEGER NOT NULL,
+      UNIQUE(model_id, code)
+    )`);
+    db.exec(`CREATE TABLE process_req_v4 (
+      id          TEXT PRIMARY KEY,
+      process_id  TEXT NOT NULL REFERENCES process_v4(id) ON DELETE CASCADE,
+      kind        TEXT NOT NULL,
+      min_count   INTEGER NOT NULL DEFAULT 0,
+      min_width   INTEGER NOT NULL DEFAULT 0,
+      min_height  INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(process_id, kind)
+    )`);
+    db.exec(`CREATE TABLE item_v4 (
+      id          TEXT PRIMARY KEY,
+      model_id    TEXT NOT NULL REFERENCES model(id) ON DELETE CASCADE,
+      process_id  TEXT NOT NULL REFERENCES process_v4(id) ON DELETE CASCADE,
+      ord         INTEGER NOT NULL DEFAULT 0,
+      kind        TEXT NOT NULL,
+      media_id    TEXT NOT NULL REFERENCES media(id),
+      dwell_sec   INTEGER NOT NULL DEFAULT 10,
+      fit         TEXT NOT NULL DEFAULT 'contain',
+      zoom        INTEGER NOT NULL DEFAULT 100,
+      UNIQUE(model_id, process_id, media_id)
+    )`);
+
+    // 1) 工位 → 工序（每个「机种 × 工序码」一条）
+    const pMap = new Map();
+    if (hasStation) {
+      const rows = q.all(`
+        SELECT s.*, COALESCE(l.sort, 0) lsort
+          FROM station s LEFT JOIN line l ON l.id = s.line_id
+         ORDER BY s.model_id, s.code, COALESCE(l.sort, 0), s.id
+      `);
+      for (const s of rows) {
+        const key = `${s.model_id}|${s.code}`;
+        if (pMap.has(key)) { merged += 1; continue; }
+        const pid = uid('pr');
+        q.run(
+          `INSERT INTO process_v4(id,model_id,code,name,sort,max_mb,note,play_mode,import_batch,created_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?)`,
+          pid, s.model_id, s.code, s.name, s.sort || 0, s.max_mb || 0,
+          s.note || '', 'loop', s.import_batch || '', s.created_at || t
+        );
+        pMap.set(key, pid);
+      }
+    }
+
+    // 2) 工位要求 → 工序要求（同 kind 取最大，宁严不松）
+    if (hasStation) {
+      for (const r of q.all(`SELECT r.*, s.model_id, s.code
+                               FROM station_req r JOIN station s ON s.id = r.station_id`)) {
+        const pid = pMap.get(`${r.model_id}|${r.code}`);
+        if (!pid) continue;
+        const ex = q.get('SELECT * FROM process_req_v4 WHERE process_id = ? AND kind = ?', pid, r.kind);
+        if (!ex) {
+          q.run(
+            'INSERT INTO process_req_v4(id,process_id,kind,min_count,min_width,min_height) VALUES(?,?,?,?,?,?)',
+            uid('sr'), pid, r.kind, r.min_count, r.min_width, r.min_height
+          );
+        } else {
+          q.run(
+            'UPDATE process_req_v4 SET min_count = MAX(min_count,?), min_width = MAX(min_width,?), min_height = MAX(min_height,?) WHERE id = ?',
+            r.min_count, r.min_width, r.min_height, ex.id
+          );
+        }
+      }
+    }
+
+    // 3) 内容 → item_v4。ord 重新连续编号：跨线合并后不能出现 0,1,0,1 这种。
+    const cnt = new Map();
+    if (hasStation) {
+      const items = q.all(`
+        SELECT i.*, s.model_id, s.code, COALESCE(l.sort, 0) lsort
+          FROM item i
+          JOIN station s ON s.id = i.station_id
+          LEFT JOIN line l ON l.id = s.line_id
+         ORDER BY s.model_id, s.code, COALESCE(l.sort, 0), i.ord, i.id
+      `);
+      for (const it of items) {
+        const pid = pMap.get(`${it.model_id}|${it.code}`);
+        if (!pid) continue;
+        if (q.get('SELECT id FROM item_v4 WHERE process_id = ? AND media_id = ?', pid, it.media_id)) {
+          dropped += 1;
+          continue;
+        }
+        const n = cnt.get(pid) || 0;
+        cnt.set(pid, n + 1);
+        q.run(
+          `INSERT INTO item_v4(id,model_id,process_id,ord,kind,media_id,dwell_sec,fit,zoom)
+           VALUES(?,?,?,?,?,?,?,?,?)`,
+          it.id, it.model_id, pid, n, it.kind, it.media_id,
+          it.dwell_sec || 10, it.fit || 'contain', it.zoom || 100
+        );
+      }
+    }
+
+    // 4) 可生产机种：机种在哪些线上有工位，就是它能在哪些线上做
+    if (hasStation && q.get('SELECT COUNT(*) n FROM station').n > 0) {
+      db.exec(`INSERT OR IGNORE INTO model_line(model_id, line_id, sort)
+               SELECT model_id, line_id, 0 FROM station GROUP BY model_id, line_id`);
+      // 老库没有"工位数"这一列，按这条线原来有几块屏（去重后的工序码数）回填
+      db.exec(`UPDATE line SET slots = MAX(1,
+                 (SELECT COUNT(DISTINCT code) FROM station WHERE line_id = line.id))`);
+    }
+
+    // 5) 换表。老表整个丢掉 —— 迁移前 openDb 已复制过整库备份
+    db.exec('DROP TABLE IF EXISTS item');
+    db.exec('DROP TABLE IF EXISTS station_req');
+    db.exec('DROP TABLE IF EXISTS station');
+    db.exec('DROP TABLE IF EXISTS process');
+    db.exec('ALTER TABLE process_v4 RENAME TO process');
+    db.exec('ALTER TABLE process_req_v4 RENAME TO process_req');
+    db.exec('ALTER TABLE item_v4 RENAME TO item');
+
+    db.exec('CREATE INDEX IF NOT EXISTS idx_process_model ON process(model_id, sort, code)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_item_ps ON item(model_id, process_id, ord)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_item_media ON item(media_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_station_batch ON process(import_batch)');
+
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* 已经回滚过 */ }
+    db.exec('PRAGMA foreign_keys = ON');
+    throw e;
+  }
+  db.exec('PRAGMA foreign_keys = ON');
+
+  console.log(`[db] 已升级到 4.0.0：工位并入工序（合并 ${merged} 个跨线工位，去重 ${dropped} 条内容）`);
 }
 
 /** 老的全局换型状态（setting 里的 current_model_id / seq / pending_*）搬进默认线体。 */
@@ -863,156 +1097,45 @@ export function lineByCode(code) {
   return q.get('SELECT * FROM line WHERE code = ?', String(code || '').trim()) || null;
 }
 
-/** 启用某条线体：同时把别的线体停用（否则终端不知道该听谁的）。 */
-export function processesOf(lineId) {
-  return q.all('SELECT * FROM process WHERE line_id = ? ORDER BY sort, code', String(lineId || ''));
-}
-
-// ---------- 种子数据 ----------
-// 10 个型号、5 道工序，全部为空清单 —— 完成度从 0/50 开始，等工程部填。
-// 型号与工序名都是占位：型号可在界面改名/停用，工序名可改。
-export const SEED_MODELS = [
-  ['X200', 'X200 型'], ['X210', 'X210 型'], ['X220', 'X220 型'], ['X230', 'X230 型'],
-  ['X240', 'X240 型'], ['X250', 'X250 型'], ['X260', 'X260 型'], ['X270', 'X270 型'],
-  ['X280', 'X280 型'], ['X290', 'X290 型']
-];
-
-export const SEED_PROCESSES = [
-  ['OP10', '上料'],
-  ['OP20', '装配'],
-  ['OP30', '调试'],
-  ['OP40', '检验'],
-  ['OP50', '包装']
-];
-
-/**
- * 新建线体时照着标准 5 道工序复制一份。
- * 为什么要复制而不是共用：一线和二线的 OP30 是两块屏、两份内容，
- * 共用一套就变成"改了二线，一线也跟着变"，正是这次要避免的事。
- */
-export function cloneStandardProcesses(lineId) {
-  const t = now();
-  SEED_PROCESSES.forEach(([code, name], i) => {
-    q.run('INSERT INTO process(id,line_id,code,name,sort,created_at) VALUES(?,?,?,?,?,?)',
-      uid('pr'), lineId, code, name, i * 10 + 10, t);
-  });
-  return SEED_PROCESSES.length;
-}
-
-export function seed() {
-  const dft = q.get('SELECT * FROM line ORDER BY sort, code LIMIT 1');
-  if (!dft) return { created: false };
-
-  const hasProc = q.get('SELECT id FROM process LIMIT 1');
-  const hasModel = q.get('SELECT id FROM model LIMIT 1');
-  if (hasProc && hasModel) return { created: false };
-
-  const t = now();
-  tx(() => {
-    if (!hasProc) {
-      SEED_PROCESSES.forEach(([code, name], i) => {
-        q.run('INSERT INTO process(id,line_id,code,name,sort,created_at) VALUES(?,?,?,?,?,?)',
-          uid('pr'), dft.id, code, name, i * 10 + 10, t);
-      });
-    }
-    if (!hasModel) {
-      SEED_MODELS.forEach(([code, name], i) => {
-        q.run('INSERT INTO model(id,code,name,enabled,sort,created_at) VALUES(?,?,?,?,?,?)',
-          uid('md'), code, name, 1, i, t);
-      });
-    }
-  });
-
-  return { created: true, models: hasModel ? 0 : SEED_MODELS.length, processes: hasProc ? 0 : SEED_PROCESSES.length };
-}
-
-// ---------- 完成度 ----------
-// 一套 = (机种 × 线体工序) 在机种工位里有至少一条内容。
-// 注意这里是「按线体工序数」算分母：线体有几块屏，这套机种就缺几块。
-// 同机种别的线体多出来的工位不算进来 —— 那属于别的线的活。
-//
-// 返回 { total, done, byModel: {modelId: {done, total}}, byCell: {"modelId:processId": count} }
-export function coverage(lineId) {
-  const models = q.all('SELECT * FROM model ORDER BY sort, code');
-  const processes = processesOf(lineId);
-
-  // 一次取全「机种 × 工位码」的项数，避免每个格子查一次库。
-  // v3.0.0 起必须带 line_id：同一个机种在不同线体是两套工位，混着数会串台。
-  const counts = new Map(
-    q.all(`
-      SELECT s.model_id, s.code, COUNT(i.id) n
-        FROM station s LEFT JOIN item i ON i.station_id = s.id
-       WHERE s.line_id = ?
-       GROUP BY s.model_id, s.code
-    `, lineId).map((r) => [`${r.model_id}|${r.code}`, r.n])
-  );
-
-  const byModel = {};
-  const cells = {};
-  let done = 0;
-  for (const m of models) {
-    let d = 0;
-    for (const p of processes) {
-      const n = counts.get(`${m.id}|${p.code}`) || 0;
-      cells[`${m.id}:${p.id}`] = n;
-      if (n > 0) { d++; done++; }
-    }
-    byModel[m.id] = { done: d, total: processes.length };
-  }
-
-  return {
-    total: models.length * processes.length,
-    done,
-    byModel,
-    cells: Object.fromEntries(Object.entries(cells))
-  };
-}
-
-// ---------- 工位 ----------
+// ---------- 工序（v4.0.0：工序归机种，一道工序 = 一块屏的内容槽位）----------
 const KINDS_ORDER = ['image', 'video', 'pdf'];
+//
+// 4.0.0 起不再有「工位」这一层。工序就是内容的宿主：
+//   机种 X200 有 OP1 装配 / OP2 调试 / OP3 检验，这三道就是三块屏。
+//   终端按 ?line=&op= 找到「这条线当前机种」再取同码工序，路径只有一跳。
+//
+// 为什么不再按线分：工艺跟着产品走，同一机种在多条线上做的是同一套工序。
+// 以前每线一套工位，新建一条线要长出 机种数 × 工序数 个空壳，改一道工序要改所有线。
 
 /**
- * 某个机种在某条线体上的全部工位（含要求与内容），一次取完。
- * 机种数量是几十个量级、工位数是几个，逐个查库反而更慢。
- *
- * `lineId` 省略时返回该机种**所有线体**的工位（每条都带 lineId），
- * 只给"要不要跨线看"的场景用；界面上一律按线取。
+ * 某个机种的全部工序，含要求与已上传内容。工序数在几十以内，三次查询足够。
+ * 返回的字段名和 3.x 的 stationsOf 对齐（code/name/reqs/items），前端不必两套代码。
  */
-export function stationsOf(modelId, lineId) {
+export function processesOf(modelId) {
   const mid = String(modelId || '');
-  const lid = String(lineId || '');
-  const rows = lid
-    ? q.all('SELECT * FROM station WHERE model_id = ? AND line_id = ? ORDER BY sort, code', mid, lid)
-    : q.all('SELECT * FROM station WHERE model_id = ? ORDER BY line_id, sort, code', mid);
+  const rows = q.all('SELECT * FROM process WHERE model_id = ? ORDER BY sort, code', mid);
   if (!rows.length) return [];
 
-  const byStation = new Map(rows.map((s) => [s.id, { reqs: [], items: [] }]));
+  const byId = new Map(rows.map((p) => [p.id, { reqs: [], items: [] }]));
 
-  const reqRows = lid
-    ? q.all(`SELECT r.* FROM station_req r JOIN station s ON s.id = r.station_id
-              WHERE s.model_id = ? AND s.line_id = ?`, mid, lid)
-    : q.all(`SELECT r.* FROM station_req r JOIN station s ON s.id = r.station_id
-              WHERE s.model_id = ?`, mid);
-  for (const r of reqRows) {
-    const box = byStation.get(r.station_id);
+  for (const r of q.all(
+    `SELECT r.* FROM process_req r JOIN process p ON p.id = r.process_id WHERE p.model_id = ?`, mid
+  )) {
+    const box = byId.get(r.process_id);
     if (box) box.reqs.push({
       kind: r.kind, minCount: r.min_count, minWidth: r.min_width, minHeight: r.min_height
     });
   }
 
-  const itemRows = lid
-    ? q.all(`SELECT i.*, m.name mname, m.bytes, m.width, m.height, m.duration_ms, m.ext, m.mime
-               FROM item i JOIN media m ON m.id = i.media_id
-               JOIN station s ON s.id = i.station_id
-              WHERE s.model_id = ? AND s.line_id = ?
-              ORDER BY i.ord, i.id`, mid, lid)
-    : q.all(`SELECT i.*, m.name mname, m.bytes, m.width, m.height, m.duration_ms, m.ext, m.mime
-               FROM item i JOIN media m ON m.id = i.media_id
-               JOIN station s ON s.id = i.station_id
-              WHERE s.model_id = ?
-              ORDER BY i.ord, i.id`, mid);
-  for (const i of itemRows) {
-    const box = byStation.get(i.station_id);
+  for (const i of q.all(
+    `SELECT i.*, m.name mname, m.bytes, m.width, m.height, m.duration_ms, m.ext, m.mime
+       FROM item i
+       JOIN media m ON m.id = i.media_id
+       JOIN process p ON p.id = i.process_id
+      WHERE p.model_id = ?
+      ORDER BY i.ord, i.id`, mid
+  )) {
+    const box = byId.get(i.process_id);
     if (!box) continue;
     box.items.push({
       id: i.id,
@@ -1032,74 +1155,83 @@ export function stationsOf(modelId, lineId) {
     });
   }
 
-  return rows.map((s) => ({
-    id: s.id,
-    modelId: s.model_id,
-    lineId: s.line_id,
-    code: s.code,
-    name: s.name,
-    sort: s.sort,
-    maxMb: s.max_mb,
-    note: s.note,
-    reqs: byStation.get(s.id).reqs.sort(
+  return rows.map((p) => ({
+    id: p.id,
+    modelId: p.model_id,
+    code: p.code,
+    name: p.name,
+    sort: p.sort,
+    maxMb: p.max_mb,
+    note: p.note,
+    // loop = 播完从头再来（默认）；once = 播完停在最后一屏
+    playMode: p.play_mode === 'once' ? 'once' : 'loop',
+    reqs: byId.get(p.id).reqs.sort(
       (a, b) => KINDS_ORDER.indexOf(a.kind) - KINDS_ORDER.indexOf(b.kind)
     ),
-    items: byStation.get(s.id).items
+    items: byId.get(p.id).items
   }));
 }
 
-export function stationById(id) {
-  return q.get('SELECT * FROM station WHERE id = ?', String(id || '')) || null;
+export function processById(id) {
+  return q.get('SELECT * FROM process WHERE id = ?', String(id || '')) || null;
+}
+
+/** 机种 × 工序码，终端取内容就靠这一个查询。 */
+export function processByCode(modelId, code) {
+  return q.get('SELECT * FROM process WHERE model_id = ? AND code = ?',
+    String(modelId || ''), String(code || '')) || null;
 }
 
 /**
- * 整份替换某个工位的要求与内容。
- * 和播放清单一样走"整批覆盖"：逐条增删会留下"删了第 3 条、第 4 条序号要不要重排"
- * 的中间态，整批覆盖没有中间态，也不会出现半套内容被终端读到。
+ * 整份替换一道工序的元信息、类型要求与内容清单。
+ * 五块各判 `!== undefined`：界面分「改名字」「改要求」「改内容」三次发，互不覆盖。
  */
-export function saveStation(modelId, stationId, { name, maxMb, note, reqs, items }) {
+export function saveProcess(modelId, processId, { name, maxMb, note, playMode, reqs, items }) {
   tx(() => {
-    const st = q.get('SELECT * FROM station WHERE id = ? AND model_id = ?', stationId, modelId);
-    if (!st) throw Object.assign(new Error('工位不存在'), { status: 400 });
+    const p = q.get('SELECT * FROM process WHERE id = ? AND model_id = ?', processId, modelId);
+    if (!p) throw Object.assign(new Error('工序不存在'), { status: 400 });
 
-    if (name !== undefined) q.run('UPDATE station SET name = ? WHERE id = ?', str(name, 40) || st.name, st.id);
-    if (maxMb !== undefined) q.run('UPDATE station SET max_mb = ? WHERE id = ?', int(maxMb, 0), st.id);
-    if (note !== undefined) q.run('UPDATE station SET note = ? WHERE id = ?', str(note, 200), st.id);
+    if (name !== undefined) q.run('UPDATE process SET name = ? WHERE id = ?', str(name, 40) || p.code, p.id);
+    if (maxMb !== undefined) q.run('UPDATE process SET max_mb = ? WHERE id = ?', int(maxMb, 0), p.id);
+    if (note !== undefined) q.run('UPDATE process SET note = ? WHERE id = ?', str(note, 200), p.id);
+    if (playMode !== undefined) {
+      q.run('UPDATE process SET play_mode = ? WHERE id = ?',
+        playMode === 'once' ? 'once' : 'loop', p.id);
+    }
 
     if (Array.isArray(reqs)) {
-      q.run('DELETE FROM station_req WHERE station_id = ?', st.id);
+      q.run('DELETE FROM process_req WHERE process_id = ?', p.id);
       for (const r of reqs) {
         if (!KINDS.includes(r.kind)) continue;
         q.run(
-          'INSERT OR IGNORE INTO station_req(id,station_id,kind,min_count,min_width,min_height) VALUES(?,?,?,?,?,?)',
-          uid('sr'), st.id, r.kind, int(r.minCount, 0), int(r.minWidth, 0), int(r.minHeight, 0)
+          'INSERT OR IGNORE INTO process_req(id,process_id,kind,min_count,min_width,min_height) VALUES(?,?,?,?,?,?)',
+          uid('sr'), p.id, r.kind, int(r.minCount, 0), int(r.minWidth, 0), int(r.minHeight, 0)
         );
       }
     }
 
     if (Array.isArray(items)) {
-      // 两道闸都在这里，两个入口（/api/stations/:id 和兼容的 /api/playlist）都受同一套约束：
-      // 没有要求行 = 这个工位不接受这类文件；超过单文件上限也拒。
-      // 空 reqs 表示"还没配要求"，此时不锁类型，否则升级上来的老工位会传不进东西。
-      const allowed = q.all('SELECT kind FROM station_req WHERE station_id = ?', st.id).map((r) => r.kind);
-      const limit = st.max_mb;
+      // 两道闸：没有要求行 = 这道工序不接受这类文件；超过单文件上限也拒。
+      // 空 reqs 表示"还没配要求"，此时不锁类型，否则升级上来的老工序传不进东西。
+      const allowed = q.all('SELECT kind FROM process_req WHERE process_id = ?', p.id).map((r) => r.kind);
+      const limit = p.max_mb;
 
-      q.run('DELETE FROM item WHERE model_id = ? AND station_id = ?', modelId, st.id);
+      q.run('DELETE FROM item WHERE model_id = ? AND process_id = ?', modelId, p.id);
       items.forEach((it, i) => {
         const mediaId = String(it.mediaId || '');
         const m = q.get('SELECT * FROM media WHERE id = ?', mediaId);
         if (!m) throw Object.assign(new Error(`内容里有不存在的文件（${mediaId}）`), { status: 400 });
         if (allowed.length && !allowed.includes(m.kind)) {
           const cn = m.kind === 'video' ? '视频' : m.kind === 'pdf' ? ' PDF' : '图片';
-          throw Object.assign(new Error(`这个工位不允许放${cn}：${m.name}`), { status: 400 });
+          throw Object.assign(new Error(`这道工序不允许放${cn}：${m.name}`), { status: 400 });
         }
         if (limit > 0 && m.bytes > limit * 1024 * 1024) {
           throw Object.assign(new Error(`文件超过 ${limit} MB：${m.name}`), { status: 400 });
         }
         q.run(
-          `INSERT OR IGNORE INTO item(id,model_id,station_id,ord,kind,media_id,dwell_sec,fit,zoom)
+          `INSERT OR IGNORE INTO item(id,model_id,process_id,ord,kind,media_id,dwell_sec,fit,zoom)
            VALUES(?,?,?,?,?,?,?,?,?)`,
-          uid('it'), modelId, st.id, i, m.kind, mediaId,
+          uid('it'), modelId, p.id, i, m.kind, mediaId,
           Math.min(120, Math.max(1, int(it.dwellSec, 10))),
           it.fit === 'cover' ? 'cover' : 'contain',
           Math.min(200, Math.max(50, int(it.zoom, 100)))
@@ -1107,6 +1239,147 @@ export function saveStation(modelId, stationId, { name, maxMb, note, reqs, items
       });
     }
   });
+}
+
+// ---------- 可生产机种（机种 × 线体）----------
+export function modelLines(modelId) {
+  return q.all(
+    `SELECT l.* FROM model_line ml JOIN line l ON l.id = ml.line_id
+      WHERE ml.model_id = ? ORDER BY l.sort, l.code`, String(modelId || '')
+  );
+}
+
+/** 整批覆盖：传进来的线体就是全部，没传的取消关联。 */
+export function setModelLines(modelId, lineIds) {
+  const ids = [...new Set((lineIds || []).map((x) => String(x)).filter(Boolean))];
+  tx(() => {
+    q.run('DELETE FROM model_line WHERE model_id = ?', modelId);
+    ids.forEach((lid, i) => {
+      if (!q.get('SELECT id FROM line WHERE id = ?', lid)) return;
+      q.run('INSERT OR IGNORE INTO model_line(model_id, line_id, sort) VALUES(?,?,?)', modelId, lid, i);
+    });
+  });
+  return modelLines(modelId);
+}
+
+/** 这条线能生产哪些机种 —— 线体表格里的「可生产机种」就是它的数量。 */
+export function modelsOfLine(lineId) {
+  return q.all(
+    `SELECT m.* FROM model_line ml JOIN model m ON m.id = ml.model_id
+      WHERE ml.line_id = ? ORDER BY m.sort, m.code`, String(lineId || '')
+  );
+}
+
+// ---------- 种子数据 ----------
+// 10 个型号、5 道工序，全部为空清单 —— 完成度从 0/50 开始，等工程部填。
+// 型号与工序名都是占位：型号可在界面改名/停用，工序名可改。
+export const SEED_MODELS = [
+  ['X200', 'X200 型'], ['X210', 'X210 型'], ['X220', 'X220 型'], ['X230', 'X230 型'],
+  ['X240', 'X240 型'], ['X250', 'X250 型'], ['X260', 'X260 型'], ['X270', 'X270 型'],
+  ['X280', 'X280 型'], ['X290', 'X290 型']
+];
+
+// v4.0.0 起工序码从 OP1 起编：现场的屏是 1 号、2 号、3 号，不是 10、20、30。
+export const SEED_PROCESSES = [
+  ['OP1', '装配'],
+  ['OP2', '调试'],
+  ['OP3', '检验'],
+  ['OP4', '包装'],
+  ['OP5', '入库']
+];
+
+// 新机种的默认工序名：现场最常见的五道，超出部分用「工序6」兜底。
+// 用户明确要求建机种时就把名称填上（装配/调试/检验），建完还能在工序表里逐道改。
+export const DEFAULT_PROC_NAMES = ['装配', '调试', '检验', '包装', '入库'];
+
+/**
+ * 给机种铺 count 道工序（默认 OP1..OPn），名称取 DEFAULT_PROC_NAMES。
+ * 新建机种时弹窗里问"几道工序"，就是调这个。
+ */
+export function createDefaultProcesses(modelId, count = 5, names = []) {
+  const n = Math.min(60, Math.max(1, int(count, 5)));
+  const t = now();
+  let made = 0;
+  for (let i = 1; i <= n; i += 1) {
+    const code = `OP${i}`;
+    if (q.get('SELECT id FROM process WHERE model_id = ? AND code = ?', modelId, code)) continue;
+    const id = uid('pr');
+    q.run(
+      'INSERT INTO process(id,model_id,code,name,sort,max_mb,note,play_mode,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+      id, modelId, code, str(names[i - 1] || DEFAULT_PROC_NAMES[i - 1] || `工序${i}`, 40), i * 10, 20, '', 'loop', t
+    );
+    // 和界面上「+ 加工序」建出来的一致：默认允许图片、至少 1 张
+    q.run(
+      'INSERT OR IGNORE INTO process_req(id,process_id,kind,min_count,min_width,min_height) VALUES(?,?,?,?,?,?)',
+      uid('sr'), id, 'image', 1, 1280, 720
+    );
+    made += 1;
+  }
+  return made;
+}
+
+export function seed() {
+  // 只要已经有机种就不撒种子 —— 现场把自己的机种删空后不该又冒出十个 X2xx。
+  if (q.get('SELECT id FROM model LIMIT 1')) return { created: false };
+
+  const t = now();
+  const ids = [];
+  const dftLine = q.get('SELECT id FROM line ORDER BY sort, code LIMIT 1');
+  tx(() => {
+    SEED_MODELS.forEach(([code, name], i) => {
+      const id = uid('md');
+      ids.push(id);
+      q.run('INSERT INTO model(id,code,name,enabled,sort,created_at) VALUES(?,?,?,?,?,?)',
+        id, code, name, 1, i * 10, t);
+      // 种子机种默认安排在一线上，否则「可生产机种」全是 0，一进去就像没配好
+      if (dftLine) q.run('INSERT OR IGNORE INTO model_line(model_id,line_id,sort) VALUES(?,?,?)', id, dftLine.id, i);
+    });
+  });
+  // 建工序要在事务外：createDefaultProcesses 内部逐条写，套事务没必要但也不冲突，
+  // 这里分开只是保持"一个事务一件事"的习惯。
+  const names = SEED_PROCESSES.map(([, n]) => n);
+  for (const id of ids) createDefaultProcesses(id, SEED_PROCESSES.length, names);
+
+  return { created: true, models: ids.length, processes: SEED_PROCESSES.length };
+}
+
+// ---------- 完成度 ----------
+// 一套 = (机种 × 工序) 里至少有一条内容。分母 = 全部机种的工序数之和。
+//
+// 返回 { total, done, byModel: {modelId: {done, total}}, cells: {"modelId:processId": count} }
+export function coverage() {
+  const models = q.all('SELECT * FROM model ORDER BY sort, code');
+
+  const counts = new Map(
+    q.all(`
+      SELECT p.model_id, p.code, COUNT(i.id) n
+        FROM process p LEFT JOIN item i ON i.process_id = p.id
+       GROUP BY p.model_id, p.code
+    `).map((r) => [`${r.model_id}|${r.code}`, r.n])
+  );
+  const procsOf = new Map();
+  for (const p of q.all('SELECT id, model_id, code, sort FROM process ORDER BY model_id, sort, code')) {
+    if (!procsOf.has(p.model_id)) procsOf.set(p.model_id, []);
+    procsOf.get(p.model_id).push(p);
+  }
+
+  const byModel = {};
+  const cells = {};
+  let done = 0;
+  let total = 0;
+  for (const m of models) {
+    const list = procsOf.get(m.id) || [];
+    let d = 0;
+    for (const p of list) {
+      const n = counts.get(`${m.id}|${p.code}`) || 0;
+      cells[`${m.id}:${p.id}`] = n;
+      if (n > 0) { d++; done++; }
+    }
+    byModel[m.id] = { done: d, total: list.length };
+    total += list.length;
+  }
+
+  return { total, done, byModel, cells };
 }
 
 // ---------- 通用 ----------

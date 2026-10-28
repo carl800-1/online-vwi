@@ -109,7 +109,7 @@
     <header class="topbar">
       <h1 id="viewTitle">作业内容</h1>
       <div class="topbar-right">
-        <span class="top-stats" id="topStats">—</span>
+        <span class="top-stats" id="topStats"></span>
         <button class="btn sm" id="refreshBtn">刷新</button>
       </div>
     </header>
@@ -176,7 +176,7 @@
         <div class="card">
           <div class="card-head">
             <h2>线体</h2>
-            <span class="sub">一条线体 = 一条物理产线。状态设成「运行中」终端才会读它，多条线可以同时运行。</span>
+            <span class="sub">一条线体 = 一条物理产线。状态是「运行」时终端才读它，多条线可以同时运行。</span>
             <div class="spacer"></div>
             <button class="btn sm primary" id="lnNewBtn">+ 新建线体</button>
           </div>
@@ -184,45 +184,11 @@
             <table class="data-table" id="lineTable">
               <thead>
                 <tr>
-                  <th style="width:118px">状态</th>
-                  <th style="width:110px">编码</th>
-                  <th>名称</th>
-                  <th style="width:90px">工序数</th>
-                  <th style="width:110px">内容覆盖</th>
-                  <th style="width:130px">当前机种</th>
-                  <th style="width:86px">在线</th>
-                  <th style="width:170px">操作</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <p class="foot-hint">
-            状态选「运行中」= 这条线今天在跑。改成停用 / 维修中 / 保养中，这条线的终端会连不上、屏上内容停在最后一屏（不会变空白）；
-            从运行中改走会先问一句。<b>多条线可以同时运行</b>，互不影响 —— 现场每条线有自己的终端。
-            内容不挂在线体上：播什么由「机种设置」里的同码工位决定，所以改线体不会丢内容。
-          </p>
-        </div>
-
-        <div class="card">
-          <div class="card-head">
-            <h2>工序（这块线体上有几块屏）</h2>
-            <span class="sub" id="procSub">在上表点「工序」选一条线</span>
-            <div class="spacer"></div>
-            <label class="inl" id="procLinePickWrap">
-              线体
-              <select id="procLinePick"></select>
-            </label>
-            <button class="btn sm" id="procAddBtn" title="可一次贴多行，批量建">+ 批量加工序</button>
-          </div>
-          <div class="table-wrap">
-            <table class="data-table" id="procTable">
-              <thead>
-                <tr>
-                  <th style="width:90px">顺序</th>
-                  <th style="width:130px">工序码</th>
-                  <th>名称</th>
-                  <th style="width:150px">已配内容的机种数</th>
+                  <th>线体名称</th>
+                  <th style="width:96px">工位数</th>
+                  <th style="width:150px">可生产机种</th>
+                  <th style="width:216px">线体状态</th>
+                  <th style="width:76px">在线</th>
                   <th style="width:150px">操作</th>
                 </tr>
               </thead>
@@ -230,8 +196,11 @@
             </table>
           </div>
           <p class="foot-hint">
-            工序码要和机种里的工位码对得上（OP10 ↔ OP10），那块屏才拉得到内容。
-            不放心就点机种设置里的「同步工序到线体」，按那个机种的工位一次补齐。
+            状态点一下就知道：<b>运行</b> 正在生产 ／ <b>停线</b> 今天不开 ／ <b>维修</b> 设备故障 ／ <b>保养</b> 计划维护。
+            后三种终端都读不到内容，屏上停在最后一屏（不会变空白）；从「运行」改走会先问一句。
+            <b>可生产机种</b>是自动统计的：在「机种设置」里勾了这条线的机种有几个。
+            <b>工位数</b>是这条线实际有几块屏，只做参考 —— 一个机种几道工序在机种设置里定，工序数别超过工位数。
+            内容和线体无关，改线体不会丢任何文件。
           </p>
         </div>
       </div>
@@ -239,98 +208,79 @@
       <!-- ========== 机种设置：机种 → 工位 → 文件 ==========
            内容在这里录。同一机种同一工位全厂只有一份，
            一线二线播的是同一套，换线不用重传。 -->
+      <!-- ========== 机种设置：上 = 机种清单，下 = 这个机种的工序 ==========
+           工序就是"一块屏"，归机种所有：一个机种一套工艺，几条线做同一个产品时共用。
+           所以这一页只看机种，不选线体 —— 能在哪几条线上做，是机种的属性。 -->
       <div class="view hide" id="view-models">
-        <div class="split split-list">
-          <aside class="col-list">
-            <div class="param-head">
-              <strong>机种</strong>
-              <div class="spacer"></div>
-              <button class="iconbtn" id="mdNewBtn" title="新建机种">+</button>
-            </div>
-            <input type="search" id="mdSearch" class="mini-search" placeholder="搜索编码或名称">
-            <div class="md-list" id="mdList"></div>
-          </aside>
+        <div class="card">
+          <div class="card-head">
+            <h2>机种</h2>
+            <span class="sub" id="mdSub">选中一个机种，下面设它的工序</span>
+            <div class="spacer"></div>
+            <input type="search" id="mdSearch" class="mini-search" placeholder="搜索机种">
+            <button class="btn sm primary" id="mdNewBtn">+ 新建机种</button>
+          </div>
+          <div class="md-chips" id="mdList"></div>
+        </div>
 
-          <div class="col-main">
-            <div class="card">
-              <div class="card-head">
-                <h2 id="mdTitle">机种设置</h2>
-                <span class="sub" id="mdSub">左边选一个机种</span>
-                <div class="spacer"></div>
-                <button class="btn sm" id="mdRenameBtn">改编码/名称</button>
-                <button class="btn sm" id="mdSyncBtn">按本线工序补齐</button>
-                <button class="btn sm danger" id="mdDelBtn">删除机种</button>
-              </div>
+        <div class="card">
+          <div class="card-head">
+            <h3>工序设定</h3>
+            <span class="sub" id="stTableSub">—</span>
+            <div class="spacer"></div>
+            <input type="search" id="stTableSearch" class="mini-search st-head" placeholder="找工序">
+            <button class="btn sm" id="stImportBtn" title="从 Excel / CSV 导入工序清单（先逐行判定，确认了才写库）">导入</button>
+            <button class="btn sm" id="stExportBtn" title="导出工序清单：全厂一张表（机种 / 工序码 / 名称 / 做什么），改完能整份导回">导出</button>
+            <button class="btn sm" id="stTplBtn" title="下载导入模板：标题行 + 两行示例，说明在第二页">模板</button>
+            <button class="btn sm" id="stAddBtn" title="可一次贴多行，批量建">+ 批量加工序</button>
+          </div>
 
-              <!-- 线体选择：同一个机种在不同线体的工艺路线可以完全不同，
-                   所以工位必须先定线体再看。顺序是「先机种（左列表）→ 再线体（这里）」。 -->
-              <div class="line-pick" id="mdLines"></div>
+          <!-- 机种信息条：编码、可生产线体、以及只有选中机种才出现的三个操作 -->
+          <div class="md-meta" id="mdMeta"></div>
 
-              <div class="md-summary" id="mdSummary"></div>
-            </div>
-
-            <!-- 工序清单：只回答"这个机种在这条线上有哪些工序、各是干什么的"。
-                 内容（图片/视频/PDF）不在这里放——去「媒体库」按工序配。
-                 25 道工序用表格而不是卡片：一行 34px，25 行 850px，表头固定、表内滚动，
-                 页面高度不随工序数增长，且「内容」列一眼看出哪几道还没配。 -->
-            <div class="card">
-              <div class="card-head">
-                <h3>工序清单</h3>
-                <span class="sub" id="stTableSub">—</span>
-                <div class="spacer"></div>
-                <input type="search" id="stTableSearch" class="mini-search st-head" placeholder="找工序">
-                <button class="btn sm" id="stImportBtn" title="从 Excel / CSV 导入工序清单（先逐行判定，确认了才写库）">导入</button>
-                <button class="btn sm" id="stExportBtn" title="导出工序清单：全厂一张表（机种 / 线体 / 工序码 / 名称 / 做什么），改完能整份导回">导出</button>
-                <button class="btn sm" id="stTplBtn" title="下载导入模板：标题行 + 两行示例，说明在第二页">模板</button>
-                <button class="btn sm" id="stAddBtn" title="可一次贴多行，批量建">+ 批量加工序</button>
-              </div>
-              <div class="table-wrap st-table-wrap">
-                <table class="data-table st-table">
-                  <thead>
-                    <tr>
-                      <th style="width:96px">工序码</th>
-                      <th style="width:150px">名称</th>
-                      <th>做什么</th>
-                      <th style="width:86px">内容</th>
-                      <th style="width:40px"></th>
-                    </tr>
-                  </thead>
-                  <tbody id="stTbody"></tbody>
-                </table>
-              </div>
-              <div class="st-table-foot">
-                点任意一格直接改，离开这一行自动保存。<b>「做什么」</b>写这道工序的作业要点，
-                会显示在终端顶栏。往工序里放文件请去<b>「媒体库」</b>。
-              </div>
-            </div>
+          <div class="table-wrap st-table-wrap">
+            <table class="data-table st-table">
+              <thead>
+                <tr>
+                  <th style="width:92px">工序码</th>
+                  <th style="width:130px">名称</th>
+                  <th>做什么</th>
+                  <th style="width:122px">播放方式</th>
+                  <th style="width:76px">内容</th>
+                  <th style="width:40px"></th>
+                </tr>
+              </thead>
+              <tbody id="stTbody"></tbody>
+            </table>
+          </div>
+          <div class="st-table-foot">
+            工序码默认 OP1、OP2…，终端上的工序号要和它一致（<code>?op=OP1</code>）。
+            点任意一格直接改，离开这一行自动保存。<b>「做什么」</b>写作业要点，会显示在终端顶栏。
+            往工序里放图片 / PDF / 视频请去<b>「媒体库」</b>。
           </div>
         </div>
       </div>
 
       <!-- ========== 媒体库 ========== -->
+      <!-- ========== 媒体库 ==========
+           两步：选机种 → 左边点工序（= 一块屏）→ 右边上传。
+           不再选线体：内容挂机种，同一条机种在几条线上播的都是这一套。 -->
       <div class="view hide" id="view-media">
-        <!-- 路径固定三步：先选机种 → 再选工位（左索引）→ 右边上传。
-             线体夹在机种和工位之间（同一机种在两条线的工序完全不同），
-             但只有一条线时不显示选择器，免得现场多点一次。 -->
         <div class="card">
           <div class="card-head">
             <h2>媒体库</h2>
-            <span class="sub" id="mediaSub">选机种 → 选工位 → 上传文件</span>
+            <span class="sub" id="mediaSub">选机种 → 选工序 → 上传文件</span>
             <div class="spacer"></div>
-            <button class="btn sm" id="mdCopyBtn">从其它线复制…</button>
-          </div>
-          <div class="media-pick">
             <label class="inl">机种
               <select id="mlModelPick"></select>
             </label>
-            <div class="line-pick" id="mlLines"></div>
           </div>
         </div>
 
         <div class="st-work">
           <aside class="st-index">
             <div class="si-head">
-              <strong>工位</strong>
+              <strong>工序</strong>
               <span class="si-count" id="stCount">0</span>
             </div>
             <div class="si-bar"><i id="stBar"></i></div>

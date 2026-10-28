@@ -33,11 +33,15 @@ export function resolveTerminal(req, ctx) {
   ctx.line = line;
 
   const op = String(ctx.query.op || req.headers['x-vwi-op'] || '').trim();
-  if (!op) return { status: 400, message: '缺少 op 参数（例如 ?op=OP30）' };
-
-  const proc = q.get('SELECT * FROM process WHERE line_id = ? AND code = ?', line.id, op);
-  if (!proc) return { status: 404, message: `工序 ${op} 不在「${line.name}」上，请检查终端配置` };
-  ctx.process = proc;
+  if (!op) return { status: 400, message: '缺少 op 参数（例如 ?op=OP1）' };
+  // v4.0.0 起工序归机种，线体不再拥有工序清单 —— 这里只校验格式，
+  // "这条线当前的机种有没有这道工序"由 display 接口回答（返回 noStation + message）。
+  // 不在这里 404：op 打错一小时才会发现，而 404 在终端上表现为"连不上服务器"，
+  // 现场会去查网络，方向全错。
+  if (!/^[A-Za-z0-9._-]{1,16}$/.test(op)) {
+    return { status: 400, message: `工序码 ${op} 不合法，只能是字母、数字、点、下划线、横线` };
+  }
+  ctx.process = { code: op, name: '' };
   return null;
 }
 

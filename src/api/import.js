@@ -8,10 +8,10 @@
 // 「做什么」调到第二列 —— 按位置读的话整表错位，而表头名是稳的。
 // 认不出表头（纯三列、没有标题行）才退回按位置读，老文件照样能导。
 //
-// 全厂一张表：导出的是「机种 | 线体 | 工序码 | 名称 | 做什么」，
-// 文件里带机种/线体两列就按行分流到各自机种线体；没有这两列才退回
-// 「导到界面当前选中的机种 + 线体」—— 老的三列文件不用改也能导。
-import { q, tx, ensureStation } from '../db.js';
+// v4.0.0：工序归机种，表里不再有「线体」列。带机种列就按行分流到各自机种，
+// 没有机种列才退回「导到界面当前选中的机种」—— 老的带线体列的文件也能导，
+// 线体列会被识别出来并忽略，不会因为多一列就整表错位。
+import { q, tx } from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
 import { notifyContentChanged } from '../switch.js';
 import { now, str, uid } from '../util.js';
@@ -27,6 +27,8 @@ const CODE_RE = /^[\w\u4e00-\u9fa5][\w\u4e00-\u9fa5.-]{0,15}$/;
  *
  * 刻意**不收**「序号」「行号」：那是 Excel 自己的行序号，收进来当工序码
  * 就是灾难（一表工序码变成 1、2、3）。不收，它自然被忽略。
+ *
+ * 「线体」仍然认（为了不让多出来的列把表头顶乱），但映射成 ignore，读到了也不写库。
  */
 const ALIAS = {
   model: ['机种', '机种名称', '机种编码', '机种代号', '机型', '产品', '产品名称', 'model'],
@@ -70,7 +72,7 @@ function findHeader(rows) {
   return best && best.n >= 2 ? best : null;
 }
 
-/** 按名字或编码找机种/线体；同一个键命中多条时记为 null（重名歧义） */
+/** 按名字或编码找机种；同一个键命中多条时记为 null（重名歧义） */
 function indexTargets(list) {
   const hits = new Map();
   for (const r of list) {
@@ -113,9 +115,8 @@ export function register(router) {
     let filename = 'workbook.xlsx';
     try { filename = decodeURIComponent(String(ctx.query.filename || filename)); } catch { /* 明文就用原样 */ }
 
-    // 老的三列文件没有机种/线体列时，用界面上选中的那一个兜底
+    // 老的三列文件没有机种列时，用界面上选中的那个兜底
     const selModelId = String(ctx.query.modelId || '').trim();
-    const selLineId = String(ctx.query.lineId || '').trim();
 
     const buf = await readBuf(req);
     if (!buf.length) throw badRequest('文件是空的');
@@ -135,20 +136,19 @@ export function register(router) {
     if (!body.length) throw badRequest('只有标题行，没有工序数据');
     if (map.code === undefined) map.code = 0;
 
-    const flat = map.model !== undefined && map.line !== undefined;
+    // 只要认得出「机种」列就按行分流；v3.4.0 那种带线体的五列表也走这条，
+    // 线体列被识别出来但不用（工序不再属于线体）。
+    const flat = map.model !== undefined;
 
     const models = q.all('SELECT * FROM model');
-    const lines = q.all('SELECT * FROM line');
     const byModel = indexTargets(models);
-    const byLine = indexTargets(lines);
     const selModel = selModelId ? models.find((m) => m.id === selModelId) : null;
-    const selLine = selLineId ? lines.find((l) => l.id === selLineId) : null;
 
-    if (!flat && (!selModel || !selLine)) {
-      throw badRequest('这张表里没有「机种」「线体」两列 —— 先在左上角选好机种和线体再导，或者在表里补上这两列');
+    if (!flat && !selModel) {
+      throw badRequest('这张表里没有「机种」列 —— 先在左上角选好机种再导，或者在表里补上这一列');
     }
 
-    const seen = new Map(); // "modelId|lineId|code" → 首次出现的行号
+    const seen = new Map(); // "modelId|code" → 首次出现的行号
     const out = [];
 
     body.forEach((r, i) => {
@@ -163,25 +163,18 @@ export function register(router) {
 
       if (flat) {
         const mv = cellAt(r, map.model);
-        const lv = cellAt(r, map.line);
         rec.modelName = mv;
-        rec.lineName = lv;
-
         if (!mv) { rec.status = 'bad'; rec.reason = '没有填机种'; out.push(rec); return; }
-        if (!lv) { rec.status = 'bad'; rec.reason = '没有填线体'; out.push(rec); return; }
 
         const m = byModel.get(mv.toLowerCase());
-        const l = byLine.get(lv.toLowerCase());
         if (m === undefined) { rec.status = 'bad'; rec.reason = `机种「${mv}」还没建档`; out.push(rec); return; }
         if (m === null) { rec.status = 'bad'; rec.reason = `机种「${mv}」有重名，请改用机种编码`; out.push(rec); return; }
-        if (l === undefined) { rec.status = 'bad'; rec.reason = `线体「${lv}」还没建档`; out.push(rec); return; }
-        if (l === null) { rec.status = 'bad'; rec.reason = `线体「${lv}」有重名，请改用线体编码`; out.push(rec); return; }
 
-        rec.modelId = m.id; rec.lineId = l.id;
-        rec.modelName = m.name; rec.lineName = l.name;
+        rec.modelId = m.id;
+        rec.modelName = m.name;
       } else {
-        rec.modelId = selModel.id; rec.lineId = selLine.id;
-        rec.modelName = selModel.name; rec.lineName = selLine.name;
+        rec.modelId = selModel.id;
+        rec.modelName = selModel.name;
       }
 
       if (!code) { rec.status = 'bad'; rec.reason = '没有工序码'; out.push(rec); return; }
@@ -192,7 +185,7 @@ export function register(router) {
         return;
       }
 
-      const key = `${rec.modelId}|${rec.lineId}|${code}`;
+      const key = `${rec.modelId}|${code}`;
       if (seen.has(key)) {
         rec.status = 'bad';
         rec.reason = `与第 ${seen.get(key)} 行工序码重复`;
@@ -201,8 +194,7 @@ export function register(router) {
       }
       seen.set(key, rowNo);
 
-      const old = q.get('SELECT * FROM station WHERE model_id = ? AND line_id = ? AND code = ?',
-        rec.modelId, rec.lineId, code);
+      const old = q.get('SELECT * FROM process WHERE model_id = ? AND code = ?', rec.modelId, code);
       if (!old) {
         rec.status = 'new';
       } else {
@@ -224,14 +216,14 @@ export function register(router) {
     const counts = { new: 0, same: 0, diff: 0, bad: 0 };
     for (const r of out) counts[r.status] += 1;
 
-    // 涉及哪些机种线体，弹窗顶部要报出来
+    // 涉及哪些机种，弹窗顶部要报出来
     const targetMap = new Map();
     for (const r of out) {
       if (r.status === 'bad') continue;
-      const k = `${r.modelId}|${r.lineId}`;
-      const t = targetMap.get(k) || { modelId: r.modelId, lineId: r.lineId, modelName: r.modelName, lineName: r.lineName, n: 0 };
+      const t = targetMap.get(r.modelId)
+        || { modelId: r.modelId, modelName: r.modelName, n: 0 };
       t.n += 1;
-      targetMap.set(k, t);
+      targetMap.set(r.modelId, t);
     }
 
     sendJson(res, 200, {
@@ -254,25 +246,21 @@ export function register(router) {
   //   merge        只加库里没有的，已存在的一律跳过（最安全，重复导同一份表不会动任何东西）
   //   update       加新的 + 覆盖已存在的名称与「做什么」（不动已配内容）
   //   update-only  只改已存在的，不建新工序（表里混了草稿行时用这个）
-  router.post('/api/stations/import', async (req, res) => {
+  router.post('/api/processes/import', async (req, res) => {
     const body = await readJsonBody(req);
     const mode = ['merge', 'update', 'update-only'].includes(body.mode) ? body.mode : 'merge';
 
     // 兼容 3.3.0 的调用方式：rows 是「三列数组 + 顶层 modelId/lineId」。
-    // 现在界面已经改成每行自带机种线体，但脚本/老文档里的写法还能跑。
     let rows = Array.isArray(body.rows) ? body.rows : [];
     if (rows.length && Array.isArray(rows[0])) {
       rows = rows.map((r, i) => ({
-        row: i + 1,
-        modelId: body.modelId,
-        lineId: body.lineId,
+        row: i + 1, modelId: body.modelId, lineId: body.lineId,
         code: r[0], name: r[1], note: r[2]
       }));
     }
     if (!rows.length) throw badRequest('没有可导入的行');
 
     const models = new Map(q.all('SELECT * FROM model').map((m) => [m.id, m]));
-    const lines = new Map(q.all('SELECT * FROM line').map((l) => [l.id, l]));
 
     const stat = { created: 0, updated: 0, kept: 0, skipped: 0, bad: [] };
     const batchId = uid('b');
@@ -284,28 +272,35 @@ export function register(router) {
       rows.forEach((r, i) => {
         const rowNo = Number(r && r.row) || i + 1;
         const modelId = String((r && r.modelId) || '').trim();
-        const lineId = String((r && r.lineId) || '').trim();
         const code = str(r && r.code, 40).trim().toUpperCase();
         const name = str(r && r.name, 40).trim();
         const note = str(r && r.note, 200).trim();
 
         if (!models.has(modelId)) { stat.bad.push({ row: rowNo, code, reason: '机种不存在' }); return; }
-        if (!lines.has(lineId)) { stat.bad.push({ row: rowNo, code, reason: '线体不存在' }); return; }
         if (!code) { stat.bad.push({ row: rowNo, code, reason: '没有工序码' }); return; }
         if (!CODE_RE.test(code)) {
           stat.bad.push({ row: rowNo, code, reason: '工序码只能用字母、数字、中文和 - _ . ，最长 16 个字符' });
           return;
         }
 
-        const old = q.get('SELECT * FROM station WHERE model_id = ? AND line_id = ? AND code = ?',
-          modelId, lineId, code);
+        const old = q.get('SELECT * FROM process WHERE model_id = ? AND code = ?', modelId, code);
 
         if (!old) {
           if (mode === 'update-only') { stat.skipped += 1; return; }
-          // ensureStation 自己算 sort（排在最后），顺便把码规范化
-          ensureStation(modelId, lineId, code, name || code, undefined, undefined, note, ts, batchId);
+          // 排在最后：新导入的工序接在已有工序后面，不插队
+          const maxSort = q.get('SELECT COALESCE(MAX(sort),0) s FROM process WHERE model_id = ?', modelId).s;
+          const id = uid('pr');
+          q.run(
+            'INSERT INTO process(id,model_id,code,name,sort,max_mb,note,play_mode,import_batch,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+            id, modelId, code, name || code, maxSort + 10, 20, note, 'loop', batchId, ts
+          );
+          // 新工序默认允许图片、至少 1 张，和界面上按「+ 加工序」建出来的一致
+          q.run(
+            'INSERT OR IGNORE INTO process_req(id,process_id,kind,min_count,min_width,min_height) VALUES(?,?,?,?,?,?)',
+            uid('sr'), id, 'image', 1, 1280, 720
+          );
           stat.created += 1;
-          touched.add(modelId + '|' + lineId);
+          touched.add(modelId);
           return;
         }
 
@@ -316,9 +311,9 @@ export function register(router) {
           stat.kept += 1; // 内容一模一样，不算更新，省得库里白改一遍
           return;
         }
-        q.run('UPDATE station SET name = ?, note = ? WHERE id = ?', nextName, note, old.id);
+        q.run('UPDATE process SET name = ?, note = ? WHERE id = ?', nextName, note, old.id);
         stat.updated += 1;
-        touched.add(modelId + '|' + lineId);
+        touched.add(modelId);
       });
     });
 
@@ -334,28 +329,79 @@ export function register(router) {
 
   // 撤销本次导入：按批次号精确删除这一批**新建**的工序。
   // 更新过的（改名/改说明）不回滚 —— 旧值没留底，硬编一个"还原"更容易错。
-  router.post('/api/stations/import/undo', async (req, res) => {
+  router.post('/api/processes/import/undo', async (req, res) => {
     const body = await readJsonBody(req);
     const batchId = String(body.batchId || '').trim();
     if (!batchId) throw badRequest('缺少批次号');
 
-    const sts = q.all('SELECT * FROM station WHERE import_batch = ?', batchId);
-    if (!sts.length) throw badRequest('这个批次没有可撤销的工序了（可能已经撤过）');
+    const ps = q.all('SELECT * FROM process WHERE import_batch = ?', batchId);
+    if (!ps.length) throw badRequest('这个批次没有可撤销的工序了（可能已经撤过）');
 
-    const ids = sts.map((s) => s.id);
+    const ids = ps.map((p) => p.id);
     const holes = ids.map(() => '?').join(',');
     const withContent = q.get(
-      `SELECT COUNT(DISTINCT station_id) c FROM item WHERE station_id IN (${holes})`, ...ids
+      `SELECT COUNT(DISTINCT process_id) c FROM item WHERE process_id IN (${holes})`, ...ids
     ).c;
 
     let deleted = 0;
     tx(() => {
-      // station_req 与 item 都是 ON DELETE CASCADE，跟着一起走
-      const r = q.run('DELETE FROM station WHERE import_batch = ?', batchId);
+      // process_req 与 item 都是 ON DELETE CASCADE，跟着一起走
+      const r = q.run('DELETE FROM process WHERE import_batch = ?', batchId);
       deleted = Number(r && r.changes) || ids.length;
     });
 
     notifyContentChanged();
     sendJson(res, 200, { deleted, withContent });
   });
+
+  // 老地址：3.4.0 及以前的界面 / 脚本还在打这两个
+  router.post('/api/stations/import', (req, res, ctx) => {
+    // 直接转发到新处理函数，语义完全一致（rows 里带 modelId 即可）
+    return handleLegacyImport(req, res, ctx);
+  });
+}
+
+// 旧路径单独走一遍，避免路由表里出现"同一条链注册两次 handler"的写法。
+async function handleLegacyImport(req, res) {
+  const body = await readJsonBody(req);
+  const mode = ['merge', 'update', 'update-only'].includes(body.mode) ? body.mode : 'merge';
+  let rows = Array.isArray(body.rows) ? body.rows : [];
+  if (rows.length && Array.isArray(rows[0])) {
+    rows = rows.map((r, i) => ({ row: i + 1, modelId: body.modelId, code: r[0], name: r[1], note: r[2] }));
+  }
+  if (!rows.length) throw badRequest('没有可导入的行');
+
+  const models = new Map(q.all('SELECT * FROM model').map((m) => [m.id, m]));
+  const stat = { created: 0, updated: 0, kept: 0, skipped: 0, bad: [] };
+  const batchId = uid('b');
+  const ts = now();
+  tx(() => {
+    rows.forEach((r, i) => {
+      const rowNo = Number(r && r.row) || i + 1;
+      const modelId = String((r && r.modelId) || '').trim();
+      const code = str(r && r.code, 40).trim().toUpperCase();
+      const name = str(r && r.name, 40).trim();
+      const note = str(r && r.note, 200).trim();
+      if (!models.has(modelId)) { stat.bad.push({ row: rowNo, code, reason: '机种不存在' }); return; }
+      if (!code || !CODE_RE.test(code)) { stat.bad.push({ row: rowNo, code, reason: '工序码不合法' }); return; }
+      const old = q.get('SELECT * FROM process WHERE model_id = ? AND code = ?', modelId, code);
+      if (!old) {
+        if (mode === 'update-only') { stat.skipped += 1; return; }
+        const maxSort = q.get('SELECT COALESCE(MAX(sort),0) s FROM process WHERE model_id = ?', modelId).s;
+        q.run(
+          'INSERT INTO process(id,model_id,code,name,sort,max_mb,note,play_mode,import_batch,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+          uid('pr'), modelId, code, name || code, maxSort + 10, 20, note, 'loop', batchId, ts
+        );
+        stat.created += 1;
+        return;
+      }
+      if (mode === 'merge') { stat.skipped += 1; return; }
+      const nextName = str(name || old.name, 40);
+      if ((old.name || '') === nextName && (old.note || '') === note) { stat.kept += 1; return; }
+      q.run('UPDATE process SET name = ?, note = ? WHERE id = ?', nextName, note, old.id);
+      stat.updated += 1;
+    });
+  });
+  if (stat.created || stat.updated) notifyContentChanged();
+  sendJson(res, 200, { ...stat, mode, batchId: stat.created ? batchId : '', touched: [] });
 }

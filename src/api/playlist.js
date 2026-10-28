@@ -1,36 +1,28 @@
-// 播放清单（兼容接口）：按「机种 × 线体 × 工位」读写
+// 播放清单（兼容接口）：按「机种 × 工序」读写
 //
-// 内容的宿主是工位，但老调用方（脚本、旧页面）传的是 processId。
-// 这里把 process 展开成 (line_id, code) 再找工位 —— 语义没变
-// （"这个机种在这条线的这道工序上该播什么"）。
-// 新代码请直接用 /api/stations/:id。
-import { q, stationsOf, saveStation } from '../db.js';
+// 4.0.0 之前内容的宿主是"工位"，老调用方（脚本、旧页面）传的是 processId，
+// 还要先展开成 (line_id, code) 才找得到工位。现在工序本身就是宿主，
+// processId 直接定位，stationId 也收（老脚本可能还在传）。
+// 新代码请直接用 PUT /api/processes/:id。
+import { q, processesOf, processById, saveProcess } from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
 import { notifyContentChanged } from '../switch.js';
 
-/** processId 或 stationId 都收；返回 station 记录 */
-function resolveStation(modelId, { stationId, processId }) {
-  if (stationId) {
-    return q.get('SELECT * FROM station WHERE id = ? AND model_id = ?', stationId, modelId) || null;
-  }
-  if (processId) {
-    // 工序属于某条线体，所以 process 足够定位到「机种 × 线体 × 码」
-    const p = q.get('SELECT * FROM process WHERE id = ?', processId);
-    if (!p) return null;
-    return q.get('SELECT * FROM station WHERE model_id = ? AND line_id = ? AND code = ?',
-      modelId, p.line_id, p.code) || null;
-  }
-  return null;
+function pickProcess(modelId, { processId, stationId }) {
+  const id = String(processId || stationId || '').trim();
+  if (!id) return null;
+  const p = processById(id);
+  return p && p.model_id === String(modelId || '') ? p : null;
 }
 
-function loadItems(stationId) {
+function loadItems(processId) {
   return q.all(
     `SELECT i.id, i.ord, i.kind, i.media_id, i.dwell_sec, i.fit, i.zoom,
             m.name, m.ext, m.mime, m.bytes, m.width, m.height, m.duration_ms
        FROM item i JOIN media m ON m.id = i.media_id
-      WHERE i.station_id = ?
+      WHERE i.process_id = ?
       ORDER BY i.ord, i.id`,
-    stationId
+    processId
   ).map((r) => ({
     id: r.id,
     ord: r.ord,
@@ -54,18 +46,19 @@ export function register(router) {
   router.get('/api/playlist', (req, res, ctx) => {
     const modelId = String(ctx.query.modelId || '');
     const model = q.get('SELECT * FROM model WHERE id = ?', modelId);
-    if (!model) throw badRequest('型号不存在');
+    if (!model) throw badRequest('机种不存在');
 
-    const station = resolveStation(modelId, {
-      stationId: String(ctx.query.stationId || ''),
-      processId: String(ctx.query.processId || '')
+    const p = pickProcess(modelId, {
+      processId: ctx.query.processId,
+      stationId: ctx.query.stationId
     });
-    if (!station) throw badRequest('这个机种在这条线的这道工序上还没有工位');
+    if (!p) throw badRequest('这个机种下没有这道工序');
 
-    const items = loadItems(station.id);
+    const items = loadItems(p.id);
     sendJson(res, 200, {
       model: { id: model.id, code: model.code, name: model.name },
-      station: { id: station.id, code: station.code, name: station.name },
+      station: { id: p.id, code: p.code, name: p.name },
+      process: { id: p.id, code: p.code, name: p.name, playMode: p.play_mode },
       items,
       stats: {
         count: items.length,
@@ -80,13 +73,10 @@ export function register(router) {
     const body = await readJsonBody(req);
     const modelId = String(body.modelId || '');
     const model = q.get('SELECT * FROM model WHERE id = ?', modelId);
-    if (!model) throw badRequest('型号不存在');
+    if (!model) throw badRequest('机种不存在');
 
-    const station = resolveStation(modelId, {
-      stationId: String(body.stationId || ''),
-      processId: String(body.processId || '')
-    });
-    if (!station) throw badRequest('这个机种在这条线的这道工序上还没有工位');
+    const p = pickProcess(modelId, { processId: body.processId, stationId: body.stationId });
+    if (!p) throw badRequest('这个机种下没有这道工序');
 
     const list = body.items;
     if (!Array.isArray(list)) throw badRequest('items 必须是数组');
@@ -108,18 +98,18 @@ export function register(router) {
       });
     });
 
-    saveStation(modelId, station.id, { items: rows });
+    saveProcess(modelId, p.id, { items: rows });
     notifyContentChanged();
 
-    sendJson(res, 200, { ok: true, count: rows.length, items: loadItems(station.id) });
+    sendJson(res, 200, { ok: true, count: rows.length, items: loadItems(p.id) });
   });
 
-  // 机种在一条线上的全部工位（含内容），机种设置页一次取完
+  // 机种的全部工序（含内容），机种设置 / 媒体库一次取完
   router.get('/api/playlist/all', (req, res, ctx) => {
     const modelId = String(ctx.query.modelId || '');
-    const lineId = String(ctx.query.lineId || '');
     const model = q.get('SELECT * FROM model WHERE id = ?', modelId);
-    if (!model) throw badRequest('型号不存在');
-    sendJson(res, 200, { model, stations: stationsOf(modelId, lineId) });
+    if (!model) throw badRequest('机种不存在');
+    if (!processesOf(modelId).length) throw badRequest('这个机种还没有工序，先去「机种设置」加几道');
+    sendJson(res, 200, { model, stations: processesOf(modelId), processes: processesOf(modelId) });
   });
 }

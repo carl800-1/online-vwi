@@ -24,7 +24,8 @@ function pickLine(src) {
 function decorate(state) {
   const cur = state.currentModelId ? q.get('SELECT code, name FROM model WHERE id = ?', state.currentModelId) : null;
   const pend = state.pendingModelId ? q.get('SELECT code, name FROM model WHERE id = ?', state.pendingModelId) : null;
-  const procCount = processesOf(state.lineId).length;
+  // v4.0.0：一道工序就是一块屏，线体的屏数 = 当前机种的工序数
+  const procCount = state.currentModelId ? processesOf(state.currentModelId).length : 0;
   return {
     lineId: state.lineId,
     rev: state.rev,
@@ -147,10 +148,12 @@ export function register(router) {
    */
   router.get('/api/terminals', (req, res, ctx) => {
     const line = pickLine(ctx.query);
-    const procs = processesOf(line.id);
+    const st = getState(line.id);
+    const st0 = st.currentModelId;
+    // 屏的清单来自当前机种：机种有几道工序，这条线就有几块屏
+    const procs = st0 ? processesOf(st0) : [];
     const term = terminalsOf(line.id);
     const byOp = new Map(term.map((t) => [t.op, t]));
-    const st = getState(line.id);
 
     const rows = procs.map((p) => {
       const t = byOp.get(p.code);

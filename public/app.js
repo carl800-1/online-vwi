@@ -6,7 +6,7 @@
 //   线体设置 = 这条线上有几块屏（工序），以及今天哪条线在跑。
 //   机种设置 = **定义层**：这个机种在某条线上有哪些工序、各做什么。
 //              表格里只有工序码 / 名称 / 做什么，不含任何文件。
-//   媒体库   = **内容层**：先选机种、再选工位、再上传图片 / PDF / 视频。
+//   媒体库   = **内容层**：先选机种、再选工序、再上传图片 / PDF / 视频。
 //              允许类型与体积上限也在这里勾，因为它们只在上传时起作用。
 //   文件查询 = 全库文件：搜索、规格体检、清理未引用。
 //   终端监控 / 系统 = 设备台账与本机设置。
@@ -29,21 +29,18 @@ const S = {
 
   // 机种设置（定义层）：只看"有哪些工序、各做什么"，不碰内容
   mdModelId: '',
-  mdLineId: '',
   mdStations: [],
   mdQuery: '',
 
-  // 媒体库（内容层）：选机种 → 选工位 → 传文件
+  // 媒体库（内容层）：选机种 → 选工序 → 传文件
   modelId: '',
-  stLineId: '',
   stations: [],
   // 一个机种普遍有 15–25 道工序，全摊成一列会变成几千像素的长条，
-  // 所以改成「左边工位索引、右边只编一个」：索引永远一屏看得完，编辑区高度固定。
-  stPickId: '',      // 正在编辑哪个工位
+  // 所以改成「左边工序索引、右边只编一个」：索引永远一屏看得完，编辑区高度固定。
+  stPickId: '',      // 正在编辑哪道工序
   stFilter: 'all',   // all | has | empty
-  stQuery: '',       // 工位索引里的搜索词
+  stQuery: '',       // 工序索引里的搜索词
 
-  procLineId: '',
   processes: [],
 
   terms: null,
@@ -52,7 +49,7 @@ const S = {
   media: null,
   libAll: null,
 
-  // 上传落在哪个工位
+  // 上传落在哪道工序
   uploadStation: '',
   uploading: false
 };
@@ -124,7 +121,7 @@ function modelLabel(m) {
  * html 用来塞自定义内容（比如选机种/选线体的列表）；
  * 配 read(body) 可以自己决定返回什么，不写就返回 true。
  */
-function dialog({ title, message = '', fields = [], okText = '确定', danger = false, html = '', read = null, hideCancel = false }) {
+function dialog({ title, message = '', fields = [], okText = '确定', danger = false, html = '', htmlAfter = '', read = null, hideCancel = false }) {
   return new Promise((resolve) => {
     $('dlgTitle').textContent = title;
     $('dlgBody').innerHTML =
@@ -136,7 +133,8 @@ function dialog({ title, message = '', fields = [], okText = '确定', danger = 
           <input type="text" id="dlgF${i}" data-fk="${H(f.key)}"
                  value="${H(f.value || '')}" placeholder="${H(f.placeholder || '')}">
           ${f.tip ? `<div class="tip">${H(f.tip)}</div>` : ''}
-        </div>`).join('');
+        </div>`).join('') +
+      (htmlAfter || '');
 
     const ok = $('dlgOk');
     ok.textContent = okText;
@@ -294,8 +292,8 @@ function clientChip(c, curCode) {
   else if (c.status === 'nomodel') { text = '无机种'; }
   else if (c.status === 'absent') { text = '未上线'; }
 
-  // 这个机种在这个工位上压根没内容 —— 换型必然卡在这里，必须提前看见
-  const warn = noContent ? '<i class="cl-warn" title="当前机种在这个工位没有内容"></i>' : '';
+  // 这个机种在这道工序上压根没内容 —— 换型必然卡在这里，必须提前看见
+  const warn = noContent ? '<i class="cl-warn" title="当前机种在这道工序没有内容"></i>' : '';
 
   return `<span class="cl ${cls}" title="${H(c.name)} ${H(c.ip || '')}">${warn}<b>${H(c.op)}</b>${H(c.name)} · ${H(text)}</span>`;
 }
@@ -504,7 +502,7 @@ function renderTopStats() {
     bits.push(`运行中 <b>${on.length}</b> 条`);
   } else if (S.tab === 'models') {
     bits.push(`共 <b>${S.models.length}</b> 个机种`);
-    const m = S.models.find((x) => x.id === S.modelId);
+    const m = S.models.find((x) => x.id === S.mdModelId);
     if (m) bits.push(`当前 <b>${H(m.code)}</b>`);
   } else if (S.tab === 'terms') {
     const t = S.terms;
@@ -512,7 +510,8 @@ function renderTopStats() {
   } else if (S.tab === 'media') {
     if (S.media) bits.push(`${S.media.stats.count} 个文件 · ${fmtBytes(S.media.stats.bytes)}`);
   }
-  $('topStats').innerHTML = bits.join('　·　') || '—';
+  // 没统计的页面（媒体库还没选工序时）就空着 —— 顶栏挂个「—」像是加载失败
+  $('topStats').innerHTML = bits.join('　·　');
 }
 
 $('refreshBtn').addEventListener('click', async () => {
@@ -531,19 +530,31 @@ $('refreshBtn').addEventListener('click', async () => {
 async function loadLines() {
   const d = await api('/api/lines');
   S.lines = d.lines || [];
-  if (!S.procLineId || !S.lines.some((l) => l.id === S.procLineId)) {
-    S.procLineId = (S.lines.find((l) => l.enabled) || S.lines[0] || {}).id || '';
-  }
   renderLineTable();
-  renderProcLinePick();
-  await loadProcesses();
   renderTopStats();
 }
 
+/** 线体四种状态。只有「运行」会让终端读这条线的内容。 */
+const LINE_ST = [
+  ['running', '运行'],
+  ['stopped', '停线'],
+  ['maintain', '维修'],
+  ['care', '保养'],
+];
+const stName = (v) => (LINE_ST.find(([x]) => x === v) || [, v])[1];
+
+/**
+ * 线体表：名称 / 工位数 / 可生产机种 / 状态 / 在线 / 操作。
+ *
+ * 4.0.0 去掉了「编码」「工序数」「内容覆盖」「当前机种」四列：
+ *   编码自动生成，只在「改」里能看到（终端装机要填，别让人以为它不重要）；
+ *   工序数属于机种，不属于线体；内容覆盖同理；
+ *   「当前机种」改成「可生产机种」—— 正在生产哪个去作业内容页看，这里看的是"能做什么"。
+ */
 function renderLineTable() {
   const tbody = $('lineTable').querySelector('tbody');
   if (!S.lines.length) {
-    tbody.innerHTML = '<tr><td colspan="8" class="empty">还没有线体，点右上角「+ 新建线体」。</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="empty">还没有线体，点右上角「+ 新建线体」。</td></tr>';
     return;
   }
   const sorted = [...S.lines].sort((a, b) => (a.sort - b.sort) || a.code.localeCompare(b.code));
@@ -551,21 +562,24 @@ function renderLineTable() {
   tbody.innerHTML = sorted.map((l, i) => `
     <tr class="${l.status === 'running' ? 'cur' : ''}" data-lid="${H(l.id)}">
       <td>
-        <select class="ln-status st-${H(l.status)}" data-status="${H(l.id)}"
-                title="只有「运行中」的线会让终端读它的内容">
-          ${LINE_ST.map(([v, t]) => `<option value="${v}"${l.status === v ? ' selected' : ''}>${t}</option>`).join('')}
-        </select>
+        <b>${H(l.name)}</b>
+        ${l.currentModelCode ? `<span class="badge info">在做 ${H(l.currentModelCode)}</span>` : ''}
       </td>
-      <td class="mono">${H(l.code)}</td>
-      <td><b>${H(l.name)}</b>${l.id === S.procLineId ? ' <span class="badge info">正在看工序</span>' : ''}</td>
-      <td class="num">${l.processes}</td>
-      <td class="num">${l.coverage.done} / ${l.coverage.total}</td>
-      <td>${l.currentModelCode ? H(l.currentModelCode) : '<span class="badge muted">未设定</span>'}</td>
+      <td class="num">${l.slots || 0}</td>
+      <td>${l.modelCount
+        ? `<button class="cell-n on" data-models="${H(l.id)}"
+             title="${H((l.modelCodes || []).join('、'))}">${l.modelCount} 个</button>`
+        : '<span class="badge muted">未安排</span>'}</td>
+      <td>
+        <div class="ln-st">
+          ${LINE_ST.map(([v, t]) => `<button class="ln-stb st-${v}${l.status === v ? ' on' : ''}"
+             data-st="${v}" data-lid="${H(l.id)}" title="改成「${t}」">${t}</button>`).join('')}
+        </div>
+      </td>
       <td class="num">${l.online || 0}</td>
       <td>
         <div class="row-actions">
-          <button class="btn sm" data-act="proc" data-lid="${H(l.id)}">工序</button>
-          <button class="btn sm" data-act="rename" data-lid="${H(l.id)}">改名</button>
+          <button class="btn sm" data-act="rename" data-lid="${H(l.id)}">修改</button>
           <button class="iconbtn" data-act="up" data-lid="${H(l.id)}" title="上移" ${i === 0 ? 'disabled' : ''}>↑</button>
           <button class="iconbtn" data-act="down" data-lid="${H(l.id)}" title="下移" ${
             i === sorted.length - 1 ? 'disabled' : ''}>↓</button>
@@ -575,31 +589,23 @@ function renderLineTable() {
     </tr>`).join('');
 }
 
-/** 线体四种状态。只有 running 会让终端读这条线的内容。 */
-const LINE_ST = [
-  ['running', '运行中'],
-  ['stopped', '停用'],
-  ['maintain', '维修中'],
-  ['care', '保养中'],
-];
-
 /**
  * 改线体状态。v3.5.0 起允许多条线同时运行，所以这里不再"停掉别的线"。
  * 从运行中改成别的要问一句 —— 那条线的屏会停在最后一屏。
  */
 async function setLineStatusUI(line, to) {
   if (!line || to === line.status) return;
-  const name = (LINE_ST.find(([v]) => v === to) || [, to])[1];
+  const name = stName(to);
 
   if (line.status === 'running' && to !== 'running') {
     const ok = await dialog({
       title: `把「${line.name}」改成${name}？`,
       message: `这条线的终端会连不上服务端，屏上的内容停在最后一屏，不会变成空白。`
-        + `别的线不受影响；改回「运行中」随时可以。`,
+        + `别的线不受影响；改回「运行」随时可以。`,
       okText: `改成${name}`,
       danger: to === 'stopped',
     });
-    if (!ok) return renderLineTable();   // 取消要把下拉框复位到原状态
+    if (!ok) return renderLineTable();   // 取消要把按钮高亮复位
   }
 
   try {
@@ -612,43 +618,55 @@ async function setLineStatusUI(line, to) {
   }
 }
 
-// 状态下拉用 change 而不是 click —— select 选完才触发，也不会被冒泡吃掉
-$('lineTable').addEventListener('change', (e) => {
-  const sel = e.target.closest('[data-status]');
-  if (!sel) return;
-  const line = S.lines.find((l) => l.id === sel.dataset.status);
-  setLineStatusUI(line, sel.value);
-});
-
 $('lineTable').addEventListener('click', async (e) => {
+  // 状态四态按钮
+  const st = e.target.closest('[data-st]');
+  if (st) {
+    const line = S.lines.find((l) => l.id === st.dataset.lid);
+    await setLineStatusUI(line, st.dataset.st);
+    return;
+  }
+
+  // 「可生产机种」点开看清单
+  const mm = e.target.closest('[data-models]');
+  if (mm) {
+    const line = S.lines.find((l) => l.id === mm.dataset.models);
+    if (!line) return;
+    const codes = (line.modelCodes || []);
+    await dialog({
+      title: `「${line.name}」可生产 ${codes.length} 个机种`,
+      html: `<div class="prod-list">${codes.map((c) => `<span class="prod-tag">${H(c)}</span>`).join('')
+        || '<span class="sub">还没有机种勾这条线</span>'}</div>
+        <div class="tip">在「机种设置」里改：选中机种 → 那条信息栏上的「可生产线体」。</div>`,
+      hideCancel: true,
+      okText: '知道了'
+    });
+    return;
+  }
+
   const b = e.target.closest('[data-act]');
   if (!b) return;
   const id = b.dataset.lid;
   const target = S.lines.find((l) => l.id === id);
   if (!target) return;
 
-  if (b.dataset.act === 'proc') {
-    S.procLineId = id;
-    renderLineTable();
-    renderProcLinePick();
-    await loadProcesses();
-    return;
-  }
-
   if (b.dataset.act === 'rename') {
     const r = await dialog({
-      title: '改线体',
-      message: '编码是终端装机时要填的标识，一般不改；显示名称可以随时改。',
+      title: '修改线体',
+      message: '编码是终端 config.json 里填的标识，一般不用改；工位数是这条线实际有几块屏。',
       fields: [
-        { key: 'name', label: '显示名称', value: target.name, placeholder: '例如：二线' },
-        { key: 'code', label: '线体编码', value: target.code, placeholder: 'L2' }
+        { key: 'name', label: '线体名称', value: target.name, placeholder: '例如：二线' },
+        { key: 'slots', label: '工位数（几块屏）', value: String(target.slots || 0), placeholder: '5' },
+        { key: 'code', label: '编码（终端用）', value: target.code, placeholder: 'L1', tip: '改了编码，现场终端也要跟着改配置' }
       ],
       okText: '保存'
     });
     if (!r) return;
     try {
       await putJson('/api/lines/' + encodeURIComponent(id), {
-        name: r.name || target.name, code: r.code || target.code
+        name: r.name || target.name,
+        code: r.code || target.code,
+        slots: Number(r.slots) || target.slots
       });
       await loadLines();
       toast('已保存', 'ok');
@@ -674,15 +692,14 @@ $('lineTable').addEventListener('click', async (e) => {
   if (b.dataset.act === 'del') {
     const ok = await dialog({
       title: `删除线体「${target.name}」？`,
-      message: '删除后这条线上的工序会一并消失（那几块屏以后没有身份了）。' +
-        '机种里的内容和文件不受影响，删的只是"这条物理线有几块屏"。',
+      message: '只断掉「哪些机种能在这条线上做」的关系，机种和里面的文件一个都不会丢。' +
+        `${target.currentModelCode ? `注意：这条线现在在生产 ${target.currentModelCode}，删了终端会立刻找不到线。` : ''}`,
       okText: '删除',
       danger: true
     });
     if (!ok) return;
     try {
       await api('/api/lines/' + encodeURIComponent(id), { method: 'DELETE' });
-      if (S.procLineId === id) S.procLineId = '';
       await loadLines();
       toast('已删除 ' + target.name, 'ok');
     } catch (err) { toast(err.message, 'err'); }
@@ -692,180 +709,81 @@ $('lineTable').addEventListener('click', async (e) => {
 $('lnNewBtn').addEventListener('click', async () => {
   const r = await dialog({
     title: '新建线体',
-    message: '线体就是一条物理产线。新建后会自动带 5 道标准工序（OP10…OP50），工序名可以之后改。',
+    message: '线体就是一条物理产线。编码会自动生成（L1、L2…），终端装机时用得到。',
     fields: [
-      { key: 'code', label: '线体编码', placeholder: 'L2', tip: '终端装机时要填这个编码，建议与现场标识一致' },
-      { key: 'name', label: '显示名称', placeholder: '二线' }
+      { key: 'name', label: '线体名称', placeholder: '二线' },
+      { key: 'slots', label: '工位数（几块屏）', value: '5', placeholder: '5', tip: '一个机种几道工序要几块屏，工序数别超过这个数' }
     ],
+    htmlAfter: `<div class="dlg-row">
+        <label>线体状态</label>
+        <div class="ln-st dlg-st" id="dlgNewSt">
+          ${LINE_ST.map(([v, t]) => `<button type="button" class="ln-stb st-${v}${v === 'stopped' ? ' on' : ''}"
+             data-st="${v}">${t}</button>`).join('')}
+        </div>
+        <div class="tip">先建成「停线」最安全；确认现场就位了再点「运行」。</div>
+      </div>`,
+    read: (body) => {
+      const on = body.querySelector('#dlgNewSt .ln-stb.on');
+      const vals = {};
+      body.querySelectorAll('[data-fk]').forEach((el) => { vals[el.dataset.fk] = el.value.trim(); });
+      return { name: vals.name, slots: vals.slots, status: on ? on.dataset.st : 'stopped' };
+    },
     okText: '创建'
   });
   if (!r) return;
-  if (!r.code) return toast('线体编码不能为空', 'err');
+  if (!r.name) return toast('线体名称不能为空', 'err');
   try {
-    const made = await postJson('/api/lines', { code: r.code, name: r.name || r.code });
-    S.procLineId = made.id;
-    await loadLines();
-    toast('已新建线体 ' + made.name + '（状态默认「停用」，要用就把状态改成「运行中」）', 'ok');
-  } catch (err) { toast(err.message, 'err'); }
-});
-
-// ---------- 工序（这块线体上有几块屏） ----------
-function renderProcLinePick() {
-  const sel = $('procLinePick');
-  sel.innerHTML = S.lines.map((l) =>
-    `<option value="${H(l.id)}">${H(l.name)}（${H(l.code)}）</option>`).join('')
-    || '<option value="">还没有线体</option>';
-  sel.value = S.procLineId || '';
-  const cur = S.lines.find((l) => l.id === S.procLineId);
-  $('procSub').textContent = cur ? `${cur.name} 上的工序，一块屏一道工序` : '还没有线体';
-}
-
-$('procLinePick').addEventListener('change', async () => {
-  S.procLineId = $('procLinePick').value;
-  renderLineTable();
-  await loadProcesses();
-});
-
-async function loadProcesses() {
-  if (!S.procLineId) { S.processes = []; renderProcTable(); return; }
-  const d = await api('/api/processes?lineId=' + encodeURIComponent(S.procLineId));
-  S.processes = d.processes || [];
-  renderProcTable();
-}
-
-function renderProcTable() {
-  const tbody = $('procTable').querySelector('tbody');
-  if (!S.procLineId) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">先选一条线体。</td></tr>';
-    return;
-  }
-  if (!S.processes.length) {
-    tbody.innerHTML = '<tr><td colspan="5" class="empty">这条线还没有工序，点右上角「+ 添加工序」。</td></tr>';
-    return;
-  }
-
-  tbody.innerHTML = S.processes.map((p) => `
-    <tr data-pid="${H(p.id)}">
-      <td class="num">${p.sort}</td>
-      <td><input class="cell-input mono" data-f="code" value="${H(p.code)}" maxlength="16"></td>
-      <td><input class="cell-input" data-f="name" value="${H(p.name)}" maxlength="40"></td>
-      <td class="num">${p.modelsWithContent}</td>
-      <td>
-        <div class="row-actions">
-          <button class="btn sm danger" data-act="delproc">删除</button>
-        </div>
-      </td>
-    </tr>`).join('');
-}
-
-// 工序码/名称就地改：失焦或回车才提交，避免每敲一个字打一次接口
-$('procTable').addEventListener('change', async (e) => {
-  const inp = e.target.closest('[data-f]');
-  if (!inp) return;
-  const tr = inp.closest('[data-pid]');
-  const pid = tr.dataset.pid;
-  const p = S.processes.find((x) => x.id === pid);
-  if (!p) return;
-  const v = inp.value.trim();
-  if (!v || v === p[inp.dataset.f]) { inp.value = p[inp.dataset.f]; return; }
-  try {
-    await putJson('/api/processes/' + encodeURIComponent(pid), { [inp.dataset.f]: v });
-    await loadProcesses();
-    toast('已更新工序', 'ok');
-  } catch (err) {
-    inp.value = p[inp.dataset.f];
-    toast(err.message, 'err');
-  }
-});
-
-$('procTable').addEventListener('click', async (e) => {
-  if (!e.target.closest('[data-act="delproc"]')) return;
-  const tr = e.target.closest('[data-pid]');
-  const p = S.processes.find((x) => x.id === tr.dataset.pid);
-  if (!p) return;
-  const ok = await dialog({
-    title: `删除工序 ${p.code}？`,
-    message: `删掉后「${p.code}」这块屏就没有身份了，终端会连不上。` +
-      '机种里同码的工位和内容不会被删，重新加回来还能用。',
-    okText: '删除',
-    danger: true
-  });
-  if (!ok) return;
-  try {
-    await api('/api/processes/' + encodeURIComponent(p.id), { method: 'DELETE' });
-    await loadProcesses();
-    await loadLines();
-    toast('已删除工序 ' + p.code, 'ok');
-  } catch (err) { toast(err.message, 'err'); }
-});
-
-$('procAddBtn').addEventListener('click', async () => {
-  if (!S.procLineId) return toast('先选一条线体', 'err');
-  const text = await bulkDialog({
-    title: '批量添加工序',
-    message: '工序 = 这条线上的一块屏。一次可以贴十几二十条，建完各机种会自动长出对应工位。',
-    placeholder: 'OP10 压装\nOP20 焊接\nOP30 检测'
-  });
-  if (!text) return;
-  const rows = parseBulk(text);
-  if (!rows.length) return toast('没有可用的行', 'err');
-
-  let okN = 0;
-  const bad = [];
-  for (const r of rows) {
-    try {
-      await postJson('/api/processes', { lineId: S.procLineId, code: r.code, name: r.name });
-      okN += 1;
-    } catch (err) { bad.push(`${r.code}：${err.message}`); }
-  }
-  await loadProcesses();
-  await loadLines();
-  if (okN) toast(`已添加 ${okN} 道工序`, 'ok');
-  if (bad.length) {
-    await dialog({
-      title: `${bad.length} 道没加上`,
-      message: bad.join('\n'),
-      okText: '知道了',
-      hideCancel: true
+    const made = await postJson('/api/lines', {
+      name: r.name, slots: Number(r.slots) || 5, status: r.status
     });
-  }
+    await loadLines();
+    toast(`已新建 ${made.name}（编码 ${made.code}，状态${stName(made.status)}）`, 'ok');
+  } catch (err) { toast(err.message, 'err'); }
 });
 
-// ==================== 机种设置 ====================
-/** 取机种列表。列表徽标（x/y 道工序已配内容）按「机种设置」当前线体统计，媒体库的下拉不显示徽标。 */
+// 新建弹窗里的状态按钮：点哪个亮哪个
+$('dialog').addEventListener('click', (e) => {
+  const b = e.target.closest('#dlgNewSt .ln-stb');
+  if (!b) return;
+  e.preventDefault();
+  $('dlgNewSt').querySelectorAll('.ln-stb').forEach((x) => x.classList.toggle('on', x === b));
+});
+/** 取机种列表。徽标上的 x/y 是这个机种配了几道工序的内容。 */
 async function loadModels(keepId) {
-  if (!S.lines.length) await loadLines().catch(() => {});
-  if (!S.mdLineId || !S.lines.some((l) => l.id === S.mdLineId)) {
-    const dft = S.lines.find((l) => l.enabled) || S.lines[0];
-    S.mdLineId = dft ? dft.id : '';
-  }
-  const d = await api('/api/models' + (S.mdLineId ? '?lineId=' + encodeURIComponent(S.mdLineId) : ''));
+  const d = await api('/api/models');
   S.models = d.models || [];
   const want = keepId || S.mdModelId;
   S.mdModelId = (want && S.models.some((m) => m.id === want))
     ? want : ((S.models[0] && S.models[0].id) || '');
   renderMdList();
   renderMlModelPick();
-  await loadMdStations();
+  await loadMdProcesses();
   renderTopStats();
 }
 
+/** 机种胶囊：一个机种一枚，横排、可换行。没选中的时候整页下半是空的。 */
 function renderMdList() {
   const kw = ($('mdSearch').value || '').trim().toLowerCase();
   const list = S.models.filter((m) =>
     !kw || m.code.toLowerCase().includes(kw) || (m.name || '').toLowerCase().includes(kw));
 
   $('mdList').innerHTML = list.map((m) => {
-    const done = m.stDone || 0;
-    const total = m.stTotal || 0;
-    const full = total > 0 && done === total;
-    return `<button class="md-item ${m.id === S.mdModelId ? 'on' : ''}${m.enabled ? '' : ' off'}"
+    const done = m.done || 0;
+    const total = m.total || 0;
+    const cls = total && done === total ? 'full' : (done ? 'part' : '');
+    const ls = (m.lines || []).map((l) => l.code);
+    return `<button class="md-chip${m.id === S.mdModelId ? ' on' : ''}${m.enabled ? '' : ' off'}"
         data-mid="${H(m.id)}">
-      <span class="md-code">${H(m.code)}</span>
-      <span class="md-dot ${full ? 'full' : (done ? 'part' : '')}"
-            title="${done}/${total} 道工序已配内容">${done}/${total}</span>
+      <span class="mc-top"><b class="mc-code">${H(m.code)}</b>
+        <span class="mc-dot ${cls}" title="${done}/${total} 道工序已配内容">${done}/${total}</span></span>
+      <span class="mc-name">${H(m.name)}</span>
+      <span class="mc-lines">${ls.length ? H(ls.join(' · ')) : '未安排线体'}</span>
     </button>`;
   }).join('') || '<div class="sub" style="padding:10px">没有匹配的机种</div>';
+
+  $('mdSub').textContent = S.models.length
+    ? `${S.models.length} 个机种 · 点一个看它的工序`
+    : '还没有机种，点右上角新建';
 }
 
 $('mdSearch').addEventListener('input', () => {
@@ -875,119 +793,225 @@ $('mdSearch').addEventListener('input', () => {
 
 $('mdList').addEventListener('click', async (e) => {
   const b = e.target.closest('[data-mid]');
-  if (!b) return;
+  if (!b || b.dataset.mid === S.mdModelId) return;
   S.mdModelId = b.dataset.mid;
   renderMdList();
-  await loadMdStations();
+  await loadMdProcesses();
 });
 
-/* ================= 机种设置：工序清单（定义层） ================= */
+/* ================= 机种设置下半：这个机种的工序 ================= */
 
-/** 取这个机种在这条线上的工序清单。只读内容数，不碰内容本身。 */
-async function loadMdStations() {
-  renderLinePick('mdLines', S.mdLineId);
-
+/**
+ * 取选中机种的工序。这一页不再按线体取 —— 工序归机种，一个机种只有一套。
+ * S.mdLines 是"这个机种能在哪几条线上做"，信息栏里显示并可改。
+ */
+async function loadMdProcesses() {
   const m = S.models.find((x) => x.id === S.mdModelId);
-  const line = S.lines.find((x) => x.id === S.mdLineId);
-
-  if (!m || !line) {
+  if (!m) {
     S.mdStations = [];
-    $('mdTitle').textContent = m ? modelLabel(m) : '机种设置';
-    $('mdSub').textContent = m ? '还没有线体，先去「线体设置」建一条' : '左边选一个机种';
-    $('mdSummary').innerHTML = '';
+    S.mdLines = [];
+    $('mdMeta').innerHTML = '<span class="sub">上面选一个机种</span>';
+    $('stTableSub').textContent = '—';
     renderStTable();
     return;
   }
 
   try {
-    const d = await api('/api/stations?modelId=' + encodeURIComponent(m.id)
-      + '&lineId=' + encodeURIComponent(line.id));
-    S.mdStations = d.stations || [];
+    const d = await api('/api/processes?modelId=' + encodeURIComponent(m.id));
+    S.mdStations = d.processes || [];
+    S.mdLines = d.lines || [];
+    Object.assign(m, { lines: d.lines || [] });
   } catch (e) {
     S.mdStations = [];
+    S.mdLines = [];
     toast(e.message, 'err');
   }
 
-  $('mdTitle').textContent = modelLabel(m);
-  $('mdSub').innerHTML = `· <b>${H(line.name)}</b> ${line.processes} 道工序`
-    + (m.enabled ? '' : '　（机种已停用，不会出现在换型下拉里）');
-  renderMdSummary();
+  renderMdMeta(m);
   renderStTable();
 }
 
-/**
- * 线体胶囊条，两页各一份，选中态各自独立：
- * 在媒体库切到二线传文件，机种设置那边还停在一线，互不干扰。
- * 只有一条线时整条隐藏 —— 现场一开始就一条线，不让人多点一次。
- */
-function renderLinePick(boxId, activeId) {
-  const box = $(boxId);
-  if (!box) return;
-  if (S.lines.length <= 1) { box.classList.add('hide'); return; }
-  box.classList.remove('hide');
-  box.innerHTML = '<span class="lp-lbl">线体</span>' + S.lines.map((l) => `
-    <button class="lp${l.id === activeId ? ' on' : ''}" data-mline="${H(l.id)}"
-            title="${l.status === 'running' ? '运行中' : (LINE_ST.find(([v]) => v === l.status) || [, '未运行'])[1]}">
-      <span class="lp-dot${l.status === 'running' ? ' live' : ''}"></span>${H(l.name)}
-      <small>${l.processes} 道</small>
-    </button>`).join('');
+/** 信息栏：编码、可生产线体、以及"改 / 删"两个操作。 */
+function renderMdMeta(m) {
+  const lines = S.mdLines || [];
+  const filled = S.mdStations.filter((x) => x.items.length > 0).length;
+  const items = S.mdStations.reduce((s, x) => s + x.items.length, 0);
+  const bytes = S.mdStations.reduce((s, x) => s + x.items.reduce((a, i) => a + (i.bytes || 0), 0), 0);
+  const over = lines.length && (m.total || S.mdStations.length) > Math.min(...S.lines.filter((l) => lines.some((x) => x.id === l.id)).map((l) => l.slots), 99);
+
+  $('mdMeta').innerHTML = `
+    <div class="mm-main">
+      <div class="mm-blk">
+        <span class="mm-k">编码</span><b class="mono">${H(m.code)}</b>
+      </div>
+      <div class="mm-blk">
+        <span class="mm-k">可生产线体</span>
+        <button class="mm-lines" data-mlines="${H(m.id)}" title="点击勾选这个机种能在哪几条线上做">
+          ${lines.length
+            ? lines.map((l) => `<span class="lp2 ${l.status === 'running' ? 'live' : ''}">${H(l.name)}</span>`).join('')
+            : '<span class="badge warn">还没安排线体</span>'}
+        </button>
+      </div>
+      ${over ? '<span class="badge warn">工序数超过线体工位数</span>' : ''}
+      <div class="spacer"></div>
+      <div class="mm-stats">
+        <span><b>${S.mdStations.length}</b> 道工序</span>
+        <span><b>${filled}</b> 已配</span>
+        <span><b>${items}</b> 个文件</span>
+        <span>${bytes ? fmtBytes(bytes) : '—'}</span>
+      </div>
+      <button class="btn sm" data-mact="ren">改编码/名称</button>
+      <button class="btn sm danger" data-mact="del">删除机种</button>
+    </div>`;
 }
 
-$('mdLines').addEventListener('click', async (e) => {
-  const b = e.target.closest('[data-mline]');
-  if (!b || b.dataset.mline === S.mdLineId) return;
-  S.mdLineId = b.dataset.mline;
-  // 徽标是按线统计的，切线体要连机种列表一起重取
-  await loadModels();
+$('mdMeta').addEventListener('click', async (e) => {
+  const m = S.models.find((x) => x.id === S.mdModelId);
+  if (!m) return;
+
+  const lb = e.target.closest('[data-mlines]');
+  if (lb) return editModelLines(m);
+
+  const act = e.target.closest('[data-mact]');
+  if (!act) return;
+
+  if (act.dataset.mact === 'ren') {
+    const r = await dialog({
+      title: '改机种',
+      message: '编码是终端和工艺文件里对外的标识；改编码不影响已配的内容。',
+      fields: [
+        { key: 'code', label: '机种编码', value: m.code },
+        { key: 'name', label: '机种名称', value: m.name }
+      ],
+      okText: '保存'
+    });
+    if (!r) return;
+    try {
+      await putJson('/api/models/' + encodeURIComponent(m.id), {
+        code: r.code || m.code, name: r.name || m.name
+      });
+      await loadModels(m.id);
+      toast('已保存', 'ok');
+    } catch (err) { toast(err.message, 'err'); }
+    return;
+  }
+
+  if (act.dataset.mact === 'del') {
+    const ok = await dialog({
+      title: `删除机种「${m.code}」？`,
+      message: `它的 ${S.mdStations.length} 道工序和里面的文件会一起删掉，不可恢复。`
+        + '文件本身还留在「文件查询」里，但要从头再配。',
+      okText: '删除',
+      danger: true
+    });
+    if (!ok) return;
+    try {
+      await api('/api/models/' + encodeURIComponent(m.id), { method: 'DELETE' });
+      await loadModels('');
+      toast('已删除 ' + m.code, 'ok');
+    } catch (err) { toast(err.message, 'err'); }
+  }
 });
 
-/* ================= 媒体库：按工序配内容（内容层） ================= */
+/** 勾选「使用线体」：一个机种可以安排好几条线，工艺共用一套。 */
+async function editModelLines(m) {
+  if (!S.lines.length) await loadLines().catch(() => {});
+  const have = new Set((S.mdLines || []).map((l) => l.id));
+  const r = await dialog({
+    title: `${m.code} 能生产于哪些线`,
+    message: '勾上的线可以在「作业内容」里排产这个机种。工艺只有一套，几条线共用。',
+    html: `<div class="dlg-lines">${S.lines.map((l) => `
+      <label class="chk-line">
+        <input type="checkbox" value="${H(l.id)}"${have.has(l.id) ? ' checked' : ''}>
+        <span>${H(l.name)}</span>
+        <small>${l.slots || 0} 块屏</small>
+      </label>`).join('') || '<span class="sub">还没有线体</span>'}</div>`,
+    read: (body) => [...body.querySelectorAll('.dlg-lines input:checked')].map((x) => x.value),
+    okText: '保存'
+  });
+  if (!r) return;
+  try {
+    await putJson('/api/models/' + encodeURIComponent(m.id), { lineIds: r });
+    await loadModels(m.id);
+    await loadLines();
+    toast(`已安排到 ${r.length} 条线`, 'ok');
+  } catch (err) { toast(err.message, 'err'); }
+}
 
-/** 媒体库：机种 → 线体 → 工位（左索引）+ 当前工位的内容（右编辑区） */
+$('mdNewBtn').addEventListener('click', async () => {
+  if (!S.lines.length) await loadLines().catch(() => {});
+  const r = await dialog({
+    title: '新建机种',
+    message: '一次把「几道工序」和「在哪几条线做」都定下来。工序码默认 OP1、OP2…，名称建完再填。',
+    html: `
+      <div class="dlg-row"><label for="nmCode">机种编码</label>
+        <input type="text" id="nmCode" placeholder="X300"></div>
+      <div class="dlg-row"><label for="nmName">机种名称</label>
+        <input type="text" id="nmName" placeholder="X300 型"></div>
+      <div class="dlg-row"><label for="nmCnt">几道工序</label>
+        <input type="number" id="nmCnt" min="1" max="60" value="5">
+        <div class="tip">默认生成 OP1…OPn，建完在下面逐道改名称。工序数别超过线体的工位数。</div></div>
+      <div class="dlg-row"><label>使用线体</label>
+        <div class="dlg-lines">${S.lines.map((l) => `
+          <label class="chk-line"><input type="checkbox" value="${H(l.id)}"${l.status === 'running' ? ' checked' : ''}>
+            <span>${H(l.name)}</span><small>${l.slots || 0} 块屏</small></label>`).join('')
+          || '<span class="sub">还没有线体，可以之后再安排</span>'}</div>
+        <div class="tip">可多选。几条线做同一个机种时，工序和内容是一套，不用重复录。</div></div>`,
+    read: (body) => ({
+      code: body.querySelector('#nmCode').value.trim(),
+      name: body.querySelector('#nmName').value.trim(),
+      processCount: Number(body.querySelector('#nmCnt').value) || 5,
+      lineIds: [...body.querySelectorAll('.dlg-lines input:checked')].map((x) => x.value)
+    }),
+    okText: '创建'
+  });
+  if (!r) return;
+  if (!r.code) return toast('机种编码不能为空', 'err');
+  try {
+    const made = await postJson('/api/models', r);
+    await loadModels(made.id);
+    await loadLines();
+    toast(`已新建 ${made.code}：${made.processes} 道工序，${made.lineCount} 条线`, 'ok');
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+/* ==================== 媒体库 ==================== */
+
+/** 媒体库：选机种 → 左索引点工序 → 右边上传。不再选线体（内容不按线分）。 */
 async function loadStations() {
   if (!S.models.length) await loadModels().catch(() => {});
-  if (!S.stLineId || !S.lines.some((l) => l.id === S.stLineId)) {
-    const dft = S.lines.find((l) => l.enabled) || S.lines[0];
-    S.stLineId = dft ? dft.id : '';
-  }
   if (!S.modelId || !S.models.some((m) => m.id === S.modelId)) {
     S.modelId = S.mdModelId || (S.models[0] && S.models[0].id) || '';
   }
-  renderLinePick('mlLines', S.stLineId);
   renderMlModelPick();
 
   const m = S.models.find((x) => x.id === S.modelId);
-  const line = S.lines.find((x) => x.id === S.stLineId);
-
-  if (!m || !line) {
+  if (!m) {
     S.stations = [];
     S.stPickId = '';
-    $('mediaSub').textContent = m
-      ? '还没有线体，先去「线体设置」建一条'
-      : '还没有机种，先去「机种设置」新建一个';
+    $('mediaSub').textContent = '还没有机种，先去「机种设置」新建一个';
     $('stNav').innerHTML = '';
-    $('stations').innerHTML = '<div class="empty">先选机种和线体。</div>';
+    $('stations').innerHTML = '<div class="empty">先选机种。</div>';
     renderStIndex();
     return;
   }
 
   try {
-    const d = await api('/api/stations?modelId=' + encodeURIComponent(m.id)
-      + '&lineId=' + encodeURIComponent(line.id));
-    S.stations = d.stations || [];
+    const d = await api('/api/processes?modelId=' + encodeURIComponent(m.id));
+    S.stations = d.processes || [];
   } catch (e) {
     S.stations = [];
     toast(e.message, 'err');
   }
 
   const filled = S.stations.filter((x) => x.items.length > 0).length;
-  $('mediaSub').textContent = `${line.name} · ${S.stations.length} 个工位`
-    + (S.stations.length ? ` · 已配 ${filled}` : '');
+  $('mediaSub').textContent = `${m.code} · ${S.stations.length} 道工序`
+    + (S.stations.length ? ` · 已配 ${filled}` : ' · 先去「机种设置」加工序');
 
   renderStations();
 }
 
-/** 媒体库顶部的机种下拉。用下拉而不是列表：这一页的重点是工位，机种只是入口 */
+/** 媒体库顶部的机种下拉。这一页的重点是工序，机种只是入口 */
 function renderMlModelPick() {
   const sel = $('mlModelPick');
   if (!sel) return;
@@ -998,39 +1022,19 @@ function renderMlModelPick() {
 
 $('mlModelPick').addEventListener('change', async (e) => {
   S.modelId = e.target.value;
-  S.stPickId = '';   // 换机种，上一台的工位 id 全部作废，交给 ensurePick 重挑
+  S.stPickId = '';   // 换机种，上一套工序 id 全部作废，交给 ensurePick 重挑
   await loadStations();
 });
 
-$('mlLines').addEventListener('click', async (e) => {
-  const b = e.target.closest('[data-mline]');
-  if (!b || b.dataset.mline === S.stLineId) return;
-  S.stLineId = b.dataset.mline;
-  S.stPickId = '';   // 换线体等于换一整套工位
-  await loadStations();
-});
-
-/** 机种设置顶部的汇总：主语是"工序"，内容数只作参考 —— 真正配内容去媒体库 */
-function renderMdSummary() {
-  const total = S.mdStations.length;
-  const filled = S.mdStations.filter((x) => x.items.length > 0).length;
-  const items = S.mdStations.reduce((s, x) => s + x.items.length, 0);
-  const bytes = S.mdStations.reduce((s, x) => s + x.items.reduce((a, i) => a + (i.bytes || 0), 0), 0);
-
-  $('mdSummary').innerHTML = `
-    <div class="ms">
-      <div class="ms-item"><b>${total}</b><span>道工序</span></div>
-      <div class="ms-item"><b>${filled}</b><span>已配内容</span></div>
-      <div class="ms-item"><b>${total - filled}</b><span>待配内容</span></div>
-      <div class="ms-item"><b>${items}</b><span>个文件</span></div>
-      <div class="ms-item"><b>${bytes ? fmtBytes(bytes) : '—'}</b><span>合计体积</span></div>
-    </div>`;
-}
+const PLAY_MODES = [
+  ['loop', '循环播放', '播完最后一张从第一张重新开始（默认）'],
+  ['once', '播一遍停', '顺序播完停在最后一屏，不再重头开始'],
+];
 
 /**
  * 工序清单表格。
  * 25 道工序用表格而不是卡片：一行 34px，表头固定、表内滚动，
- * 页面高度不随工序数增长；「内容」列直接点进媒体库对应的工位。
+ * 页面高度不随工序数增长；「内容」列直接点进媒体库对应的工序。
  */
 function renderStTable() {
   const tb = $('stTbody');
@@ -1042,30 +1046,39 @@ function renderStTable() {
     ? `${total} 道工序 · 已配 <b>${filled}</b> 道`
     : '—';
 
+  if (!S.mdModelId) {
+    tb.innerHTML = '<tr><td colspan="6" class="st-empty">上面选一个机种，这里显示它的工序。</td></tr>';
+    return;
+  }
   if (!total) {
-    tb.innerHTML = `<tr><td colspan="5" class="st-empty">
-      这个机种在这条线上还没有工序。点右上「按本线工序补齐」按线体工序建一套，
-      或「+ 批量加工序」一次贴多行。</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="6" class="st-empty">
+      这个机种还没有工序。点右上「+ 批量加工序」一次贴多行（一行 <b>OP1 装配</b>）。</td></tr>`;
     return;
   }
 
-  const q = (S.mdQuery || '').trim().toLowerCase();
+  const kw = (S.mdQuery || '').trim().toLowerCase();
   const shown = S.mdStations.filter((st) =>
-    !q || (st.code || '').toLowerCase().includes(q) || (st.name || '').toLowerCase().includes(q));
+    !kw || (st.code || '').toLowerCase().includes(kw) || (st.name || '').toLowerCase().includes(kw));
 
   if (!shown.length) {
-    tb.innerHTML = '<tr><td colspan="5" class="st-empty">没有匹配的工序</td></tr>';
+    tb.innerHTML = '<tr><td colspan="6" class="st-empty">没有匹配的工序</td></tr>';
     return;
   }
 
   tb.innerHTML = shown.map((st) => {
     const n = st.items.length;
     return `<tr data-row="${H(st.id)}">
-      <td><span class="cell-code" title="工序码由「线体设置」里的工序决定，这里不改">${H(st.code)}</span></td>
+      <td><span class="cell-code" title="工序码就是终端上的 op 参数">${H(st.code)}</span></td>
       <td><input class="cell-in" data-f="name" maxlength="40"
                  value="${H(st.name)}" placeholder="工序名称"></td>
       <td><input class="cell-in" data-f="note" maxlength="200"
                  value="${H(st.note || '')}" placeholder="这道工序做什么…"></td>
+      <td>
+        <select class="cell-sel" data-play="${H(st.id)}">
+          ${PLAY_MODES.map(([v, t, tip]) => `<option value="${v}" title="${H(tip)}"${
+            (st.playMode || 'loop') === v ? ' selected' : ''}>${t}</option>`).join('')}
+        </select>
+      </td>
       <td>${n
         ? `<button class="cell-n on" data-jump="${H(st.id)}">${n} 项</button>`
         : `<button class="cell-n" data-jump="${H(st.id)}">未配</button>`}</td>
@@ -1094,14 +1107,13 @@ $('stTbody').addEventListener('change', async (e) => {
 
   inp.classList.add('saving');
   try {
-    const out = await putJson('/api/stations/' + encodeURIComponent(st.id), { [f]: v });
-    Object.assign(st, out);
+    const out = await putJson('/api/processes/' + encodeURIComponent(st.id), { [f]: v });
+    Object.assign(st, out.process || {});
     inp.classList.remove('saving');
     inp.classList.add('saved');
     setTimeout(() => inp.classList.remove('saved'), 1200);
     renderMdList();          // 徽标跟着变
-    renderMdSummary();
-    renderStTable();
+    renderMdMeta(S.models.find((x) => x.id === S.mdModelId));
   } catch (err) {
     inp.value = st[f] || '';
     inp.classList.remove('saving');
@@ -1109,8 +1121,21 @@ $('stTbody').addEventListener('change', async (e) => {
   }
 });
 
+// 播放方式：选完立刻存，不写"保存"按钮
+$('stTbody').addEventListener('change', async (e) => {
+  const sel = e.target.closest('[data-play]');
+  if (!sel) return;
+  const st = S.mdStations.find((x) => x.id === sel.dataset.play);
+  if (!st || st.playMode === sel.value) return;
+  try {
+    await putJson('/api/processes/' + encodeURIComponent(st.id), { playMode: sel.value });
+    st.playMode = sel.value;
+    toast(`「${st.code}」改为${(PLAY_MODES.find(([v]) => v === sel.value) || [, ''])[1]}`, 'ok');
+  } catch (err) { toast(err.message, 'err'); renderStTable(); }
+});
+
 $('stTbody').addEventListener('click', async (e) => {
-  // 点「内容」列 → 切到媒体库并直接把那个工位选中
+  // 点「内容」列 → 切到媒体库并直接把那道工序选中
   const jump = e.target.closest('[data-jump]');
   if (jump) { await openInMedia(jump.dataset.jump); return; }
 
@@ -1122,18 +1147,17 @@ $('stTbody').addEventListener('click', async (e) => {
     `「${st.code} ${st.name}」里还有 ${st.items.length} 项内容，删掉工序会一起删掉，确定吗？`,
     '删除', true)) return;
   try {
-    await api('/api/stations/' + encodeURIComponent(st.id), { method: 'DELETE' });
-    await loadMdStations();
+    await api('/api/processes/' + encodeURIComponent(st.id), { method: 'DELETE' });
+    await loadMdProcesses();
     toast('已删除工序 ' + st.code, 'ok');
   } catch (err) { toast(err.message, 'err'); }
 });
 
 /** 从机种设置跳到媒体库，落点就是刚点的那道工序 */
-async function openInMedia(stationId) {
+async function openInMedia(processId) {
   S.tab = 'media';
   S.modelId = S.mdModelId;
-  S.stLineId = S.mdLineId;
-  S.stPickId = stationId;
+  S.stPickId = processId;
   syncNav();
   await loadStations();
   renderTopStats();
@@ -1152,7 +1176,7 @@ function renderStations() {
   renderStEdit();
 }
 
-/** 选中的工位要一直有效：切机种 / 切线体 / 删工位之后，老 id 就指不到了 */
+/** 选中的工序要一直有效：切机种 / 删工序之后，老 id 就指不到了 */
 function ensurePick() {
   if (!S.stations.length) { S.stPickId = ''; return; }
   if (S.stations.some((x) => x.id === S.stPickId)) return;
@@ -1161,7 +1185,7 @@ function ensurePick() {
   S.stPickId = (next || S.stations[0]).id;
 }
 
-/** 工位索引：一屏看完这条线上有哪些屏、哪些配好了、哪些还空着 */
+/** 工序索引：一屏看完这个机种有哪些工序、哪些配好了、哪些还空着 */
 function renderStIndex() {
   const list = $('stList');
   if (!list) return;
@@ -1172,7 +1196,7 @@ function renderStIndex() {
   $('stBar').style.width = total ? `${Math.round((filled / total) * 100)}%` : '0';
 
   if (!total) {
-    list.innerHTML = '<div class="si-empty">还没有工位</div>';
+    list.innerHTML = '<div class="si-empty">还没有工序</div>';
     return;
   }
 
@@ -1185,7 +1209,7 @@ function renderStIndex() {
   });
 
   if (!shown.length) {
-    list.innerHTML = '<div class="si-empty">没有符合条件的工位</div>';
+    list.innerHTML = '<div class="si-empty">没有符合条件的工序</div>';
     return;
   }
 
@@ -1207,21 +1231,20 @@ function renderStIndex() {
   }).join('');
 }
 
-/** 右侧编辑区：只渲染当前这一个工位，高度不随工序数增长 */
+/** 右侧编辑区：只渲染当前这一道工序，高度不随工序数增长 */
 function renderStEdit() {
   const box = $('stations');
   if (!S.stations.length) {
     $('stNav').innerHTML = '';
-    const line = S.lines.find((x) => x.id === S.stLineId);
-    box.innerHTML = `<div class="empty">「这个机种」在「${H(line ? line.name : '这条线')}」上还没有工位。`
-      + '点「按本线工序补齐」按工序建一套，或左下「+ 添加工位」单个加。</div>';
+    box.innerHTML = '<div class="empty">这个机种还没有工序。去「机种设置」点「+ 批量加工序」，'
+      + '或者新建机种时直接填「几道工序」。</div>';
     return;
   }
   renderStNav();
   box.innerHTML = stationHtml(pickedStation());
 }
 
-/** 编辑区顶部那条：只报"现在这个工位什么状态"，工序码与名称下面的卡里已经有，不重复 */
+/** 编辑区顶部那条：只报"现在这道工序什么状态"，工序码与名称下面的卡里已经有，不重复 */
 function renderStNav() {
   const nav = $('stNav');
   const st = pickedStation();
@@ -1234,7 +1257,7 @@ function renderStNav() {
 
   const stat = st.items.length
     ? `已配 <b>${st.items.length}</b> 项${bytes ? ' · ' + fmtBytes(bytes) : ''}`
-    : (noReq ? '<span class="se-warn">还没勾「允许」类型，这个工位不限制文件类型</span>' : '还没有内容');
+    : (noReq ? '<span class="se-warn">还没勾「允许」类型，这道工序不限制文件类型</span>' : '还没有内容');
 
   nav.innerHTML = `<span class="se-stat">${stat}</span>
     <div class="spacer"></div>
@@ -1247,13 +1270,13 @@ function pickedStation() {
   return S.stations.find((x) => x.id === S.stPickId) || S.stations[0];
 }
 
-// ---- 工位索引交互 ----
+// ---- 工序索引交互 ----
 $('stList').addEventListener('click', (e) => {
   const b = e.target.closest('[data-spick]');
   if (!b || b.dataset.spick === S.stPickId) return;
   S.stPickId = b.dataset.spick;
   renderStations();
-  // 切到另一个工位后把编辑区滚回顶部，否则会停在上一张卡的滚动位置
+  // 切到另一道工序后把编辑区滚回顶部，否则会停在上一张卡的滚动位置
   $('stations').scrollIntoView({ block: 'nearest' });
 });
 
@@ -1343,7 +1366,7 @@ function stationHtml(st) {
       <input class="st-name" data-sid="${H(st.id)}" data-f="name" value="${H(st.name)}" maxlength="40">
       <span class="st-meta">${st.items.length} 项${bytes ? ' · ' + fmtBytes(bytes) : ''}</span>
       <div class="spacer"></div>
-      <button class="btn sm" data-sid="${H(st.id)}" data-stdel>删除工位</button>
+      <button class="btn sm" data-sid="${H(st.id)}" data-stdel>删除工序</button>
     </div>
 
     <div class="st-reqs">
@@ -1352,6 +1375,13 @@ function stationHtml(st) {
       <span class="st-lbl">单文件 ≤</span>
       <input class="knum" type="number" min="0" max="9999" data-sid="${H(st.id)}" data-f="maxMb"
              value="${st.maxMb || 0}" title="0 = 不限"> MB
+      <i class="st-div"></i>
+      <span class="st-lbl">播放</span>
+      <select class="minisel" data-sid="${H(st.id)}" data-f="playMode"
+              title="循环播放：放到最后一项再回到第一项；播一遍停：放到最后一项就停在那一屏">
+        <option value="loop"${(st.playMode || 'loop') === 'loop' ? ' selected' : ''}>循环播放</option>
+        <option value="once"${st.playMode === 'once' ? ' selected' : ''}>播一遍停</option>
+      </select>
     </div>
 
     <div class="st-drop" data-sid="${H(st.id)}">
@@ -1363,7 +1393,7 @@ function stationHtml(st) {
   </div>`;
 }
 
-/** 只在某张工位卡片内部重绘，避免整页重绘丢焦点 */
+/** 只在某张工序卡片内部重绘，避免整页重绘丢焦点 */
 function renderOneStation(sid) {
   const el = $('stations').querySelector(`[data-st="${sid}"]`);
   const st = S.stations.find((x) => x.id === sid);
@@ -1373,7 +1403,7 @@ function renderOneStation(sid) {
   el.replaceWith(tmp.firstElementChild);
 }
 
-/** 把某工位的当前内存状态整体提交（内容/要求都走这一个接口） */
+/** 把某道工序的当前内存状态整体提交（内容/要求都走这一个接口） */
 async function saveStation(sid, payload) {
   const st = S.stations.find((x) => x.id === sid);
   if (!st) return null;
@@ -1383,9 +1413,10 @@ async function saveStation(sid, payload) {
       mediaId: it.mediaId, dwellSec: it.dwellSec, fit: it.fit, zoom: it.zoom
     }));
   }
-  const out = await putJson('/api/stations/' + encodeURIComponent(sid), body);
+  const out = await putJson('/api/processes/' + encodeURIComponent(sid), body);
   const i = S.stations.findIndex((x) => x.id === sid);
-  if (i >= 0) S.stations[i] = out;
+  // 接口回 { ok, process }：整份最新的工序（含要求与内容）在这里换掉旧的那份
+  if (i >= 0 && out && out.process) S.stations[i] = { ...S.stations[i], ...out.process };
   // 索引上的项数与体积、顶部那行状态都跟着改，否则要刷新整页才对
   refreshMediaSub();
   renderStIndex();
@@ -1395,15 +1426,15 @@ async function saveStation(sid, payload) {
 
 /** 媒体库副标题：机种内容一改，已配数就变了 */
 function refreshMediaSub() {
-  const line = S.lines.find((x) => x.id === S.stLineId);
   const el = $('mediaSub');
-  if (!el || !line) return;
+  const m = S.models.find((x) => x.id === S.modelId);
+  if (!el || !m) return;
   const filled = S.stations.filter((x) => x.items.length > 0).length;
-  el.textContent = `${line.name} · ${S.stations.length} 个工位`
+  el.textContent = `${m.code} · ${S.stations.length} 道工序`
     + (S.stations.length ? ` · 已配 ${filled}` : '');
 }
 
-// ---- 工位交互 ----
+// ---- 工序交互 ----
 $('stations').addEventListener('click', async (e) => {
   const t = e.target;
   const sid = t.dataset.sid;
@@ -1441,17 +1472,17 @@ $('stations').addEventListener('click', async (e) => {
     const st = S.stations.find((x) => x.id === sid);
     if (!st) return;
     const ok = await dialog({
-      title: `删除工位 ${st.code}？`,
-      message: '只删这个机种下面这块屏的配置。线体上的工序不动，别处的文件也不动。' +
-        (st.items.length ? `\n\n注意：这个工位还有 ${st.items.length} 项内容，删了要重传。` : ''),
+      title: `删除工序 ${st.code}？`,
+      message: '删的是这个机种下的这道工序，别的机种和文件库都不受影响。' +
+        (st.items.length ? `\n\n注意：这道工序还有 ${st.items.length} 项内容，删了要重传。` : ''),
       okText: '删除',
       danger: true
     });
     if (!ok) return;
     try {
-      await api('/api/stations/' + encodeURIComponent(sid), { method: 'DELETE' });
+      await api('/api/processes/' + encodeURIComponent(sid), { method: 'DELETE' });
       await loadStations();
-      toast('已删除工位 ' + st.code, 'ok');
+      toast('已删除工序 ' + st.code, 'ok');
     } catch (err) { toast(err.message, 'err'); }
   }
 });
@@ -1491,6 +1522,7 @@ $('stations').addEventListener('change', async (e) => {
     const payload = {};
     if (numField) payload.maxMb = Math.max(0, Number(t.value) || 0);
     else if (t.dataset.f === 'name') payload.name = t.value.trim() || st.code;
+    else if (t.dataset.f === 'playMode') payload.playMode = t.value === 'once' ? 'once' : 'loop';
 
     if (t.dataset.kn || t.dataset.kw || t.dataset.kh) {
       const kind = t.dataset.kn || t.dataset.kw || t.dataset.kh;
@@ -1529,7 +1561,7 @@ $('stations').addEventListener('change', async (e) => {
   try { await saveStation(sid, { items }); } catch (err) { toast(err.message, 'err'); }
 });
 
-// 拖拽上传到工位
+// 拖拽上传到工序
 ['dragenter', 'dragover'].forEach((ev) =>
   $('stations').addEventListener(ev, (e) => {
     const box = e.target.closest('.st-drop');
@@ -1611,14 +1643,12 @@ async function downloadFile(url, fallback) {
 // 导出：先问范围。以前只能整厂导，想单独看一个机种得把整份文件翻一半。
 $('stExportBtn').addEventListener('click', async () => {
   const m = S.models.find((x) => x.id === S.mdModelId);
-  const ln = (S.lines || []).find((x) => x.id === S.mdLineId);
-  const opts = ['<option value="all">全厂 —— 所有机种、所有线体</option>'];
+  const opts = ['<option value="all">全厂 —— 所有机种的工序</option>'];
   if (m) opts.push(`<option value="model">只导出「${H(m.name)}」</option>`);
-  if (m && ln) opts.push(`<option value="one">只导出「${H(m.name)} · ${H(ln.name)}」</option>`);
 
   const r = await dialog({
     title: '导出工序清单',
-    message: '五列：机种 / 线体 / 工序码 / 名称 / 做什么。在 Excel 里改完，可以用「导入」整份导回来。',
+    message: '四列：机种 / 工序码 / 名称 / 做什么。在 Excel 里改完，可以用「导入」整份导回来。',
     html: `<div class="dlg-row"><label for="expRange">导出范围</label>
       <select id="expRange" class="dlg-sel">${opts.join('')}</select></div>`,
     read: (b) => b.querySelector('#expRange').value,
@@ -1626,10 +1656,8 @@ $('stExportBtn').addEventListener('click', async () => {
   });
   if (!r) return;
 
-  const qs = r === 'one'
-    ? `?modelId=${encodeURIComponent(S.mdModelId)}&lineId=${encodeURIComponent(S.mdLineId)}`
-    : r === 'model' ? `?modelId=${encodeURIComponent(S.mdModelId)}` : '';
-  try { await downloadFile('/api/export/stations.xlsx' + qs, '工序清单.xlsx'); }
+  const qs = r === 'model' ? `?modelId=${encodeURIComponent(S.mdModelId)}` : '';
+  try { await downloadFile('/api/export/processes.xlsx' + qs, '工序清单.xlsx'); }
   catch (err) { toast(err.message, 'err'); }
 });
 
@@ -1649,11 +1677,10 @@ $('stImportBtn').addEventListener('click', () => {
     const f = inp.files && inp.files[0];
     if (!f) return;
 
-    // 带上当前选中的机种线体：老的三列文件（没有机种/线体列）要靠它定位。
-    // 全厂表自带这两列，服务端优先用表里的。
+    // 带上当前选中的机种：老的三列文件（没有机种列）要靠它定位。
+    // 全厂表自带机种列，服务端优先用表里的。
     const qs = new URLSearchParams({ filename: f.name });
     if (S.mdModelId) qs.set('modelId', S.mdModelId);
-    if (S.mdLineId) qs.set('lineId', S.mdLineId);
 
     let d;
     try {
@@ -1732,10 +1759,10 @@ async function showImportPreview(d) {
     .map(({ row, modelId, lineId, code, name, note }) => ({ row, modelId, lineId, code, name, note }));
 
   let out;
-  try { out = await postJson('/api/stations/import', { rows: send, mode: r }); }
+  try { out = await postJson('/api/processes/import', { rows: send, mode: r }); }
   catch (err) { return toast(err.message, 'err'); }
 
-  await loadMdStations();
+  await loadMdProcesses();
   await showImportResult(out, d);
 }
 
@@ -1822,9 +1849,9 @@ $('dlgBody').addEventListener('click', async (e) => {
   if (btn.dataset.imp === 'undo-do') {
     btn.disabled = true;
     try {
-      const r = await postJson('/api/stations/import/undo', { batchId: btn.dataset.batch });
+      const r = await postJson('/api/processes/import/undo', { batchId: btn.dataset.batch });
       toast(`已撤销 ${r.deleted} 道工序`, 'ok');
-      await loadMdStations();
+      await loadMdProcesses();
       $('dlgOk').click();   // 把结果窗收掉，别让人对着一个已经过期的数字
     } catch (err) {
       btn.disabled = false;
@@ -1833,14 +1860,14 @@ $('dlgBody').addEventListener('click', async (e) => {
   }
 });
 
-// 机种设置页：批量加工序（给这个机种在这条线上补工序定义）
+// 机种设置页：批量加工序（给这个机种补工序定义）
+// 一行一条从 Excel 贴过来，比一个个弹窗快二十倍 —— 现场一个机种十几道工序是常态
 $('stAddBtn').addEventListener('click', async () => {
   if (!S.mdModelId) return toast('先选一个机种', 'err');
-  if (!S.mdLineId) return toast('先选一条线体', 'err');
   const text = await bulkDialog({
     title: '批量加工序',
-    message: '一行一条。工序码要和这条线「线体设置」里的工序码一致，那块屏才拉得到内容。',
-    placeholder: 'OP10 压装\nOP20 焊接'
+    message: '一行一条，格式「工序码 名称」。工序码就是终端上的 op 参数，默认从 OP1 起编。',
+    placeholder: 'OP1 装配\nOP2 调试\nOP3 检验'
   });
   if (!text) return;
   const rows = parseBulk(text);
@@ -1850,13 +1877,12 @@ $('stAddBtn').addEventListener('click', async () => {
   const bad = [];
   for (const r of rows) {
     try {
-      await postJson('/api/stations', {
-        modelId: S.mdModelId, lineId: S.mdLineId, code: r.code, name: r.name
-      });
+      await postJson('/api/processes', { modelId: S.mdModelId, code: r.code, name: r.name });
       okN += 1;
     } catch (err) { bad.push(`${r.code}：${err.message}`); }
   }
-  await loadMdStations();
+  await loadMdProcesses();
+  renderMdList();               // 徽标分母变了
   if (okN) toast(`已加 ${okN} 道工序`, 'ok');
   if (bad.length) {
     await dialog({
@@ -1866,136 +1892,6 @@ $('stAddBtn').addEventListener('click', async () => {
       hideCancel: true
     });
   }
-});
-
-// 机种操作
-$('mdNewBtn').addEventListener('click', async () => {
-  const r = await dialog({
-    title: '新建机种',
-    message: '新建后会自动按每条线体现有的工序补出工位（一条线二十道工序就补二十个），进「机种设置」直接配内容即可。',
-    fields: [
-      { key: 'code', label: '机种编码', placeholder: 'X300', tip: '换型时按这个编码下发，建议与工艺文件一致' },
-      { key: 'name', label: '显示名称', placeholder: '留空则用「X300 型」' }
-    ],
-    okText: '创建'
-  });
-  if (!r) return;
-  if (!r.code) return toast('机种编码不能为空', 'err');
-  try {
-    const made = await postJson('/api/models', { code: r.code, name: r.name || r.code + ' 型' });
-    await loadModels(made.id);
-    toast('已新建机种 ' + r.code, 'ok');
-  } catch (err) { toast(err.message, 'err'); }
-});
-
-$('mdRenameBtn').addEventListener('click', async () => {
-  const m = S.models.find((x) => x.id === S.mdModelId);
-  if (!m) return;
-  const r = await dialog({
-    title: '改机种',
-    fields: [
-      { key: 'code', label: '机种编码', value: m.code },
-      { key: 'name', label: '显示名称', value: m.name }
-    ],
-    okText: '保存'
-  });
-  if (!r) return;
-  try {
-    await putJson('/api/models/' + encodeURIComponent(m.id), { code: r.code, name: r.name });
-    await loadModels(m.id);
-    toast('已保存', 'ok');
-  } catch (err) { toast(err.message, 'err'); }
-});
-
-$('mdDelBtn').addEventListener('click', async () => {
-  const m = S.models.find((x) => x.id === S.mdModelId);
-  if (!m) return;
-  const ok = await dialog({
-    title: `删除机种「${modelLabel(m)}」？`,
-    message: '这个机种的所有工位和内容会一起删掉（文件还在媒体库里，可以重新引用）。\n\n' +
-      '如果只是暂时不做，改成停用更好 —— 停用后不会出现在换型下拉里，内容都留着。',
-    okText: '仍然删除',
-    danger: true
-  });
-  if (!ok) return;
-  try {
-    await api('/api/models/' + encodeURIComponent(m.id), { method: 'DELETE' });
-    S.mdModelId = '';
-    await loadModels();
-    toast('已删除机种 ' + m.code, 'ok');
-  } catch (err) { toast(err.message, 'err'); }
-});
-
-// 同步工序到线体：机种配了 5 个工位，线体只有 3 道工序时一键补齐
-// 按本线的工序补齐这个机种的工位（线体新加了工序，这里一键跟上）
-$('mdSyncBtn').addEventListener('click', async () => {
-  const m = S.models.find((x) => x.id === S.mdModelId);
-  const line = S.lines.find((x) => x.id === S.mdLineId);
-  if (!m) return toast('先选一个机种', 'err');
-  if (!line) return toast('先选一条线体', 'err');
-
-  try {
-    const out = await postJson('/api/stations/sync', { modelId: m.id, lineId: line.id });
-    if (out.created.length) {
-      toast(`「${line.name}」补上 ${out.created.length} 道工序：${out.created.join('、')}`, 'ok');
-    } else {
-      toast(`已经对上了，本线 ${out.total} 道工序不用补`, 'ok');
-    }
-    await loadLines().catch(() => {});
-    await loadMdStations();
-  } catch (err) { toast(err.message, 'err'); }
-});
-
-// 从另一条线整套复制过来（两条线工艺大同小异时最省事）
-$('mdCopyBtn').addEventListener('click', async () => {
-  const m = S.models.find((x) => x.id === S.modelId);
-  const to = S.lines.find((x) => x.id === S.stLineId);
-  if (!m) return toast('先选一个机种', 'err');
-  if (!to) return toast('先选一条线体', 'err');
-
-  const others = S.lines.filter((l) => l.id !== to.id);
-  if (!others.length) return toast('只有一条线体，没有可复制的来源', 'err');
-
-  const html = '<div class="linepick">' + others.map((l) => `
-    <label class="linepick-row">
-      <input type="radio" name="copyfrom" value="${H(l.id)}">
-      <span class="lp-name">${H(l.name)}<small>${H(l.code)}</small></span>
-      <span class="lp-meta">${l.processes} 道工序</span>
-    </label>`).join('') + '</div>';
-
-  const r = await dialog({
-    title: `从其它线复制到「${to.name}」`,
-    message: `把「${m.code}」在所选线体上的整套工位（允许类型 + 文件 + 顺序）复制到「${to.name}」。`
-      + '复制出来是完全独立的一份，之后改这边不影响那边；本线已有内容的工位会跳过，'
-      + '空着的工位直接填上。',
-    html,
-    read: (body) => {
-      const pick = body.querySelector('input[name=copyfrom]:checked');
-      return { fromLineId: pick ? pick.value : '' };
-    },
-    okText: '复制'
-  });
-  if (!r || !r.fromLineId) return;
-
-  try {
-    const out = await postJson('/api/stations/copy', {
-      modelId: m.id, fromLineId: r.fromLineId, toLineId: to.id
-    });
-    let h = `<p>从「${H(out.fromName)}」复制到「${H(out.toName)}」完成。</p>`;
-    if (out.filled.length) h += `<p style="color:var(--ok)">填入：${out.filled.map(H).join('、')}</p>`;
-    if (out.created.length) h += `<p style="color:var(--ok)">新建：${out.created.map(H).join('、')}</p>`;
-    if (out.skipped.length) {
-      h += `<p style="color:var(--ink3)">跳过（本线已有内容，未覆盖）：${out.skipped.map(H).join('、')}</p>`;
-    }
-    if (out.empty && out.empty.length) {
-      h += `<p style="color:var(--ink3)">来源线本来就没内容：${out.empty.map(H).join('、')}</p>`;
-    }
-    if (!out.filled.length && !out.created.length && !out.replaced.length) {
-      h += '<p style="color:var(--ink3)">没有搬任何内容 —— 来源线在这些工位上也是空的，或者本线已经全有了。</p>';
-    }
-    await dialog({ title: '复制完成', html: h, okText: '知道了', hideCancel: true });
-    await loadStations();
-  } catch (err) { toast(err.message, 'err'); }
 });
 
 // ==================== 上传 ====================
@@ -2049,14 +1945,14 @@ function clearUplIfIdle() {
 }
 
 /**
- * 上传落库 → 直接把文件追加到这个工位的内容里。
+ * 上传落库 → 直接把文件追加到这道工序的内容里。
  * 为什么不先进媒体库再引用：现场的动作是"这道工序要这几张图"，
  * 让他先传完再挑一遍是多余的两步。
  */
 async function handleFiles(files) {
   const sid = S.uploadStation;
   const st = S.stations.find((x) => x.id === sid);
-  if (!st) return toast('先选一个工位', 'err');
+  if (!st) return toast('先选一个工序', 'err');
   const list = [...files];
   if (!list.length) return;
 
@@ -2088,7 +1984,7 @@ async function handleFiles(files) {
       }
       if (allowed.length && !allowed.includes(d.kind)) {
         row.err('类型不允许');
-        toast(`这个工位不允许放${KIND_CN[d.kind] || d.kind}：${f.name}。\n需要的话先在工位上勾选该类型。`, 'err');
+        toast(`这道工序不允许放${KIND_CN[d.kind] || d.kind}：${f.name}。\n需要的话先在这道工序上勾选该类型。`, 'err');
         continue;
       }
       if (items.some((x) => x.mediaId === d.id)) { row.ok('已在清单'); continue; }
@@ -2144,7 +2040,7 @@ async function loadMedia() {
           <div class="s">${fmtBytes(m.bytes)}${m.width ? ` · ${m.width}×${m.height}` : ''} · 被引用 <b>${m.used}</b> 次</div>
         </div>
       </div>
-    `).join('') || '<div class="empty" style="grid-column:1/-1">媒体库是空的。点右上角「上传文件」，或在工位里直接拖进去。</div>';
+    `).join('') || '<div class="empty" style="grid-column:1/-1">媒体库是空的。点右上角「上传文件」，或在工序里直接拖进去。</div>';
     renderTopStats();
   } catch (err) {
     $('mediagrid').innerHTML = `<div class="empty" style="grid-column:1/-1">${H(err.message)}</div>`;
@@ -2181,7 +2077,7 @@ $('gcBtn').addEventListener('click', async () => {
     const names = dry.list.slice(0, 8).map((x) => x.name).join('、');
     const ok = await ask(
       '清理未引用文件',
-      `有 ${dry.total} 个文件没有被任何工位引用，共 ${fmtBytes(dry.bytes)}：\n` +
+      `有 ${dry.total} 个文件没有被任何工序引用，共 ${fmtBytes(dry.bytes)}：\n` +
       `${names}${dry.total > 8 ? ' …' : ''}\n\n删除后不可恢复，确定删除？`,
       '删除',
       true

@@ -14,7 +14,7 @@
 //   rev  通信语义，全局单调，任何需要通知终端的变化都 +1（进 prepare、activate、内容改动）。
 //        长轮询用 since=rev 判断有没有新信息，否则 prepare 期间 seq 没变，
 //        终端要么疯狂轮询、要么永远不知道要开始下载。
-import { q, tx, getSetting, setSetting } from './db.js';
+import { q, tx, getSetting, setSetting, processesOf } from './db.js';
 
 const WAIT_TIMEOUT_MS = 25_000;      // 长轮询挂起上限
 const ONLINE_TTL_MS = 60_000;        // 多久没请求算离线
@@ -230,7 +230,13 @@ function maybeActivate(lineId) {
   const row = lineRow(lineId);
   if (!row.pending_model_id) return false;
 
-  const ops = onlineOps(lineId);
+  // 只让「目标机种真的有的工序」投票。
+  // 现场总会有一两台的 op 配错（配成 OP99），4.0.0 之前它会 404 根本进不了在线表，
+  // 现在 boot 会返回 200 + noStation 让它照常心跳 —— 于是它就在线、却永远不会举手，
+  // 一条错配的屏能把整条线的换型永久卡在 prepare。过滤掉它才是对的：
+  // 这道工序在这个机种里压根不存在，谈不上"备好了没有"。
+  const codes = new Set(processesOf(row.pending_model_id).map((p) => p.code));
+  const ops = onlineOps(lineId).filter((op) => codes.size === 0 || codes.has(op));
   const allReady = ops.length === 0 ||
     ops.every((op) => ready.get(keyOf(lineId, op))?.modelId === row.pending_model_id);
   const expired = row.pending_deadline > 0 && Date.now() >= row.pending_deadline;

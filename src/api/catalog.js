@@ -1,37 +1,65 @@
-// 线体、型号、工序档案：这三张表是"内容骨架"，其余一切都是往里填
+// 线体、机种、工序：三张表就是全部「内容骨架」，其余都是往里填
 //
-// v1.7.0 起多了一层「线体」：每天的活不一定在同一条产线上，
-// 昨天用一线、今天用二线是常态。所以线体要能建、能启停，
-// 工序挂在具体线体下（一线 OP30 和二线 OP30 是两份不同的内容）。
-import { q, tx, coverage, processesOf, cloneStandardProcesses, setLineStatus, LINE_STATUS, lines, ensureStationsForLine, ensureAllModelStations } from '../db.js';
+// v4.0.0 的关系比 3.x 少一层，这是这次重构的全部意义：
+//   线体（line）  = 物理产线。只回答"有哪几条线、现在什么状态、有几块屏"。
+//   机种（model）= 产品。回答"这个产品有几道工序、能在哪几条线上做"。
+//   工序（process）= 机种下的一道工序 = 一块屏。内容挂在这里。
+//
+// 以前还有「工位」夹在中间（机种 × 线体 × 工序码），存在的理由是同一机种在
+// 两条线上的工艺可以不同。现场并不需要，却让每条新线都要长出几百个空壳，
+// 改一道工序要改所有线的同码工位 —— 所以 4.0.0 把它并回工序。
+import {
+  q, tx, coverage, processesOf, processById, saveProcess, modelsOfLine, modelLines, setModelLines,
+  createDefaultProcesses, setLineStatus, LINE_STATUS, lines
+} from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
-import { getState, resetLine, notifyContentChanged } from '../switch.js';
+import { getState, resetLine } from '../switch.js';
 import { now, uid, str, int } from '../util.js';
 
 function lineStats(l) {
-  const cov = coverage(l.id);
   const st = getState(l.id);
   const cur = st.currentModelId ? q.get('SELECT code FROM model WHERE id = ?', st.currentModelId) : null;
   const nxt = q.get('SELECT next_model_id n FROM line_state WHERE line_id = ?', l.id)?.n || '';
   const next = nxt ? q.get('SELECT code, name FROM model WHERE id = ?', nxt) : null;
+  const models = modelsOfLine(l.id);
   return {
     id: l.id,
     code: l.code,
     name: l.name,
     enabled: !!l.enabled,
     status: l.status || (l.enabled ? 'running' : 'stopped'),
-    nextModelCode: next?.code || '',
-    nextModelName: next?.name || '',
+    // 这条线有几块屏。只做展示：真正能配几道工序由机种决定，
+    // 现场把机种工序数设得比屏多，应该自己去减工序，而不是让系统拦下来。
+    slots: l.slots || 0,
     sort: l.sort,
-    processes: processesOf(l.id).length,
-    coverage: { done: cov.done, total: cov.total },
+    // 「可生产机种」：机种设置里勾了这条线的那些机种
+    modelCount: models.length,
+    modelCodes: models.map((m) => m.code),
     currentModelId: st.currentModelId,
     currentModelCode: cur?.code || '',
+    nextModelCode: next?.code || '',
+    nextModelName: next?.name || '',
     phase: st.phase,
     pendingModelCode: st.pendingModelId
       ? (q.get('SELECT code FROM model WHERE id = ?', st.pendingModelId)?.code || '') : '',
     online: st.online.length
   };
+}
+
+/** 线体编码自动生成：L1、L2…。终端 config.json 里填的就是它，所以仍要唯一且稳定。 */
+function nextLineCode() {
+  const used = new Set(q.all('SELECT code FROM line').map((r) => r.code));
+  for (let i = 1; i < 999; i += 1) {
+    const c = `L${i}`;
+    if (!used.has(c)) return c;
+  }
+  return `L${Date.now()}`;
+}
+
+function mustModel(id) {
+  const m = q.get('SELECT * FROM model WHERE id = ?', String(id || '').trim());
+  if (!m) throw badRequest('机种不存在');
+  return m;
 }
 
 export function register(router) {
@@ -40,26 +68,29 @@ export function register(router) {
     sendJson(res, 200, { lines: lines().map(lineStats) });
   });
 
+  /**
+   * 新建线体。界面上只问三件事：名称、几块屏、当前状态。
+   * 编码自动给（L1、L2…），不用现场想；要改在「改名」里改。
+   * 不再自动铺工序 —— 工序是机种的属性，建线体跟工序无关。
+   */
   router.post('/api/lines', async (req, res) => {
     const body = await readJsonBody(req);
-    const code = str(body.code, 16).trim();
-    const name = str(body.name, 40).trim() || code;
-    if (!code) throw badRequest('线体编码不能为空');
-    if (!/^[A-Za-z0-9._-]{1,16}$/.test(code)) throw badRequest('线体编码只能用字母、数字、点、下划线、横线');
-    if (q.get('SELECT id FROM line WHERE code = ?', code)) throw badRequest(`线体 ${code} 已存在`);
+    const name = str(body.name, 40).trim();
+    if (!name) throw badRequest('线体名称不能为空');
+    if (q.get('SELECT id FROM line WHERE name = ?', name)) throw badRequest(`线体「${name}」已存在`);
 
+    const code = str(body.code, 16).trim() || nextLineCode();
+    if (!/^[A-Za-z0-9._-]{1,16}$/.test(code)) throw badRequest('线体编码只能用字母、数字、点、下划线、横线');
+    if (q.get('SELECT id FROM line WHERE code = ?', code)) throw badRequest(`线体编码 ${code} 已被占用`);
+
+    const status = LINE_STATUS.includes(String(body.status)) ? String(body.status) : 'stopped';
+    const slots = Math.min(200, Math.max(1, int(body.slots, 5)));
     const maxSort = q.get('SELECT COALESCE(MAX(sort),0) s FROM line').s;
     const id = uid('ln');
-    tx(() => {
-      q.run('INSERT INTO line(id,code,name,enabled,sort,created_at) VALUES(?,?,?,?,?,?)',
-        id, code, name, 0, maxSort + 10, now());
-      // 新线体照标准 5 道工序起一份，名字可以之后改
-      cloneStandardProcesses(id);
-    });
-    // 立刻给所有机种在这条线上长出一套空工位：否则新线的每块屏都要人去
-    // 「机种设置」逐个机种点一次"补齐"才能配内容，一上线就是空的。
-    // 放在上面的事务之外 —— 它自己会开事务，套着开 SQLite 会直接报错。
-    ensureStationsForLine(id);
+    q.run(
+      'INSERT INTO line(id,code,name,enabled,status,slots,sort,created_at) VALUES(?,?,?,?,?,?,?,?)',
+      id, code, name, status === 'running' ? 1 : 0, status, slots, maxSort + 10, now()
+    );
     sendJson(res, 200, lineStats(q.get('SELECT * FROM line WHERE id = ?', id)));
   });
 
@@ -71,30 +102,34 @@ export function register(router) {
     if (body.code !== undefined) {
       const code = str(body.code, 16).trim();
       if (!code) throw badRequest('线体编码不能为空');
+      if (!/^[A-Za-z0-9._-]{1,16}$/.test(code)) throw badRequest('线体编码只能用字母、数字、点、下划线、横线');
       if (code !== l.code && q.get('SELECT id FROM line WHERE code = ?', code)) {
-        throw badRequest(`线体 ${code} 已存在`);
+        throw badRequest(`线体编码 ${code} 已被占用`);
       }
       q.run('UPDATE line SET code = ? WHERE id = ?', code, l.id);
     }
     if (body.name !== undefined) {
       const name = str(body.name, 40).trim();
       if (!name) throw badRequest('线体名称不能为空');
+      if (name !== l.name && q.get('SELECT id FROM line WHERE name = ?', name)) {
+        throw badRequest(`线体「${name}」已存在`);
+      }
       q.run('UPDATE line SET name = ? WHERE id = ?', name, l.id);
+    }
+    if (body.slots !== undefined) {
+      q.run('UPDATE line SET slots = ? WHERE id = ?', Math.min(200, Math.max(1, int(body.slots, l.slots))), l.id);
     }
     if (body.sort !== undefined) q.run('UPDATE line SET sort = ? WHERE id = ?', int(body.sort, l.sort), l.id);
 
-    // v3.5.0：状态取代「启用勾选框」。四种状态里只有 running 会让终端读这条线。
-    // 兼容老的 {enabled: true/false} 调用（3.4.0 及以前的界面、脚本）。
+    // 状态取代「启用勾选框」。四种状态里只有 running 会让终端读这条线。
+    // 兼容老的 {enabled: true/false} 调用。
     const want = body.status !== undefined
       ? String(body.status)
       : (body.enabled !== undefined ? (body.enabled ? 'running' : 'stopped') : '');
 
     if (want) {
-      if (!LINE_STATUS.includes(want)) {
-        throw badRequest(`状态只能是 ${LINE_STATUS.join(' / ')}`);
-      }
+      if (!LINE_STATUS.includes(want)) throw badRequest(`状态只能是 ${LINE_STATUS.join(' / ')}`);
       // 停下来的那一刻要清在线与举手记录，否则下次启用会读到上次残留的"已就绪"。
-      // 从非运行切到运行不用清；也不再停别的线 —— 现在允许多条线同时跑。
       if (want !== 'running' && l.enabled) resetLine(l.id);
       setLineStatus(l.id, want);
     }
@@ -105,54 +140,41 @@ export function register(router) {
   router.del('/api/lines/:id', (req, res) => {
     const l = q.get('SELECT * FROM line WHERE id = ?', req.params.id);
     if (!l) throw badRequest('线体不存在');
-    if (l.enabled) throw badRequest('这条线体正在启用，先停用再删除');
+    if (l.enabled) throw badRequest('这条线体正在运行，先改成停线再删除');
     if (q.get('SELECT COUNT(*) n FROM line').n <= 1) throw badRequest('至少保留一条线体');
-
-    // v3.0.0 起工位带线体维度：这条线的工位（和要求、内容）是**这条线专属**的，
-    // 线没了就没人读了，跟着一起删 —— 否则会留下永远看不见的孤儿数据。
-    // 别的线的工位不受影响（各存各的）。
-    const stCount = q.get('SELECT COUNT(*) n FROM station WHERE line_id = ?', l.id).n;
+    // 内容不挂在线体上，删线只断"可生产"的关系，一道工序都不会丢。
     tx(() => {
-      q.run('DELETE FROM item WHERE station_id IN (SELECT id FROM station WHERE line_id = ?)', l.id);
-      q.run('DELETE FROM station_req WHERE station_id IN (SELECT id FROM station WHERE line_id = ?)', l.id);
-      q.run('DELETE FROM station WHERE line_id = ?', l.id);
-      q.run('DELETE FROM process WHERE line_id = ?', l.id);
+      q.run('DELETE FROM model_line WHERE line_id = ?', l.id);
       q.run('DELETE FROM line_state WHERE line_id = ?', l.id);
       q.run('DELETE FROM line WHERE id = ?', l.id);
     });
-    sendJson(res, 200, { ok: true, stations: stCount });
+    sendJson(res, 200, { ok: true });
   });
 
-  // ---------- 型号 ----------
-  // 型号是全厂共用的：一个型号可能在多条线上做，但每条线各配各的内容。
-  router.get('/api/models', (req, res, ctx) => {
-    const lineId = String(ctx.query.lineId || '').trim() || pickActiveLineId();
+  // ---------- 机种 ----------
+  // 机种是全厂共用的：一个机种可能安排在几条线上做，工序仍只有一套。
+  router.get('/api/models', (req, res) => {
     const models = q.all('SELECT * FROM model ORDER BY sort, code');
-    const cov = coverage(lineId);
-    // 机种在**该线体上**的工位完成度，给机种设置页左列表打徽标用。
-    // 必须按线统计：同一个机种在一线 5 个工位、二线可能只有 3 个。
-    const stMap = new Map(
-      q.all(`
-        SELECT s.model_id,
-               COUNT(*) total,
-               SUM(CASE WHEN EXISTS(SELECT 1 FROM item i WHERE i.station_id = s.id) THEN 1 ELSE 0 END) done
-          FROM station s WHERE s.line_id = ? GROUP BY s.model_id
-      `, lineId).map((r) => [r.model_id, { total: r.total, done: r.done || 0 }])
-    );
+    const cov = coverage();
+    const lineMap = new Map();
+    for (const r of q.all(
+      `SELECT ml.model_id, l.id, l.code, l.name, l.status
+         FROM model_line ml JOIN line l ON l.id = ml.line_id ORDER BY l.sort, l.code`
+    )) {
+      if (!lineMap.has(r.model_id)) lineMap.set(r.model_id, []);
+      lineMap.get(r.model_id).push({ id: r.id, code: r.code, name: r.name, status: r.status });
+    }
     sendJson(res, 200, {
-      lineId,
       models: models.map((m) => ({
         id: m.id,
         code: m.code,
         name: m.name,
         enabled: !!m.enabled,
         sort: m.sort,
-        // 完成度按"这套型号在本线体有几道工序已经有内容"算，分母是线体的工序数
         done: cov.byModel[m.id]?.done ?? 0,
         total: cov.byModel[m.id]?.total ?? 0,
-        // 这个机种在本线体上的工位完成度（换线会变）
-        stDone: stMap.get(m.id)?.done ?? 0,
-        stTotal: stMap.get(m.id)?.total ?? 0,
+        // 这个机种勾了哪几条线（可生产机种的反向），以及各线现在什么状态
+        lines: lineMap.get(m.id) || [],
         cells: Object.fromEntries(
           Object.entries(cov.cells)
             .filter(([k]) => k.startsWith(m.id + ':'))
@@ -163,157 +185,171 @@ export function register(router) {
     });
   });
 
+  /**
+   * 新建机种。body: { code, name, processCount, lineIds[] }
+   * 一次把"几道工序"和"在哪几条线做"都定下来 —— 这正是用户要的新建弹窗。
+   */
   router.post('/api/models', async (req, res) => {
     const body = await readJsonBody(req);
     const code = str(body.code, 32).trim();
     const name = str(body.name, 80).trim() || code;
-    if (!code) throw badRequest('型号编码不能为空');
-    if (!/^[A-Za-z0-9._-]{1,32}$/.test(code)) throw badRequest('型号编码只能用字母、数字、点、下划线、横线');
+    if (!code) throw badRequest('机种编码不能为空');
+    if (!/^[A-Za-z0-9._-]{1,32}$/.test(code)) throw badRequest('机种编码只能用字母、数字、点、下划线、横线');
+    if (q.get('SELECT id FROM model WHERE code = ?', code)) throw badRequest(`机种 ${code} 已存在`);
 
-    if (q.get('SELECT id FROM model WHERE code = ?', code)) {
-      throw badRequest(`型号 ${code} 已存在`);
-    }
     const maxSort = q.get('SELECT COALESCE(MAX(sort),0) s FROM model').s;
     const id = uid('md');
     q.run('INSERT INTO model(id,code,name,enabled,sort,created_at) VALUES(?,?,?,?,?,?)',
       id, code, name, 1, maxSort + 10, now());
-    // 新机种要立刻在各条线上都有工位，否则进机种设置是一片空白，
-    // 还得逐条线点「按本线工序补齐」—— 现场一条线十几二十道工序，点一遍就是二十次。
-    // 注意 ensureStationsForLine 内部自带事务，必须放在任何外层事务之外调用。
-    const stations = ensureAllModelStations();
-    sendJson(res, 200, { id, code, name, stations });
+
+    const count = int(body.processCount, 5);
+    const made = createDefaultProcesses(id, count);
+    const lineIds = Array.isArray(body.lineIds) ? body.lineIds : [];
+    setModelLines(id, lineIds);
+
+    sendJson(res, 200, {
+      id, code, name, processes: made, lineCount: lineIds.length
+    });
   });
 
   router.put('/api/models/:id', async (req, res) => {
     const body = await readJsonBody(req);
-    const m = q.get('SELECT * FROM model WHERE id = ?', req.params.id);
-    if (!m) throw badRequest('型号不存在');
+    const m = mustModel(req.params.id);
 
-    const patch = {};
     if (body.code !== undefined) {
       const code = str(body.code, 32).trim();
-      if (!code) throw badRequest('型号编码不能为空');
+      if (!code) throw badRequest('机种编码不能为空');
       if (code !== m.code && q.get('SELECT id FROM model WHERE code = ?', code)) {
-        throw badRequest(`型号 ${code} 已存在`);
+        throw badRequest(`机种 ${code} 已存在`);
       }
-      patch.code = code;
+      q.run('UPDATE model SET code = ? WHERE id = ?', code, m.id);
     }
-    if (body.name !== undefined) patch.name = str(body.name, 80).trim() || m.code;
-    if (body.enabled !== undefined) patch.enabled = body.enabled ? 1 : 0;
-    if (body.sort !== undefined) patch.sort = int(body.sort, m.sort);
+    if (body.name !== undefined) {
+      q.run('UPDATE model SET name = ? WHERE id = ?', str(body.name, 80).trim() || m.code, m.id);
+    }
+    if (body.enabled !== undefined) q.run('UPDATE model SET enabled = ? WHERE id = ?', body.enabled ? 1 : 0, m.id);
+    if (body.sort !== undefined) q.run('UPDATE model SET sort = ? WHERE id = ?', int(body.sort, m.sort), m.id);
 
-    q.run(
-      `UPDATE model SET code = ?, name = ?, enabled = ?, sort = ? WHERE id = ?`,
-      patch.code ?? m.code, patch.name ?? m.name,
-      patch.enabled ?? m.enabled, patch.sort ?? m.sort, m.id
-    );
+    // 可生产线体：传数组就整批覆盖（这是机种设置里那个多选框）
+    let lineCount;
+    if (Array.isArray(body.lineIds)) {
+      lineCount = setModelLines(m.id, body.lineIds).length;
+    }
+    sendJson(res, 200, { ok: true, lineCount });
+  });
+
+  router.del('/api/models/:id', (req, res) => {
+    const m = mustModel(req.params.id);
+    // 正在被某条线生产时不许删：删了终端会立刻变成"没有当前机种"，屏上停住。
+    const used = q.get(
+      "SELECT COUNT(*) n FROM line_state WHERE current_model_id = ? OR pending_model_id = ? OR next_model_id = ?",
+      m.id, m.id, m.id
+    ).n;
+    if (used) throw badRequest(`「${m.code}」还排在某条线上（当前 / 切换中 / 下一个），先把它换掉再删`);
+    tx(() => {
+      q.run('DELETE FROM model_line WHERE model_id = ?', m.id);
+      q.run('DELETE FROM model WHERE id = ?', m.id);
+    });
     sendJson(res, 200, { ok: true });
   });
 
-  // ---------- 工序 ----------
-  // 工序挂在具体线体下（这条线上有几块屏）。新建线体时自动带 5 道标准工序。
-  // 内容不在这里：播什么由「机种工位」按同码对位决定。
+  // ---------- 工序（= 内容槽位）----------
   router.get('/api/processes', (req, res, ctx) => {
-    const lineId = String(ctx.query.lineId || '').trim() || pickActiveLineId();
-    const processes = processesOf(lineId);
-    // 这道工序在多少个机种里有对应工位且已备内容 —— 只做展示，帮人判断"这条屏是不是空转"
-    const counts = q.all(`
-      SELECT s.code, COUNT(DISTINCT s.model_id) n
-        FROM station s JOIN item i ON i.station_id = s.id
-       GROUP BY s.code
-    `);
-    const map = new Map(counts.map((r) => [r.code, r.n]));
+    const model = mustModel(ctx.query.modelId);
     sendJson(res, 200, {
-      lineId,
-      processes: processes.map((p) => ({
-        id: p.id, code: p.code, name: p.name, sort: p.sort,
-        modelsWithContent: map.get(p.code) || 0
-      }))
+      model: { id: model.id, code: model.code, name: model.name, enabled: !!model.enabled },
+      lines: modelLines(model.id).map((l) => ({ id: l.id, code: l.code, name: l.name, status: l.status })),
+      processes: processesOf(model.id)
     });
   });
 
   router.post('/api/processes', async (req, res) => {
     const body = await readJsonBody(req);
-    const lineId = String(body.lineId || '').trim() || pickActiveLineId();
+    const model = mustModel(body.modelId);
     const code = str(body.code, 16).trim().toUpperCase();
     const name = str(body.name, 40).trim();
-    if (!code) throw badRequest('工序编码不能为空（例如 OP60）');
-    if (!/^[A-Za-z0-9._-]{1,16}$/.test(code)) throw badRequest('工序编码只能用字母、数字、点、下划线、横线');
-    if (!name) throw badRequest('工序名称不能为空');
-    if (q.get('SELECT id FROM process WHERE line_id = ? AND code = ?', lineId, code)) {
-      throw badRequest(`这条线体上已经有工序 ${code}`);
+    if (!code) throw badRequest('工序码不能为空（例如 OP6）');
+    if (!/^[A-Za-z0-9._-]{1,16}$/.test(code)) throw badRequest('工序码只能用字母、数字、点、下划线、横线');
+    if (q.get('SELECT id FROM process WHERE model_id = ? AND code = ?', model.id, code)) {
+      throw badRequest(`「${model.code}」已经有工序 ${code}`);
     }
-    const maxSort = q.get('SELECT COALESCE(MAX(sort),0) s FROM process WHERE line_id = ?', lineId).s;
+    const maxSort = q.get('SELECT COALESCE(MAX(sort),0) s FROM process WHERE model_id = ?', model.id).s;
     const id = uid('pr');
-    q.run('INSERT INTO process(id,line_id,code,name,sort,created_at) VALUES(?,?,?,?,?,?)',
-      id, lineId, code, name, maxSort + 10, now());
-    // 加了工序就等于这条线多了一块屏：所有机种都要长出对应的空工位，
-    // 否则那块屏装了终端也永远没地方配内容（「机种设置」里根本没有这张卡）。
-    const added = ensureStationsForLine(lineId);
-    notifyContentChanged();
-    sendJson(res, 200, { id, code, name, stations: added });
+    tx(() => {
+      q.run(
+        'INSERT INTO process(id,model_id,code,name,sort,max_mb,note,play_mode,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+        id, model.id, code, name || code, maxSort + 10, 20, '', 'loop', now()
+      );
+      // 新工序默认允许图片、至少 1 张：现场最常见的起点，视频/PDF 按需勾
+      q.run(
+        'INSERT INTO process_req(id,process_id,kind,min_count,min_width,min_height) VALUES(?,?,?,?,?,?)',
+        uid('sr'), id, 'image', 1, 1280, 720
+      );
+    });
+    sendJson(res, 200, processesOf(model.id).find((p) => p.id === id));
   });
 
+  /**
+   * 改工序：名称、做什么、体积上限、播放方式、允许类型、内容清单，一次提交整份。
+   * 工序和它的内容是一件事，分成两个接口就会出现"要求已保存、内容没保存"的半套状态。
+   */
   router.put('/api/processes/:id', async (req, res) => {
     const body = await readJsonBody(req);
-    const p = q.get('SELECT * FROM process WHERE id = ?', req.params.id);
+    const p = processById(req.params.id);
     if (!p) throw badRequest('工序不存在');
 
-  let renamed = 0;
-  let clash = 0;
-  let changed = false;
+    let renamed = 0;
+    let clash = 0;
+    let code = p.code;
 
-  if (body.code !== undefined) {
-    const code = str(body.code, 16).trim().toUpperCase();
-    if (!code) throw badRequest('工序编码不能为空');
-    if (code !== p.code &&
-        q.get('SELECT id FROM process WHERE line_id = ? AND code = ?', p.line_id, code)) {
-      throw badRequest(`这条线体上已经有工序 ${code}`);
-    }
-    if (code !== p.code) {
-      // 工位靠 code 与本线工序对位，工序码一改就得带着工位一起改，
-      // 否则老码的工位（连同里面的内容）当场变成"对不上"的孤儿，屏上就是空白。
-      // 若某个机种已经有新码的工位，跳过它不覆盖 —— 撞唯一键会整条 500，也比悄悄丢内容好。
-      for (const s of q.all('SELECT id, model_id FROM station WHERE line_id = ? AND code = ?', p.line_id, p.code)) {
-        const take = q.get('SELECT id FROM station WHERE model_id = ? AND line_id = ? AND code = ?',
-          s.model_id, p.line_id, code);
-        if (take) { clash += 1; continue; }
-        q.run('UPDATE station SET code = ? WHERE id = ?', code, s.id);
-        renamed += 1;
+    if (body.code !== undefined) {
+      code = str(body.code, 16).trim().toUpperCase();
+      if (!code) throw badRequest('工序码不能为空');
+      if (!/^[A-Za-z0-9._-]{1,16}$/.test(code)) throw badRequest('工序码只能用字母、数字、点、下划线、横线');
+      if (code !== p.code) {
+        if (q.get('SELECT id FROM process WHERE model_id = ? AND code = ?', p.model_id, code)) {
+          throw badRequest(`「${p.model_id}」已经有工序 ${code}`);
+        }
+        q.run('UPDATE process SET code = ? WHERE id = ?', code, p.id);
+        renamed = 1;
       }
-      q.run('UPDATE process SET code = ? WHERE id = ?', code, p.id);
-      changed = true;
     }
-  }
-  if (body.name !== undefined) {
-    const name = str(body.name, 40).trim();
-    if (!name) throw badRequest('工序名称不能为空');
-    if (name !== p.name) {
-      q.run('UPDATE process SET name = ? WHERE id = ?', name, p.id);
-      // 工位名跟着工序名走，只在"工位名还是旧工序名"时才改，避免覆盖人为改过的名字。
-      q.run('UPDATE station SET name = ? WHERE line_id = ? AND code = ? AND name = ?',
-        name, p.line_id, (body.code !== undefined ? str(body.code, 16).trim().toUpperCase() : p.code), p.name);
-      changed = true;
+
+    // name/note/maxMb/playMode/reqs/items 全部交给 saveProcess，
+    // 兼容接口 /api/playlist 也走那条路，两处各写一遍迟早不一致。
+    const touched = ['name', 'maxMb', 'note', 'playMode', 'reqs', 'items']
+      .some((k) => body[k] !== undefined);
+    if (touched) {
+      saveProcessBody(p.model_id, p.id, body);
     }
-  }
-  if (changed) notifyContentChanged();
-  sendJson(res, 200, { ok: true, renamed, clash });
-});
+
+    sendJson(res, 200, {
+      ok: true, renamed, clash,
+      process: processesOf(p.model_id).find((x) => x.id === p.id)
+    });
+  });
 
   router.del('/api/processes/:id', (req, res) => {
-    const p = q.get('SELECT * FROM process WHERE id = ?', req.params.id);
+    const p = processById(req.params.id);
     if (!p) throw badRequest('工序不存在');
-    if (q.get('SELECT COUNT(*) n FROM process WHERE line_id = ?', p.line_id).n <= 1) {
+    if (q.get('SELECT COUNT(*) n FROM process WHERE model_id = ?', p.model_id).n <= 1) {
       throw badRequest('至少保留一道工序');
     }
-    // 内容在机种工位上，删工序不动内容；只是这条线少一块屏。
+    // 有内容也不拦 —— 删工序本来就是"这块屏不要了"，但要说清删掉几条，让界面去确认。
+    const n = q.get('SELECT COUNT(*) n FROM item WHERE process_id = ?', p.id).n;
     q.run('DELETE FROM process WHERE id = ?', p.id);
-    sendJson(res, 200, { ok: true });
+    sendJson(res, 200, { ok: true, items: n });
   });
 }
 
-function pickActiveLineId() {
-  const l = q.get('SELECT id FROM line WHERE enabled = 1 ORDER BY sort, code LIMIT 1')
-    || q.get('SELECT id FROM line ORDER BY sort, code LIMIT 1');
-  return l?.id || '';
+/** 把 body 里的可写字段转给 saveProcess（单独抽出来只是为了上面的 touched 判断好读）。 */
+function saveProcessBody(modelId, processId, body) {
+  return saveProcess(modelId, processId, {
+    name: body.name,
+    maxMb: body.maxMb,
+    note: body.note,
+    playMode: body.playMode,
+    reqs: Array.isArray(body.reqs) ? body.reqs : undefined,
+    items: Array.isArray(body.items) ? body.items : undefined
+  });
 }

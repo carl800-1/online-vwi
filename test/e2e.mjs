@@ -109,46 +109,65 @@ async function upload(buf, name) {
   console.log('\n端到端协议测试 · ' + BASE + '\n');
 
   // ---------- 0. 档案 ----------
+  // v4.0.0 的关系：线体只管"有哪几条、什么状态、几块屏"，
+  // 机种管"几道工序、能在哪几条线上做"，工序自己就是内容的宿主。
   console.log('[0] 档案与种子数据');
   const models = (await j('/api/models')).body;
-  const procs = (await j('/api/processes')).body;
-  ok(models.models.length === 10, '10 个型号已就绪');
-  ok(procs.processes.length === 5, '5 道工序已就绪');
-  ok(models.coverage.total === 50, '完成度分母 50 套（10 × 5）');
+  ok(models.models.length === 10, '10 个机种已就绪');
+  ok(models.coverage.total === 50, '完成度分母 50 套（10 机种 × 5 道工序）');
 
   const M = Object.fromEntries(models.models.map((m) => [m.code, m]));
-  const P = Object.fromEntries(procs.processes.map((p) => [p.code, p]));
+  const procList = (await j('/api/processes?modelId=' + M.X200.id)).body;
+  ok(procList.processes.length === 5, '机种默认 5 道工序');
+  ok(procList.processes.map((p) => p.code).join(',') === 'OP1,OP2,OP3,OP4,OP5',
+    '工序码从 OP1 起编（不是 OP10/OP20）');
+  ok(procList.processes.every((p) => p.playMode === 'loop'), '工序默认「循环播放」');
+  ok(procList.lines.length === 1 && procList.lines[0].code === 'L1',
+    '种子机种已经安排在一线上（可生产机种不是空的）');
+
+  const P = Object.fromEntries(procList.processes.map((p) => [p.code, p]));
+  const procOf = async (code, modelCode = 'X200') => {
+    const d = (await j('/api/processes?modelId=' + M[modelCode].id)).body;
+    return (d.processes || []).find((p) => p.code === code);
+  };
 
   // ---------- 1. 上传与清单 ----------
   console.log('\n[1] 上传与清单');
-  const u1 = await upload(tinyPng(20, 80, 160), 'op30-a.png');
-  const u2 = await upload(tinyPng(160, 60, 40), 'op30-b.png');
-  const u3 = await upload(tinyPng(20, 80, 160), 'op30-a-copy.png');
+  const u1 = await upload(tinyPng(20, 80, 160), 'op3-a.png');
+  const u2 = await upload(tinyPng(160, 60, 40), 'op3-b.png');
+  const u3 = await upload(tinyPng(20, 80, 160), 'op3-a-copy.png');
   ok(u1.status === 200 && u1.body.kind === 'image', '上传图片成功');
   ok(u3.body.duplicated === true && u3.body.id === u1.body.id, '同文件二次上传识别为重复（不重复占盘）');
   ok(u1.body.width === 8 && u1.body.height === 8, '服务端解析出图片宽高');
 
   let r = await put('/api/playlist', {
-    modelId: M.X200.id, processId: P.OP30.id,
+    modelId: M.X200.id, processId: P.OP3.id,
     items: [{ mediaId: u1.body.id, dwellSec: 15 }, { mediaId: u2.body.id, dwellSec: 10 }]
   });
-  ok(r.ok && r.body.count === 2, 'X200/OP30 写入 2 项');
+  ok(r.ok && r.body.count === 2, 'X200/OP3 写入 2 项');
 
+  const p3x210 = await procOf('OP3', 'X210');
   await put('/api/playlist', {
-    modelId: M.X210.id, processId: P.OP30.id,
+    modelId: M.X210.id, processId: p3x210.id,
     items: [{ mediaId: u2.body.id, dwellSec: 8 }]
   });
 
   ok((await j('/api/models')).body.coverage.done === 2, '完成度变成 2/50');
 
   r = await put('/api/playlist', {
-    modelId: M.X200.id, processId: P.OP30.id,
+    modelId: M.X200.id, processId: P.OP3.id,
     items: [{ mediaId: u1.body.id }, { mediaId: u1.body.id }]
   });
   ok(r.status === 400, '同一文件在清单内重复被拒绝');
 
-  r = await j(`/api/playlist?modelId=${M.X200.id}&processId=${P.OP30.id}`);
+  r = await j(`/api/playlist?modelId=${M.X200.id}&processId=${P.OP3.id}`);
   ok(r.body.items.length === 2, '失败的保存没破坏原清单（整批校验，不留半套）');
+
+  // 播放方式：每道工序一处，改的是工序自己的字段，不动内容
+  r = await put('/api/processes/' + P.OP3.id, { playMode: 'once' });
+  ok(r.ok && r.body.process.playMode === 'once', '工序可以单独设「播一遍停」');
+  ok(r.body.process.items.length === 2, '改播放方式不动内容');
+  await put('/api/processes/' + P.OP3.id, { playMode: 'loop' });
 
   // ---------- 2. 无终端在线 ----------
   console.log('\n[2] 没有任何终端在线时切换');
@@ -158,21 +177,24 @@ async function upload(buf, name) {
   r = await post('/api/switch', { modelCode: 'X200' });
   ok(r.body.activated === true, '无终端在线时直接激活（否则管理端会一直卡在"准备中"）');
   ok(r.body.state.seq === 1, '直接激活时 seq +1');
-  ok(r.body.state.currentModelId === M.X200.id, '当前型号写为 X200');
+  ok(r.body.state.currentModelId === M.X200.id, '当前机种写为 X200');
 
   // ---------- 3. 终端上线 ----------
-  console.log('\n[3] 两台终端上线（OP30 / OP40）');
-  const b30 = (await j('/display/boot?op=OP30')).body;
-  const b40 = (await j('/display/boot?op=OP40')).body;
-  ok(b30.processName === '调试', 'OP30 身份解析正确（调试）');
-  ok(b40.processName === '检验', 'OP40 身份解析正确（检验）');
-  ok(b30.modelCode === 'X200' && b30.modelId === M.X200.id, '终端启动自检拿到当前型号与 ID');
+  console.log('\n[3] 两台终端上线（OP3 / OP4）');
+  const b3 = (await j('/display/boot?op=OP3')).body;
+  const b4 = (await j('/display/boot?op=OP4')).body;
+  ok(b3.processName === '检验', 'OP3 身份解析正确（检验）');
+  ok(b4.processName === '包装', 'OP4 身份解析正确（包装）');
+  ok(b3.modelCode === 'X200' && b3.modelId === M.X200.id, '终端启动自检拿到当前机种与 ID');
 
   let st = await state();
-  ok(st.online.includes('OP30') && st.online.includes('OP40'), '两台终端都算在线');
+  ok(st.online.includes('OP3') && st.online.includes('OP4'), '两台终端都算在线');
 
+  // v4.0.0：工序归机种，线体不再拥有工序清单，所以"这个 op 不存在"不再 404 ——
+  // 那是"机种没排这道工序"，要返回 200 + noStation，让终端在屏上说明白。
   r = await j('/display/boot?op=OP99');
-  ok(r.status === 404, '工序号配错立刻报错，不会静默黑屏');
+  ok(r.status === 200 && r.body.noStation === true, '当前机种没有这道工序 → noStation=true（不是 404）');
+  ok(/没有工序 OP99/.test(r.body.message || ''), '并给出可读原因，不用运维猜是网络还是没内容');
 
   // ---------- 4. 两段式切换 ----------
   console.log('\n[4] 两段式切换：prepare → ready → activate');
@@ -183,31 +205,31 @@ async function upload(buf, name) {
   ok(r.body.state.pendingModelCode === 'X210', '服务器记住了目标 X210');
 
   st = await state();
-  ok(st.pendingModelCode === 'X210', '终端从长轮询能获知目标型号');
+  ok(st.pendingModelCode === 'X210', '终端从长轮询能获知目标机种');
 
-  r = await post('/api/ready', { op: 'OP30', modelId: M.X210.id });
-  ok(r.ok && r.body.accepted === true, 'OP30 举手被接受');
+  r = await post('/api/ready', { op: 'OP3', modelId: M.X210.id });
+  ok(r.ok && r.body.accepted === true, 'OP3 举手被接受');
   ok(r.body.activated === false, '只有 1/2 台备好时不激活（关键：不出半新半旧）');
 
-  r = await post('/api/ready', { op: 'OP40', modelId: M.X210.id });
+  r = await post('/api/ready', { op: 'OP4', modelId: M.X210.id });
   ok(r.body.activated === true, '两台都备好后立即激活');
   ok(r.body.state.seq === before.seq + 1, '激活时 seq 只 +1');
-  ok(r.body.state.currentModelId === M.X210.id, '当前型号变成 X210');
+  ok(r.body.state.currentModelId === M.X210.id, '当前机种变成 X210');
   ok(r.body.state.phase === 'idle', '激活后回到 idle');
 
   // ---------- 5. 内容按工序隔离 ----------
   console.log('\n[5] 内容按工序隔离');
-  const pl30 = (await j('/display/playlist?op=OP30')).body;
-  const pl40 = (await j('/display/playlist?op=OP40')).body;
-  ok(pl30.modelCode === 'X210' && pl30.count === 1, 'OP30 拿到 X210 的 1 项');
-  ok(pl40.modelCode === 'X210' && pl40.empty === true, 'OP40 该型号没内容 → empty=true（终端显式告警）');
-  ok(pl30.items[0].url.startsWith('/m/'), '清单里带媒体地址');
+  const pl3 = (await j('/display/playlist?op=OP3')).body;
+  const pl4 = (await j('/display/playlist?op=OP4')).body;
+  ok(pl3.modelCode === 'X210' && pl3.count === 1, 'OP3 拿到 X210 的 1 项');
+  ok(pl4.modelCode === 'X210' && pl4.empty === true, 'OP4 该机种没内容 → empty=true（终端显式告警）');
+  ok(pl3.items[0].url.startsWith('/m/'), '清单里带媒体地址');
 
   // ---------- 6. 过期举手 ----------
   console.log('\n[6] 迟到 / 过期举手');
   await post('/api/switch', { modelCode: 'X220' });
-  r = await post('/api/ready', { op: 'OP30', modelId: M.X210.id });
-  ok(r.status === 409, '拿旧型号举手被拒（409），不会被误算已备好');
+  r = await post('/api/ready', { op: 'OP3', modelId: M.X210.id });
+  ok(r.status === 409, '拿旧机种举手被拒（409），不会被误算已备好');
 
   // ---------- 7. 放弃切换 ----------
   console.log('\n[7] 放弃切换');
@@ -215,19 +237,19 @@ async function upload(buf, name) {
   ok(st.phase === 'prepare' && st.pendingModelCode === 'X220', '当前在准备 X220');
   r = await post('/api/switch/cancel', {});
   ok(r.ok && r.body.state.phase === 'idle', '放弃后回到 idle');
-  ok(r.body.state.currentModelId === M.X210.id, '放弃后当前型号仍是 X210（画面不动）');
+  ok(r.body.state.currentModelId === M.X210.id, '放弃后当前机种仍是 X210（画面不动）');
   ok(r.body.state.pendingModelId === '', '放弃后清掉 pending');
 
   // ---------- 8. 反复切换 ----------
   console.log('\n[8] 反复切换（seq 单调）');
   before = await state();
   await post('/api/switch', { modelCode: 'X200' });
-  await post('/api/ready', { op: 'OP30', modelId: M.X200.id });
-  r = await post('/api/ready', { op: 'OP40', modelId: M.X200.id });
+  await post('/api/ready', { op: 'OP3', modelId: M.X200.id });
+  r = await post('/api/ready', { op: 'OP4', modelId: M.X200.id });
   ok(r.body.activated === true, '两段式可反复执行');
   ok(r.body.state.seq === before.seq + 1, 'seq 严格 +1');
-  const pl = (await j('/display/playlist?op=OP30')).body;
-  ok(pl.modelCode === 'X200' && pl.count === 2, '内容随型号整批换回 X200 的 2 项');
+  const pl = (await j('/display/playlist?op=OP3')).body;
+  ok(pl.modelCode === 'X200' && pl.count === 2, '内容随机种整批换回 X200 的 2 项');
 
   // ---------- 9. 媒体流 ----------
   console.log('\n[9] 媒体流与 Range');
@@ -244,39 +266,34 @@ async function upload(buf, name) {
   ok(gcDry.dryRun === true, '默认 dryRun');
   ok((await fetch(BASE + '/m/' + u1.body.id)).status === 200, 'dryRun 不会删正在用的文件');
 
-  // ---------- 11. 线体（v1.7.0） ----------
-  // 多产线是这次的核心改动：每天的活不一定在同一条线上，
-  // 所以每条线体要有自己的工序、自己的换型状态，互不串台。
-  console.log('\n[11] 线体与多产线隔离');
+  // ---------- 11. 线体 ----------
+  // 4.0.0 的线体只剩三件事：名字、状态（四态）、几块屏。工序和内容都不在线体上。
+  console.log('\n[11] 线体：状态 / 工位数 / 可生产机种');
   let ls = (await j('/api/lines')).body.lines;
-  ok(ls.length === 1 && ls[0].code === 'L1' && ls[0].enabled === true, '升级后默认有一条启用的线体 L1');
-  ok(ls[0].processes === 5 && ls[0].coverage.total === 50, '线体自带 5 道工序、完成度分母 50');
+  ok(ls.length === 1 && ls[0].code === 'L1' && ls[0].status === 'running', '默认一条运行中的线体 L1');
+  ok(ls[0].slots === 5, '默认工位数 5');
+  ok(ls[0].modelCount === 10, '「可生产机种」自动统计出 10 个');
 
-  const madeL2 = await post('/api/lines', { code: 'L2', name: '二线' });
-  ok(madeL2.ok && madeL2.body.code === 'L2', '可以新建线体');
-  ok(madeL2.body.processes === 5, '新线体自动带 5 道标准工序');
-  ok(madeL2.body.enabled === false, '新线体默认不启用（要人明确点一次）');
+  const madeL2 = await post('/api/lines', { name: '二线', slots: 4 });
+  ok(madeL2.ok && madeL2.body.code === 'L2', '新建线体时编码自动生成（L2），不用现场想');
+  ok(madeL2.body.slots === 4, '工位数按填的记下来');
+  ok(madeL2.body.status === 'stopped', '新建线体默认「停线」（要人明确点一次运行）');
+  ok(madeL2.body.modelCount === 0, '新线体还没有可生产机种');
+  ok((await post('/api/lines', { name: '二线' })).status === 400, '线体名称重复被拒绝');
   const L2 = madeL2.body.id;
 
-  const p2 = (await j('/api/processes?lineId=' + L2)).body.processes;
-  ok(p2.length === 5 && p2[0].code === 'OP10', '按线体能取到它自己的工序');
-  ok(p2[0].id !== P.OP10.id, '一线和二线的 OP10 是两条独立记录（内容不会互串）');
-
-  ok((await post('/api/lines', { code: 'L2', name: '重复' })).status === 400, '线体编码重复被拒绝');
-
-  let en = await put('/api/lines/' + L2, { enabled: true });
-  ok(en.ok && en.body.enabled === true && en.body.status === 'running', '可以启用二线（status 变 running）');
+  let en = await put('/api/lines/' + L2, { status: 'running' });
+  ok(en.ok && en.body.status === 'running' && en.body.enabled === true, '状态改「运行」后 enabled 同步为 1');
   ls = (await j('/api/lines')).body.lines;
-  // v3.5.0 起多线可以同时跑：现场每条线有自己的终端，各带 ?line=，互不干扰
-  ok(ls.filter((l) => l.enabled).length === 2, '多条线体可以同时启用（3.5.0 起）');
-  ok(ls.find((l) => l.code === 'L1').enabled === true, '启用二线不会把一线停掉');
+  ok(ls.filter((l) => l.enabled).length === 2, '多条线体可以同时运行');
+  ok(ls.find((l) => l.code === 'L1').enabled === true, '把二线改成运行不会把一线停掉');
 
-  const bootNoLine = (await j('/display/boot?op=OP30')).body;
+  const bootNoLine = (await j('/display/boot?op=OP3')).body;
   ok(bootNoLine.lineCode === 'L1', '老终端不带 line 时回落到 sort 最前的启用线体（升级不用改配置）');
-  const bootL1 = (await j('/display/boot?op=OP30&line=L1')).body;
-  ok(bootL1.lineCode === 'L1' && bootL1.processName === '调试', '带 line 时按指线体定位工序');
+  const bootL1 = (await j('/display/boot?op=OP3&line=L1')).body;
+  ok(bootL1.lineCode === 'L1' && bootL1.processName === '检验', '带 line 时按指线体的当前机种定位工序');
 
-  ok((await j('/display/boot?op=OP30&line=NOPE')).status === 404, '线体编码配错立刻 404，不静默黑屏');
+  ok((await j('/display/boot?op=OP3&line=NOPE')).status === 404, '线体编码配错立刻 404，不静默黑屏');
 
   // 两条线各自换型，互不影响
   const st1Before = (await j('/api/status?lineId=' + ls.find((l) => l.code === 'L1').id)).body;
@@ -286,192 +303,129 @@ async function upload(buf, name) {
   const st2During = (await j('/api/status?lineId=' + L2)).body;
   ok(!st2During.pendingModelCode && st2During.seq === 0, '一线换型不影响二线的状态机');
 
-  // 3.5.0 起启用二线不再顺带清掉一线的在线记录，所以**几条屏在线就要几条一起举手**
-  // —— 只有全部就绪才激活，这是两段式切换本来的规矩，以前只是被"停线"挡住了没暴露。
+  // 几条屏在线就要几条一起举手 —— 只有全部就绪才激活，这是两段式切换本来的规矩
   for (const op of st1Before.online) await post('/api/ready', { op, modelId: M.X220.id, line: 'L1' });
   const st1After = (await j('/api/status?lineId=' + ls.find((l) => l.code === 'L1').id)).body;
   ok(st1After.modelCode === 'X220' && st1After.seq === st1Before.seq + 1, '一线切换到 X220 并 seq +1',
     { before: st1Before, after: st1After });
-  ok((await j('/api/status?lineId=' + L2)).body.modelCode === '', '二线仍然没有当前型号（完全隔离）');
+  ok((await j('/api/status?lineId=' + L2)).body.modelCode === '', '二线仍然没有当前机种（完全隔离）');
 
-  const pl2 = (await j('/display/playlist?op=OP30&line=L2')).body;
-  ok(pl2.lineCode === 'L2' && pl2.empty === true, '二线 OP30 没配内容 → empty=true（不借用一线的图）');
+  const pl2 = (await j('/display/playlist?op=OP3&line=L2')).body;
+  ok(pl2.lineCode === 'L2' && pl2.empty === true, '二线还没指定机种 → empty=true（不借用一线的图）');
 
-  // 不带 line 的请求要落到"sort 最前的启用线体"，不能算到别的线头上
-  // （3.5.0 起几条线可以同时启用，回落规则从"唯一那条"变成"sort 最前那条"）
-  await put('/api/lines/' + L2, { enabled: true });
-  await post('/api/switch', { modelCode: 'X230' });          // 不带 lineId → 落到一线（sort 最前）
-  const readyNoLine = await post('/api/ready', { op: 'OP30', modelId: M.X230.id });
-  ok(readyNoLine.ok && readyNoLine.body.state.lineId === ls.find((l) => l.code === 'L1').id,
-    '举手不带 line 时落到 sort 最前的启用线体', readyNoLine.body.state);
-
-  // v3.0.0：内容挂在「机种 × 线体 × 工位」上，完成度也按线体各算各的。
-  // 二线刚建出来、还没配任何内容，它的完成度就是 0 —— 这才对，不能借用一线。
-  const covL1 = (await j('/api/models?lineId=' + ls.find((l) => l.code === 'L1').id)).body.coverage.done;
-  const covL2 = (await j('/api/models?lineId=' + L2)).body.coverage.done;
-  ok(covL1 > 0, '一线上的机种内容还在（41 条老内容迁过来后按线归位）');
-  ok(covL2 === 0, '二线的完成度是 0：内容是各条线自己的，不共用');
-
-  // 收拾：停用并删掉测试线体
-  await put('/api/lines/' + L2, { enabled: false });
+  // 收拾：停线并删掉测试线体
+  await put('/api/lines/' + L2, { status: 'stopped' });
   const delEmpty = await j('/api/lines/' + L2, { method: 'DELETE' });
-  ok(delEmpty.ok, '没有内容的线体可以删除');
-  await put('/api/lines/' + ls.find((l) => l.code === 'L1').id, { enabled: true });
-  ok((await j('/api/lines')).body.lines.length === 1, '删除后只剩一线，且恢复启用');
+  ok(delEmpty.ok, '停线的线体可以删除');
+  ok((await j('/api/lines')).body.lines.length === 1, '删除后只剩一线');
 
-  // ---------- 12. 工位（机种设置）：机种 × 线体 × 工序码 ----------
-  // v3.0.0 的核心变化：工位带线体维度。同一个机种在一线和二线的工艺路线可以
-  // 完全不同（工序数量不同，甚至同一串 OP 号的含义都不同），所以两套内容各存各的，
-  // 不再靠工序码跨线对位。两条线大体相同时用「复制」整套搬过来再改。
+  // ---------- 12. 工序（机种设置）：机种 × 工序 ----------
+  // 4.0.0 的核心：工序归机种，一个机种只有一套，几条线做同一个产品共用。
+  console.log('\n[12] 机种 → 工序 → 内容');
   const L1id = (await j('/api/lines')).body.lines.find((l) => l.code === 'L1').id;
 
-  const stAll = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id)).body;
-  ok(stAll.stations.length === 5, '机种在一线上有 5 个工位（按这条线自己的工序长出来）');
-  ok(stAll.stations.map((s) => s.code).join(',') === 'OP10,OP20,OP30,OP40,OP50',
-    '工位码与本线工序码一致（OP10 ↔ OP10）');
-  ok(stAll.stations.every((s) => s.lineId === L1id), '每个工位都带线体归属');
+  const mp = (await j('/api/processes?modelId=' + M.X200.id)).body;
+  ok(mp.processes.length === 5, 'X200 有 5 道工序');
+  ok(mp.processes.map((p) => p.code).join(',') === 'OP1,OP2,OP3,OP4,OP5', '工序码与机种定义一致');
+  ok(mp.lines.length === 1 && mp.lines[0].code === 'L1', '同时回「可生产线体」');
+  const p3 = mp.processes.find((p) => p.code === 'OP3');
+  ok(p3.items.length === 2, 'OP3 上有前面写入的 2 项');
 
-  const st30 = stAll.stations.find((s) => s.code === 'OP30');
-  ok(st30.items.length === 2, 'OP30 上有前面写入的 2 项（内容已迁到工位）');
+  // 类型闸门：工序只允许视频时，塞图片必须被拒
+  await put('/api/processes/' + p3.id, { reqs: [{ kind: 'video', minCount: 1 }] });
+  const gate = await put('/api/processes/' + p3.id, { items: [{ mediaId: u1.body.id }] });
+  ok(gate.status === 400, '工序只允许视频时，写进图片被拒（类型闸门生效）');
+  ok((await j('/api/processes?modelId=' + M.X200.id)).body.processes.find((p) => p.code === 'OP3')
+    .items.length === 2, '被拒的那次没有破坏原有内容（整批校验，不留半套）');
+  await put('/api/processes/' + p3.id, { reqs: [{ kind: 'image', minCount: 1, minWidth: 1280, minHeight: 720 }] });
 
-  // 类型闸门：工位只允许视频时，塞图片必须被拒
-  await put('/api/stations/' + st30.id, { reqs: [{ kind: 'video', minCount: 1 }] });
-  const gate = await put('/api/stations/' + st30.id, { items: [{ mediaId: u1.body.id }] });
-  ok(gate.status === 400, '工位只允许视频时，写进图片被拒（类型闸门生效）');
-  ok((await j('/api/playlist?modelId=' + M.X200.id + '&processId=' + P.OP30.id)).body.items.length === 2,
-    '被拒的那次没有破坏原有内容（整批校验，不留半套）');
-  await put('/api/stations/' + st30.id, {
-    reqs: [{ kind: 'image', minCount: 1, minWidth: 1280, minHeight: 720 }]
+  // 新建机种：一次定下「几道工序」和「在哪几条线做」—— 这正是新建弹窗干的事
+  const nm = await post('/api/models', {
+    code: 'T300', name: 'T300 型', processCount: 3, lineIds: [L1id]
   });
+  ok(nm.ok && nm.body.processes === 3, '新建机种按「几道工序」一次铺好（3 道）');
+  const tp = (await j('/api/processes?modelId=' + nm.body.id)).body;
+  ok(tp.processes.map((p) => p.code).join(',') === 'OP1,OP2,OP3', '默认工序码 OP1..OP3');
+  ok(tp.processes.map((p) => p.name).join(',') === '装配,调试,检验',
+    '默认工序名 装配/调试/检验（建完就能用，不用先改名）');
+  ok(tp.lines.length === 1 && tp.lines[0].id === L1id, '新建时勾的线体立刻成为「可生产线体」');
+  ok(tp.processes.every((p) => p.items.length === 0), '新工序都是空的，等内容');
+  ok(tp.processes.every((p) => p.reqs.some((x) => x.kind === 'image')),
+    '新工序默认允许图片（现场最常见的起点）');
 
-  // 跨线独立：新线有同名工序，但是另一套空工位
-  const madeL3 = await post('/api/lines', { code: 'L3', name: '三线' });
-  const L3 = madeL3.body.id;
-  const stL3 = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L3)).body.stations;
-  ok(stL3.length === 5 && stL3.every((s) => s.items.length === 0),
-    '新线体自动长出同一批空工位（不用逐个机种点补齐）');
-  ok(stL3[0].id !== stAll.stations[0].id, '两条线的工位是两条独立记录，不是同一条');
+  // 可生产线体多选：工艺只有一套，几条线共用
+  const l2b = await post('/api/lines', { name: '二线', slots: 5 });
+  await put('/api/models/' + nm.body.id, { lineIds: [L1id, l2b.body.id] });
+  const tp2 = (await j('/api/processes?modelId=' + nm.body.id)).body;
+  ok(tp2.lines.length === 2, '一个机种可以安排到多条线（可生产机种多选）');
+  ok(tp2.processes.length === 3, '多勾一条线不会复制工序（工艺仍只有一套）');
+  ok((await j('/api/lines')).body.lines.find((l) => l.id === l2b.body.id).modelCount === 1,
+    '线体那边的「可生产机种」反向更新为 1');
 
-  const plL1 = (await j('/display/playlist?op=OP30&line=L1&model=X200')).body;
-  const plL3 = (await j('/display/playlist?op=OP30&line=L3&model=X200')).body;
-  ok(plL1.count === 2 && plL3.count === 0,
-    '同一机种在另一条线上是独立的一套，不会借用一线的内容');
-  ok(plL3.noStation === false, '"有工位但没内容"和"压根没工位"能分开（noStation=false）');
+  // 加工序 / 重码拒绝
+  const madeP = await post('/api/processes', { modelId: M.X200.id, code: 'OP6', name: '老化' });
+  ok(madeP.ok && madeP.body.code === 'OP6' && madeP.body.reqs.some((x) => x.kind === 'image'),
+    '可以给机种加工序（默认允许图片）');
+  ok((await post('/api/processes', { modelId: M.X200.id, code: 'OP6' })).status === 400,
+    '同一机种内工序码不能重复');
+  ok((await post('/api/processes', { modelId: M.X210.id, code: 'OP6' })).ok,
+    '不同机种可以用同一个工序码（各是各的工序）');
 
-  // 跨线复制：目标线空着的工位直接填上
-  const cp = await post('/api/stations/copy', { modelId: M.X200.id, fromLineId: L1id, toLineId: L3 });
-  ok(cp.ok && cp.body.filled.includes('OP30'), '可以把一线有内容的工位复制到三线（空工位直接填上）');
-  ok(cp.body.empty.length === 5 - cp.body.filled.length,
-    '来源线本来就空的工位记进 empty，不算搬过（也不会把空壳当成功）');
-  ok((await j('/display/playlist?op=OP30&line=L3&model=X200')).body.count === 2,
-    '复制后三线取到同一份内容');
+  // 改工序码：内容跟着工序走，不会变成对不上的孤儿
+  const p6 = (await j('/api/processes?modelId=' + M.X200.id)).body.processes.find((x) => x.code === 'OP6');
+  await put('/api/processes/' + p6.id, { items: [{ mediaId: u1.body.id }] });
+  const rn = await put('/api/processes/' + p6.id, { code: 'OP7', name: '老化复核' });
+  ok(rn.ok && rn.body.renamed === 1, '改工序码成功（renamed = 1）', rn.body);
+  const afterRn = (await j('/api/processes?modelId=' + M.X200.id)).body.processes;
+  ok(!afterRn.some((p) => p.code === 'OP6') && afterRn.some((p) => p.code === 'OP7' && p.items.length === 1),
+    '改码后内容还在（内容挂在工序 id 上，不是挂在码上）', afterRn.map((p) => p.code + ':' + p.items.length));
 
-  const cp2 = await post('/api/stations/copy', { modelId: M.X200.id, fromLineId: L1id, toLineId: L3 });
-  ok(cp2.body.filled.length === 0 && cp2.body.skipped.length === cp.body.filled.length,
-    '再复制一次不会叠一份（目标线已有内容默认跳过）');
+  // 另一个机种同名工序是它自己的一份，不会被 X200 的改动带上
+  const x210 = (await j('/api/processes?modelId=' + M.X210.id)).body.processes;
+  ok(x210.find((p) => p.code === 'OP3').items.length === 1,
+    '同一道工序码在另一个机种上是独立记录（X210 的 OP3 仍是 1 项）');
+  ok(x210.find((p) => p.code === 'OP3').id !== p3.id, '两个机种的同名工序是两条独立记录');
 
-  // 复制出来是完全独立的两份：改三线不动一线
-  const st3op30 = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L3))
-    .body.stations.find((s) => s.code === 'OP30');
-  await put('/api/stations/' + st3op30.id, { items: [{ mediaId: st3op30.items[0].mediaId }] });
-  ok((await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
-    .body.stations.find((s) => s.code === 'OP30').items.length === 2,
-    '改三线的 OP30 不影响一线（两份内容各存各的）');
-
-  await j('/api/lines/' + L3, { method: 'DELETE' });
-  ok((await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L3)).status === 400,
-    '删掉线体后它的工位跟着消失（不留连不上的孤儿数据）');
-
-  // 加工位 / 同线内重码拒绝（跨线可以同名）
-  const madeSt = await post('/api/stations', { modelId: M.X200.id, lineId: L1id, code: 'OP60', name: '老化' });
-  ok(madeSt.ok && madeSt.body.code === 'OP60' && madeSt.body.reqs.some((r) => r.kind === 'image'),
-    '可以给「机种 × 线体」加工位（默认允许图片）');
-  ok((await post('/api/stations', { modelId: M.X200.id, lineId: L1id, code: 'OP60' })).status === 400,
-    '同一条线上工位码不能重复');
-
-  // 线体加工序 → 所有机种自动长出对应工位；sync 仍是修复手段
-  const addProc = await post('/api/processes', { lineId: L1id, code: 'OP70', name: '包装复核' });
-  ok(addProc.ok && addProc.body.stations >= 1, '线体上加一道工序，各机种自动补出对应工位');
-  ok((await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
-    .body.stations.some((s) => s.code === 'OP70'),
-    '新工位立刻出现在机种设置里（不用手动同步）');
-
-  const st70 = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
-    .body.stations.find((s) => s.code === 'OP70');
-  await j('/api/stations/' + st70.id, { method: 'DELETE' });
-  const syncRes = await post('/api/stations/sync', { modelId: M.X200.id, lineId: L1id });
-  ok(syncRes.ok && syncRes.body.created.includes('OP70'), '「按本线工序补齐」能把缺掉的工位补回来');
-
-  // 改工序码：工位靠 code 与本线工序对位，工序码一改，本线工位必须跟着改，
-  // 否则老码那个工位（连同里面的内容）当场变成"对不上"的孤儿，屏上就是空白。
-  const pr70b = (await j('/api/processes?lineId=' + L1id)).body.processes.find((x) => x.code === 'OP70');
-  const st70b = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
-    .body.stations.find((s) => s.code === 'OP70');
-  await put('/api/stations/' + st70b.id, { items: [{ mediaId: u1.body.id }] });
-  const rn = await put('/api/processes/' + pr70b.id, { code: 'OP75', name: '包装复核' });
-  ok(rn.ok && rn.body.renamed >= 1, '改工序码时本线工位跟着改（renamed ≥ 1）', rn.body);
-  const afterRn = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id)).body.stations;
-  ok(!afterRn.some((s) => s.code === 'OP70') && afterRn.some((s) => s.code === 'OP75' && s.items.length === 1),
-    '改码后内容还在（没变成对不上的孤儿）', afterRn.map((s) => s.code + ':' + s.items.length));
-
-  // 同一条线上，不同机种各有各的工位：X210 的 OP30 是它自己那 1 项，
-  // 不会因为 X200 在同一位置放了 2 项而被带上
-  const stX210 = (await j('/api/stations?modelId=' + M.X210.id + '&lineId=' + L1id)).body.stations;
-  const x210op30 = stX210.find((s) => s.code === 'OP30');
-  ok(stX210.length === 6 && x210op30.items.length === 1,
-    '同一线的另一个机种是它自己的工位与内容（X210 的 OP30 仍是 1 项）');
-  ok(x210op30.id !== st30.id, '两个机种同一道工序的工位是两条独立记录');
-
-  // 有内容的工位不许直接删（会丢内容）
-  const delBusySt = await j('/api/stations/' + st30.id, { method: 'DELETE' });
-  ok(delBusySt.status === 400, '有内容的工位不允许直接删');
-
-  // 清理：删掉 OP60 / OP75 两道工序和对应工位，一线恢复成 5 道
-  for (const code of ['OP60', 'OP75']) {
-    const s = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
-      .body.stations.find((x) => x.code === code);
-    if (s) await j('/api/stations/' + s.id, { method: 'DELETE' });
-    const pr = (await j('/api/processes?lineId=' + L1id)).body.processes.find((x) => x.code === code);
-    if (pr) await j('/api/processes/' + pr.id, { method: 'DELETE' });
-  }
-  ok((await j('/api/processes?lineId=' + L1id)).body.processes.length === 5, '一线恢复 5 道工序');
+  // 删有内容的工序：不硬拦，但要把删掉几项报回来，界面据此二次确认
+  const delBusy = await j('/api/processes/' + p6.id, { method: 'DELETE' });
+  ok(delBusy.ok && delBusy.body.items === 1, '删有内容的工序会报出删掉几项（界面据此确认）');
 
   // 总览接口：线体 + 机种 + 客户端状态一次给全
   const board = (await j('/api/board')).body;
   ok(Array.isArray(board.lines) && board.lines.length >= 1, '总览一次返回所有线体');
-  const bl = board.lines[0];
-  ok(bl.clients.length === bl.processes, '每个工序都占一个客户端位置（没装机的也列出来）');
+  const bl = board.lines.find((l) => l.id === L1id);
+  ok(bl.slots === 5, '总览带工位数');
+  ok(bl.clients.length === bl.processes, '每道工序都占一个客户端位置（没装机的也列出来）');
   ok(bl.clients.every((c) => typeof c.status === 'string' && 'hasContent' in c),
     '客户端带 status 与 hasContent，总览据此标出"哪块屏没内容"');
-
 
   // ---------- 13. 终端参数与上传进度 ----------
   // 现场最常问的是"3 号工位怎么没数据"，所以两条路径都要能区分：
   // 从没报到过（seen=false） vs 报到过但离线（seen=true, online=false）。
   const t0 = (await j('/api/terminals?lineId=' + L1id)).body;
   ok(t0.total === 5 && t0.terminals.length === 5,
-    '终端列表按"工序"返回，没装机的工序也占一行（否则看不出是没装还是没开）');
+    '终端列表按「当前机种的工序」返回，没装机的工序也占一行');
   ok(t0.terminals.some((x) => x.seen === false), '从未上报过的工序标记为 seen=false');
 
-  const tel = await post('/api/telemetry?line=L1&op=OP40', {
-    res: '1920x1080', ver: '1.7.0', free: 4096, done: 3, total: 7, model: 'X200', st: 'preparing'
+  const tel = await post('/api/telemetry?line=L1&op=OP4', {
+    res: '1920x1080', ver: '1.7.1', free: 4096, done: 3, total: 7, model: 'X200', st: 'preparing'
   });
   ok(tel.ok, '终端可以上报机器参数与下载进度');
 
   const t1 = (await j('/api/terminals?lineId=' + L1id)).body;
-  const op40 = t1.terminals.find((x) => x.op === 'OP40');
-  ok(op40.seen === true && op40.online === true, '上报后该工序变为在线');
-  ok(op40.res === '1920x1080' && op40.ver === '1.7.0', '分辨率与终端版本被记录');
-  ok(op40.done === 3 && op40.total === 7, '下载进度被记录（3/7）');
-  ok(op40.ip === '127.0.0.1' || /^\d+\.\d+\.\d+\.\d+$/.test(op40.ip),
+  const op4 = t1.terminals.find((x) => x.op === 'OP4');
+  ok(op4.seen === true && op4.online === true, '上报后该工序变为在线');
+  ok(op4.res === '1920x1080' && op4.ver === '1.7.1', '分辨率与终端版本被记录');
+  ok(op4.done === 3 && op4.total === 7, '下载进度被记录（3/7）');
+  ok(op4.ip === '127.0.0.1' || /^\d+\.\d+\.\d+\.\d+$/.test(op4.ip),
     'IP 由服务端从连接里取，不信终端自报');
-  ok(op40.modelCode === 'X200', '终端正在准备哪个机种也记下来了');
+  ok(op4.modelCode === 'X200', '终端正在准备哪个机种也记下来了');
 
   // 心跳带参数（不需要额外 POST）：长轮询的 query 里带 res/ver/free 就够
-  await j('/api/state?op=OP40&line=L1&since=0&res=3840x2160&ver=9.9.9');
+  await j('/api/state?op=OP4&line=L1&since=0&res=3840x2160&ver=9.9.9');
   const t2 = (await j('/api/terminals?lineId=' + L1id)).body;
-  const op40b = t2.terminals.find((x) => x.op === 'OP40');
-  ok(op40b.res === '3840x2160', '心跳 query 里的分辨率同样能更新档案（老终端不改代码也够用）');
+  const op4b = t2.terminals.find((x) => x.op === 'OP4');
+  ok(op4b.res === '3840x2160', '心跳 query 里的分辨率同样能更新档案（老终端不改代码也够用）');
 
   // ========== 13. 工序清单导入（Excel / CSV） ==========
   console.log('\n13. 工序清单导入（Excel / CSV）');
@@ -507,16 +461,13 @@ async function upload(buf, name) {
     return Buffer.concat([...locals, cd, eocd]);
   }
 
-  const linesResp = await j('/api/lines');
-  const lineList = Array.isArray(linesResp.body) ? linesResp.body : (linesResp.body.lines || []);
-  const L1 = lineList.find((l) => l.id === L1id) || lineList[0];
-  const stBefore = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id)).body.stations;
-  const s10 = stBefore.find((s) => s.code === 'OP10');
-  const s20 = stBefore.find((s) => s.code === 'OP20');
+  const stBefore = (await j('/api/processes?modelId=' + M.X200.id)).body.processes;
+  const s1 = stBefore.find((s) => s.code === 'OP1');
+  const s2 = stBefore.find((s) => s.code === 'OP2');
 
-  // ---- 13.1 老格式：三列、带中文标题、没有机种/线体列 ----
-  // 3.3.0 之前做的表不改成五列也能导，靠 ?modelId&lineId 定位
-  const rows = [['工序号', '工序名称', '做什么'], ['OP10', '压装（改）', '压轴承到位'], ['OP300', '气密', '打气测漏'], ['OP310', '贴标', '']];
+  // ---- 13.1 老格式：三列、带中文标题、没有机种列 ----
+  // 3.4.0 之前做的表不改成四列也能导，靠 ?modelId 定位到"界面当前选中的机种"
+  const rows = [['工序号', '工序名称', '做什么'], ['OP1', '压装（改）', '压轴承到位'], ['OP30', '气密', '打气测漏'], ['OP31', '贴标', '']];
   const sst = [];
   const sid = (s) => { if (!sst.includes(s)) sst.push(s); return sst.indexOf(s); };
   const sheetRows = rows.map((r, ri) =>
@@ -532,96 +483,96 @@ async function upload(buf, name) {
   ]);
 
   const legacyUrl = '/api/import/parse?filename=' + encodeURIComponent('工序.xlsx')
-    + '&modelId=' + M.X200.id + '&lineId=' + L1id;
+    + '&modelId=' + M.X200.id;
   const upXlsx = await j(legacyUrl, { method: 'POST', body: xlsx });
   ok(upXlsx.status === 200 && upXlsx.body.total === 3, 'xlsx 解析出 3 行（标题行自动跳过）');
-  ok(upXlsx.body.mode === 'single', '没有机种/线体列 → 走「导到当前选中机种线体」这条路');
+  ok(upXlsx.body.mode === 'single', '没有机种列 → 走「导到当前选中机种」这条路');
   ok(Array.isArray(upXlsx.body.header) && upXlsx.body.header[0] === '工序号' && upXlsx.body.headerRow === 1,
     '认出并回传标题行（含它在第几行）');
   ok(upXlsx.body.mapping.code === 0 && upXlsx.body.mapping.name === 1 && upXlsx.body.mapping.note === 2,
     '表头映射：工序号→工序码、工序名称→名称、做什么→说明', upXlsx.body.mapping);
-  ok(upXlsx.body.rows[0].code === 'OP10' && upXlsx.body.rows[1].name === '气密',
+  ok(upXlsx.body.rows[0].code === 'OP1' && upXlsx.body.rows[1].name === '气密',
     '单元格文本按 sharedStrings 正确还原');
   ok(upXlsx.body.counts.new === 2 && upXlsx.body.counts.bad === 0,
-    '两道是新工序（OP300 / OP310），没有不合要求的行', upXlsx.body.counts);
+    '两道是新工序（OP30 / OP31），没有不合要求的行', upXlsx.body.counts);
 
-  const csvBuf = Buffer.from('工序号,工序名称,做什么\nOP10,压装,说明\nOP320,打磨,砂纸\n', 'utf8');
+  const csvBuf = Buffer.from('工序号,工序名称,做什么\nOP1,压装,说明\nOP32,打磨,砂纸\n', 'utf8');
   const upCsv = await j(legacyUrl, { method: 'POST', body: csvBuf });
-  ok(upCsv.body.total === 2 && upCsv.body.rows[1].code === 'OP320', 'CSV 同样能读');
+  ok(upCsv.body.total === 2 && upCsv.body.rows[1].code === 'OP32', 'CSV 同样能读');
 
-  const imp1 = await post('/api/stations/import', {
+  const imp1 = await post('/api/processes/import', {
     rows: upXlsx.body.rows.filter((r) => r.status !== 'bad'), mode: 'merge'
   });
   ok(imp1.ok && imp1.body.created === 2 && imp1.body.skipped === 1,
-    '导入按「有就跳过」：新建 2 道、OP10 已存在跳过 1 道');
+    '导入按「有就跳过」：新建 2 道、OP1 已存在跳过 1 道');
   ok(/^b_/.test(imp1.body.batchId), '新建过工序才发批次号（撤销要用）', imp1.body.batchId);
 
-  const imp2 = await post('/api/stations/import', {
+  const imp2 = await post('/api/processes/import', {
     rows: upXlsx.body.rows.filter((r) => r.status !== 'bad'), mode: 'merge'
   });
   ok(imp2.body.created === 0 && imp2.body.skipped === 3, '同一份表再导一次不重复建（幂等）');
   ok(imp2.body.batchId === '', '一行都没建时不发批次号，界面上不会出现点不动的「撤销」');
 
-  // ---- 13.2 全厂五列：表头乱序、前面还插了一列「序号」，照样得认 ----
+  // ---- 13.2 全厂四列：表头乱序、前面还插了一列「序号」，照样得认 ----
+  // 还特意留了一列「线体」：3.4.0 的五列文件不会因为多这一列就整表错位。
   const flatRows = [
     ['序号', '线体', '做什么', '机种', '名称', '工序码'],
-    [1, L1.name, '改过的说明', M.X200.name, '压装改名', 'OP10'],        // 有变化
-    [2, L1.name, s20.note || '', M.X200.name, s20.name, 'OP20'],        // 一模一样
-    [3, L1.name, '新工序', M.X200.name, '镭雕', 'OP99'],                // 新增
-    [4, '不存在的三线', '', M.X200.name, 'X', 'OP98'],                  // 线体没建档
-    [5, L1.name, '', 'X9999', 'X', 'OP97'],                             // 机种没建档
-    [6, L1.name, '', M.X200.name, '重复', 'OP10'],                      // 与第 2 行重码
-    [7, L1.name, '', M.X200.name, '怪码', 'OP 10!'],                    // 工序码不合法
-    [8, L1.name, '', '', '没机种', 'OP96']                              // 机种栏空着
+    [1, '一线', '改过的说明', M.X200.name, '压装改名', 'OP1'],       // 有变化
+    [2, '一线', s2.note || '', M.X200.name, s2.name, 'OP2'],        // 一模一样
+    [3, '一线', '新工序', M.X200.name, '镭雕', 'OP99'],             // 新增
+    [4, '一线', '', 'X9999', 'X', 'OP97'],                          // 机种没建档
+    [5, '一线', '', M.X200.name, '重复', 'OP1'],                    // 与第 2 行重码
+    [6, '一线', '', M.X200.name, '怪码', 'OP 10!'],                 // 工序码不合法
+    [7, '一线', '', '', '没机种', 'OP96']                           // 机种栏空着
   ];
   const flatBuf = buildWorkbook([{ name: '工序清单', rows: flatRows }]);
   const upFlat = await j('/api/import/parse?filename=' + encodeURIComponent('全厂.xlsx'),
     { method: 'POST', body: flatBuf });
-  ok(upFlat.body.mode === 'flat', '带机种/线体两列 → 全厂模式，按行分流到各自机种线体');
+  ok(upFlat.body.mode === 'flat', '带机种列 → 全厂模式，按行分流到各自机种');
   ok(upFlat.body.mapping.code === 5 && upFlat.body.mapping.model === 3 && upFlat.body.mapping.note === 2,
     '前插「序号」、列顺序打乱，仍按表头名认出每一列', upFlat.body.mapping);
   ok(upFlat.body.counts.new === 1 && upFlat.body.counts.diff === 1 && upFlat.body.counts.same === 1,
     '逐行判定：1 新增 / 1 有变化 / 1 没变化', upFlat.body.counts);
-  ok(upFlat.body.counts.bad === 5, '5 行不合要求', upFlat.body.counts);
+  ok(upFlat.body.counts.bad === 4, '4 行不合要求（线体列已被忽略，不再算错）', upFlat.body.counts);
 
   const badReasons = upFlat.body.rows.filter((r) => r.status === 'bad').map((r) => r.reason);
-  ok(badReasons.some((x) => x.includes('线体「不存在的三线」还没建档')), '线体没建档的行单独指出来', badReasons);
-  ok(badReasons.some((x) => x.includes('机种「X9999」还没建档')), '机种没建档的行单独指出来');
+  ok(badReasons.some((x) => x.includes('机种「X9999」还没建档')), '机种没建档的行单独指出来', badReasons);
+  ok(!badReasons.some((x) => x.includes('线体')), '3.4.0 五列文件里的「线体」列被忽略，不报错');
   ok(badReasons.some((x) => x.includes('与第 2 行工序码重复')), '文件内重码，指出跟第几行撞了');
   ok(badReasons.some((x) => x.includes('工序码只能用')), '工序码字符不合法');
   ok(badReasons.some((x) => x === '没有填机种'), '机种栏空着');
   ok(!upFlat.body.rows.some((r) => r.status === 'bad' && r.code === 'OP99'),
     '不合要求的行不影响合格行');
 
-  const impFlat = await post('/api/stations/import', {
+  const impFlat = await post('/api/processes/import', {
     rows: upFlat.body.rows.filter((r) => r.status !== 'bad'), mode: 'merge'
   });
   ok(impFlat.ok && impFlat.body.created === 1 && impFlat.body.skipped === 2,
     '合并导入：只加 OP99，两道已存在的跳过');
 
-  const impUpd = await post('/api/stations/import', {
+  const impUpd = await post('/api/processes/import', {
     rows: upFlat.body.rows.filter((r) => r.status !== 'bad'), mode: 'update'
   });
   ok(impUpd.body.updated === 1 && impUpd.body.kept === 2 && impUpd.body.created === 0,
     '更新导入：只动真变了的那 1 道，没变化的算「没改动」不重写', impUpd.body);
 
-  const op10After = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
-    .body.stations.find((s) => s.code === 'OP10');
-  ok(op10After.name === '压装改名' && op10After.note === '改过的说明', 'update 模式覆盖名称与「做什么」');
+  const op1After = (await j('/api/processes?modelId=' + M.X200.id))
+    .body.processes.find((s) => s.code === 'OP1');
+  ok(op1After.name === '压装改名' && op1After.note === '改过的说明', 'update 模式覆盖名称与「做什么」');
 
-  const impOnly = await post('/api/stations/import', {
-    rows: [{ row: 1, modelId: M.X200.id, lineId: L1id, code: 'OP95', name: '不该建', note: '' }],
+  const impOnly = await post('/api/processes/import', {
+    rows: [{ row: 1, modelId: M.X200.id, code: 'OP95', name: '不该建', note: '' }],
     mode: 'update-only'
   });
   ok(impOnly.body.created === 0 && impOnly.body.skipped === 1,
     'update-only 不新建工序（表里混了草稿行时用）');
 
   // ---- 13.3 落库阶段的校验兜底 ----
-  const impBad = await post('/api/stations/import', {
+  const impBad = await post('/api/processes/import', {
     rows: [
-      { row: 1, modelId: M.X200.id, lineId: L1id, code: '', name: '没有码' },
-      { row: 2, modelId: M.X200.id, lineId: L1id, code: 'OP!@#', name: '乱码' },
-      { row: 3, modelId: M.X200.id, lineId: L1id, code: 'OP330', name: '合格', note: '' }
+      { row: 1, modelId: M.X200.id, code: '', name: '没有码' },
+      { row: 2, modelId: M.X200.id, code: 'OP!@#', name: '乱码' },
+      { row: 3, modelId: M.X200.id, code: 'OP33', name: '合格', note: '' }
     ],
     mode: 'merge'
   });
@@ -630,41 +581,42 @@ async function upload(buf, name) {
   ok(impBad.body.bad[0].row === 1 && typeof impBad.body.bad[0].reason === 'string',
     '坏行带着原始行号和原因，能对回 Excel 那一行', impBad.body.bad[0]);
 
-  const impWrong = await post('/api/stations/import', {
-    rows: [{ row: 1, modelId: 'md_not_exist', lineId: L1id, code: 'OP1', name: 'x' }], mode: 'merge'
+  const impWrong = await post('/api/processes/import', {
+    rows: [{ row: 1, modelId: 'md_not_exist', code: 'OP1', name: 'x' }], mode: 'merge'
   });
   ok(impWrong.body.bad.length === 1 && impWrong.body.created === 0,
     '机种不存在：整行不入库并写明原因');
 
-  // 老调用方式（顶层 modelId/lineId + 三列数组）还能跑，脚本不用改
-  const impLegacy = await post('/api/stations/import', {
-    modelId: M.X200.id, lineId: L1id, rows: [['OP340', '老写法', '']], mode: 'merge'
+  // 老调用方式（顶层 modelId + 三列数组）还能跑，脚本不用改
+  const impLegacy = await post('/api/processes/import', {
+    modelId: M.X200.id, rows: [['OP34', '老写法', '']], mode: 'merge'
   });
-  ok(impLegacy.body.created === 1, '兼容 3.3.0 的调用方式（三列数组 + 顶层机种线体）');
+  ok(impLegacy.body.created === 1, '兼容 3.3.0 的调用方式（三列数组 + 顶层机种）');
 
   // ---- 13.4 撤销本次导入 ----
-  const undo = await post('/api/stations/import/undo', { batchId: imp1.body.batchId });
+  const undo = await post('/api/processes/import/undo', { batchId: imp1.body.batchId });
   ok(undo.ok && undo.body.deleted === 2, '撤销本次导入：按批次精确删掉那一批新建的 2 道');
-  const no99 = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id)).body.stations;
-  ok(!no99.some((x) => x.code === 'OP300' || x.code === 'OP310'), '被撤销的工序确实没了');
+  const no99 = (await j('/api/processes?modelId=' + M.X200.id)).body.processes;
+  ok(!no99.some((x) => x.code === 'OP30' || x.code === 'OP31'), '被撤销的工序确实没了');
   ok(no99.some((x) => x.code === 'OP99'), '撤销只删本批次新建的，后来导入的不受影响');
 
-  const undoAgain = await post('/api/stations/import/undo', { batchId: imp1.body.batchId });
+  const undoAgain = await post('/api/processes/import/undo', { batchId: imp1.body.batchId });
   ok(!undoAgain.ok && undoAgain.status === 400, '同一批次撤两次：第二次给出人话，不是静默成功');
 
-  // 清理：把这一节造的工序删掉，把 OP10 改回原样，别影响后面的断言
-  for (const code of ['OP99', 'OP320', 'OP330', 'OP340']) {
-    const st = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id))
-      .body.stations.find((x) => x.code === code);
-    if (st) await j('/api/stations/' + st.id, { method: 'DELETE' });
+  // 清理：把这一节造的工序删掉，把 OP1 改回原样，别影响后面的断言
+  for (const code of ['OP99', 'OP32', 'OP33', 'OP34']) {
+    const p = (await j('/api/processes?modelId=' + M.X200.id))
+      .body.processes.find((x) => x.code === code);
+    if (p) await j('/api/processes/' + p.id, { method: 'DELETE' });
   }
-  await post('/api/stations/import', {
-    rows: [{ row: 1, modelId: M.X200.id, lineId: L1id, code: 'OP10', name: s10.name, note: s10.note || '' }],
+  await post('/api/processes/import', {
+    rows: [{ row: 1, modelId: M.X200.id, code: 'OP1', name: s1.name, note: s1.note || '' }],
     mode: 'update'
   });
-  const back = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id)).body.stations;
-  ok(back.length === stBefore.length && back.find((x) => x.code === 'OP10').name === s10.name,
+  const back = (await j('/api/processes?modelId=' + M.X200.id)).body.processes;
+  ok(back.length === stBefore.length && back.find((x) => x.code === 'OP1').name === s1.name,
     '删掉导入的工序、改回原名后恢复原样');
+
 
   // ========== 14. 工序清单导出（xlsx） ==========
   console.log('\n14. 工序清单导出 / 模板（Excel）');
@@ -674,33 +626,33 @@ async function upload(buf, name) {
   ok(tpl.name === '工序清单导入模板.xlsx', '模板文件名带中文（RFC 5987 编码）', tpl.name);
 
   const tplRows = parseSheet(tpl.buf);
-  ok(tplRows.length === 3 && tplRows[0].length === 5, '模板 = 标题行 + 两行示例，五列', tplRows[0]);
-  ok(tplRows[0].join('|') === '机种|线体|工序码|名称|做什么',
+  ok(tplRows.length === 3 && tplRows[0].length === 4, '模板 = 标题行 + 两行示例，四列', tplRows[0]);
+  ok(tplRows[0].join('|') === '机种|工序码|名称|做什么',
     '模板表头与导出的表逐列同构（导出来改完能直接导回去）', tplRows[0]);
   ok(tpl.buf.toString('utf8').includes('填写说明'),
     '说明单独占一页，不混在数据区里（混进去会被当成一道工序）');
 
-  const all = await bin('/api/export/stations.xlsx');
+  const all = await bin('/api/export/processes.xlsx');
   ok(all.ok && all.buf[0] === 0x50, '全厂导出成功');
   ok(/^工序清单-全部机种-\d{8}-\d{4}\.xlsx$/.test(all.name), '文件名带「全部机种」+ 时间戳', all.name);
 
   const allRows = parseSheet(all.buf);
-  ok(allRows[0].length === 5 && allRows[0][2] === '工序码', '全厂一张表，五列', allRows[0]);
-  ok(allRows.length > 1 && allRows.slice(1).every((r) => r[0] && r[1] && r[2]),
-    `每一行都带机种 / 线体 / 工序码（共 ${allRows.length - 1} 行）`);
+  ok(allRows[0].length === 4 && allRows[0][1] === '工序码', '全厂一张表，四列（不再有线体列）', allRows[0]);
+  ok(allRows.length > 1 && allRows.slice(1).every((r) => r[0] && r[1]),
+    `每一行都带机种 / 工序码（共 ${allRows.length - 1} 行）`);
   ok(allRows.length > 1 && new Set(allRows.slice(1).map((r) => r[0])).size >= Object.keys(M).length - 1,
     '所有机种都在同一张表里，不再按 sheet 拆');
 
-  const one = await bin('/api/export/stations.xlsx?modelId=' + M.X200.id + '&lineId=' + L1id);
+  const one = await bin('/api/export/processes.xlsx?modelId=' + M.X200.id);
   const oneRows = parseSheet(one.buf);
-  const stNow = (await j('/api/stations?modelId=' + M.X200.id + '&lineId=' + L1id)).body.stations;
+  const stNow = (await j('/api/processes?modelId=' + M.X200.id)).body.processes;
   ok(oneRows.length === stNow.length + 1,
-    `单机种单线导出：行数 = 工序数 + 标题（${oneRows.length} = ${stNow.length} + 1）`);
+    `单机种导出：行数 = 工序数 + 标题（${oneRows.length} = ${stNow.length} + 1）`);
   ok(stNow.every((s, i) => {
     const r = oneRows[i + 1] || [];
-    return r[0] === M.X200.name && r[1] === L1.name && r[2] === s.code
-      && (r[3] || '') === (s.name || '') && (r[4] || '') === (s.note || '');
-  }), '导出 → 读回 逐行一致（机种 / 线体 / 工序码 / 名称 / 做什么）');
+    return r[0] === M.X200.name && r[1] === s.code
+      && (r[2] || '') === (s.name || '') && (r[3] || '') === (s.note || '');
+  }), '导出 → 读回 逐行一致（机种 / 工序码 / 名称 / 做什么）');
 
   // 闭环：导出的文件原样导回去，应该一道都不动
   const rt = await j('/api/import/parse?filename=rt.xlsx', { method: 'POST', body: one.buf });
@@ -708,8 +660,11 @@ async function upload(buf, name) {
     && rt.body.counts.same === stNow.length,
     '导出文件原样导回：全部判定「没变化」，不重复建也不误改', rt.body.counts);
 
-  ok((await fetch(BASE + '/api/export/stations.xlsx?modelId=md_not_exist')).status === 400,
+  ok((await fetch(BASE + '/api/export/processes.xlsx?modelId=md_not_exist')).status === 400,
     '机种不存在时返回 400，而不是给一张空表');
+  // 老地址继续可用（3.4.0 的脚本 / 书签）
+  ok((await bin('/api/export/stations.xlsx')).ok, '老地址 /api/export/stations.xlsx 仍然返回同一个文件');
+
 
   // ---------- 14. 产线状态与排产（v3.5.0） ----------
   // 作业内容页改成"概览 + 运行产线 + 说明"三段，靠的就是这一组字段：

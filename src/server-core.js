@@ -14,7 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { openDb, seed, ensureAllModelStations, q } from './db.js';
+import { openDb, seed, q } from './db.js';
 import { findMedia, serveMedia, mediaStats } from './media.js';
 import { createRouter } from './router.js';
 import { initSwitch } from './switch.js';
@@ -26,7 +26,6 @@ import { register as registerPlaylist } from './api/playlist.js';
 import { register as registerMediaApi } from './api/mediaApi.js';
 import { register as registerState } from './api/state.js';
 import { register as registerDisplay } from './api/display.js';
-import { register as registerStations } from './api/stations.js';
 import { register as registerBoard } from './api/board.js';
 import { register as registerImport } from './api/import.js';
 import { register as registerExport } from './api/export.js';
@@ -123,9 +122,7 @@ export function startServer(opts = {}) {
   fs.mkdirSync(DATA, { recursive: true });
   openDb(DATA);
   const seeded = seed();
-  // 每个机种都要有工位，否则「机种设置」进去是空的。
-  // 放在 seed 之后：新库这时才刚建出型号。
-  ensureAllModelStations();
+  // v4.0.0：不再需要"给每个机种长出工位"—— seed 里就给每个种子机种铺好了工序。
   initSwitch();
 
   const router = createRouter();
@@ -134,7 +131,6 @@ export function startServer(opts = {}) {
   registerMediaApi(router);
   registerState(router);
   registerDisplay(router);
-  registerStations(router);
   registerBoard(router);
   registerImport(router);
   registerExport(router);
@@ -229,6 +225,7 @@ export function summary(inst) {
     data: inst.data,
     models: q.get('SELECT COUNT(*) n FROM model WHERE enabled = 1').n,
     processes: q.get('SELECT COUNT(*) n FROM process').n,
+    models: q.get('SELECT COUNT(*) n FROM model').n,
     items: q.get('SELECT COUNT(*) n FROM item').n,
     mediaCount: ms.count,
     mediaBytes: ms.bytes,

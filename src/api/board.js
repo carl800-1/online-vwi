@@ -28,7 +28,6 @@ export function register(router) {
   router.get('/api/board', (req, res) => {
     const out = lines().map((l) => {
       const st = getState(l.id);
-      const procs = processesOf(l.id);
       const terms = terminalsOf(l.id);
       const byOp = new Map(terms.map((t) => [t.op, t]));
 
@@ -38,15 +37,19 @@ export function register(router) {
       const nxtId = q.get('SELECT next_model_id n FROM line_state WHERE line_id = ?', l.id)?.n || '';
       const nxt = nxtId ? q.get('SELECT code, name FROM model WHERE id = ?', nxtId) : null;
 
-      // 该机种**在这条线上**每个工位有没有内容：换型前就看出来"OP40 这套机种压根没配"
+      // v4.0.0：这条线"有几块屏"= 它当前机种有几道工序。没指定机种时不知道要有几块，
+      // 先返回空列表 —— 界面会显示"未指定机种"，比编一排假工位诚实。
+      const procs = st.currentModelId ? processesOf(st.currentModelId) : [];
+
+      // 当前机种每道工序有没有内容：换型前就看出来"OP4 这套机种压根没配"
       const have = new Map(
-        (cur
+        (st.currentModelId
           ? q.all(
-              `SELECT s.code, COUNT(i.id) n
-                 FROM station s JOIN item i ON i.station_id = s.id
-                WHERE s.model_id = ? AND s.line_id = ?
-                GROUP BY s.code`,
-              st.currentModelId, l.id
+              `SELECT p.code, COUNT(i.id) n
+                 FROM process p JOIN item i ON i.process_id = p.id
+                WHERE p.model_id = ?
+                GROUP BY p.code`,
+              st.currentModelId
             )
           : []
         ).map((r) => [r.code, r.n])
@@ -92,6 +95,7 @@ export function register(router) {
         deadline: st.deadline,
         timeoutMs: SWITCH_TIMEOUT_MS,
         processes: procs.length,
+        slots: l.slots || 0,
         onlineCount: clients.filter((c) => c.online).length,
         readyCount: clients.filter((c) => c.ready).length,
         noContentCount: cur ? clients.filter((c) => !c.hasContent).length : 0,
@@ -146,7 +150,7 @@ export function register(router) {
     const line = q.get('SELECT * FROM line WHERE id = ?', lineId);
     if (!line) throw badRequest('线体不存在');
     if (!line.enabled) {
-      throw badRequest(`「${line.name}」还没有启用，终端不会读它的内容。先在「线体设置」里勾选启用。`);
+      throw badRequest(`「${line.name}」现在不是运行状态，终端不会读它的内容。先把它改成「运行中」。`);
     }
     if (!code) throw badRequest('缺少 modelCode');
 
