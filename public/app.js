@@ -270,6 +270,8 @@ document.querySelectorAll('.nav-item[data-view]').forEach((b) => {
 async function loadBoard() {
   const d = await api('/api/board');
   S.board = d.lines || [];
+  S.overview = d.overview || null;
+  renderBsum();
   renderBoard();
   renderTopStats();
   renderSideFoot();
@@ -298,101 +300,149 @@ function clientChip(c, curCode) {
   return `<span class="cl ${cls}" title="${H(c.name)} ${H(c.ip || '')}">${warn}<b>${H(c.op)}</b>${H(c.name)} · ${H(text)}</span>`;
 }
 
+/* ================= 作业内容（总览）：三段 ================= */
+
+/** 第 1 段：产线概览。只数线体状态 —— 在线数是"屏连没连上"，另一回事。 */
+function renderBsum() {
+  const o = S.overview || { total: S.board.length, running: 0, stopped: 0, maintain: 0, care: 0 };
+  const cells = [
+    ['产线总数', o.total, ''],
+    ['运行中', o.running, 'run'],
+    ['停用', o.stopped, 'off'],
+    ['维修中', o.maintain, 'warn'],
+    ['保养中', o.care, 'care'],
+  ];
+  $('bsum').innerHTML = cells.map(([k, v, c]) => `
+    <div class="bs"><span class="bs-k">${k}</span><b class="bs-v ${c}">${v}</b></div>`).join('');
+  $('bsumSub').innerHTML = o.running
+    ? `今天开线 <b>${o.running}</b> 条`
+    : '今天还没开线';
+}
+
+/**
+ * 第 2 段：运行产线。一行一条，只列 status = running 的线。
+ * 工序细节不在这儿看 —— 这块屏现在播什么，在「线体设置」和「媒体库」。
+ */
 function renderBoard() {
-  const box = $('board');
-  if (!S.board.length) {
-    box.innerHTML = '<div class="empty">还没有线体。先到「线体设置」建一条。</div>';
-    $('boardHint').textContent = '';
+  const run = S.board.filter((l) => l.status === 'running');
+  $('runSub').innerHTML = run.length ? `${run.length} 条线在运行` : '没有线在运行';
+
+  if (!run.length) {
+    $('board').innerHTML = `<div class="run-empty">
+      <b>现在没有产线在运行。</b>
+      <span>${S.board.length
+        ? '把「线体设置」里某条线的状态改成「运行中」，它就会出现在这里。'
+        : '还没有建线体，先去「线体设置」建一条。'}</span>
+    </div>`;
     return;
   }
 
-  const enabledModels = S.models.filter((m) => m.enabled);
-  const opts = (cur) => enabledModels.map((m) =>
-    `<option value="${H(m.code)}"${m.code === cur ? ' selected' : ''}>${H(modelLabel(m))}</option>`
-  ).join('');
-
-  box.innerHTML = S.board.map((l) => {
+  $('board').innerHTML = run.map((l) => {
     const preparing = l.phase === 'prepare';
     const left = l.deadline ? l.deadline - Date.now() : 0;
+    const pct = l.clients.length ? Math.round(l.readyCount / l.clients.length * 100) : 0;
 
-    const modelBlock = preparing
-      ? `<div class="bc-model switching">
-           <span class="k">换型中</span>
-           <b>${H(l.currentModelCode || '—')}</b>
-           <span class="arrow">→</span>
-           <b class="to">${H(l.pendingModelCode || '')}</b>
-           <span class="prog"><i style="width:${l.clients.length ? Math.round(l.readyCount / l.clients.length * 100) : 0}%"></i></span>
-           <span class="sub">已就绪 ${l.readyCount}/${l.clients.length}　超时强切 ${mmss(left)}</span>
-         </div>`
-      : `<div class="bc-model ${l.currentModelCode ? '' : 'none'}">
-           <span class="k">当前机种</span>
-           <b>${H(l.currentModelCode || '未指定')}</b>
-           <span class="nm">${H(l.currentModelCode ? (l.currentModelName || '') : '从右边选一个机种换型')}</span>
-         </div>`;
+    const cur = l.currentModelCode
+      ? `<b class="rl-big">${H(l.currentModelCode)}</b>
+         <span class="rl-nm">${H(l.currentModelName || '')}</span>`
+      : `<b class="rl-big none">未指定</b>
+         <span class="rl-nm">右边排产一个机种</span>`;
 
-    const missing = l.currentModelCode
-      ? l.clients.filter((c) => !c.hasContent).map((c) => c.op)
-      : [];
-    // 内容覆盖：当前机种有几个工位配了内容。没指定机种时不显示（0/5 会误导成"没配"）
-    const withContent = l.clients.filter((c) => c.hasContent).length;
+    // 换型中 → 进度条 + 亮着的按钮；排好了 → 浅色「换型」；没排 → 一个加号
+    const next = preparing
+      ? `<b class="rl-nx go">${H(l.pendingModelCode || '')}</b>
+         <span class="rl-bar"><i style="width:${pct}%"></i></span>
+         <span class="rl-pg">已就绪 ${l.readyCount}/${l.clients.length} · 超时强切 ${mmss(left)}</span>
+         <button class="btn sm rl-sw on" disabled>换型中</button>`
+      : l.nextModelCode
+        ? `<b class="rl-nx">${H(l.nextModelCode)}</b>
+           <span class="rl-nm">${H(l.nextModelName || '')}</span>
+           <button class="btn sm rl-sw" data-switch="${H(l.id)}">换型</button>
+           <button class="rl-x" data-clearnext="${H(l.id)}" title="取消排产">✕</button>`
+        : `<button class="rl-add" data-picknext="${H(l.id)}">+ 排产下一个机种</button>`;
 
-    return `<div class="bcard ${l.enabled ? 'on' : ''}${preparing ? ' preparing' : ''}" data-lid="${H(l.id)}">
-      <div class="bc-head">
-        <span class="bc-name">${H(l.name)}</span>
-        <span class="bc-code">${H(l.code)}</span>
-        ${l.enabled ? '<span class="badge ok">启用中</span>' : '<span class="badge muted">未启用</span>'}
-        <div class="spacer"></div>
-        ${l.currentModelCode ? `<span class="bc-online" title="当前机种有几个工位配了内容">内容 <b>${withContent}</b>/${l.clients.length}</span>` : ''}
-        <span class="bc-online">在线 <b>${l.onlineCount}</b>/${l.clients.length}</span>
+    // 当前机种在这条线上有工序没配内容 —— 换型一定卡在那儿，提前亮出来
+    const warn = l.currentModelCode && l.noContentCount > 0
+      ? `<button class="rl-warn" data-goto-model="${H(l.currentModelId)}"
+                 title="点这里去媒体库补内容">⚠ ${l.noContentCount} 道工序没配</button>`
+      : '';
+
+    return `<div class="rl${preparing ? ' preparing' : ''}" data-lid="${H(l.id)}">
+      <div class="rl-id">
+        <b class="rl-name">${H(l.name)}</b>
+        <span class="rl-code">${H(l.code)}</span>
       </div>
-
-      ${modelBlock}
-
-      <div class="bc-clients">
-        ${l.clients.map((c) => clientChip(c, l.currentModelCode)).join('') || '<span class="sub">这条线还没有工序</span>'}
-      </div>
-
-      ${missing.length
-        ? `<div class="bc-alert">当前机种在这几个工位没有内容：<b>${missing.map(H).join('、')}</b>
-             <button class="btn sm" data-goto-model="${H(l.currentModelId)}">去机种设置补</button></div>`
-        : ''}
-
-      <div class="bc-acts">
-        <select class="bc-sel" data-sel="${H(l.id)}">
-          ${opts(l.pendingModelCode || l.currentModelCode)}
-        </select>
-        <button class="btn sm primary" data-switch="${H(l.id)}"
-          ${l.enabled ? '' : 'disabled title="这条线没启用，终端不会读它"'}>换型</button>
+      <div class="rl-cur"><span class="rl-k">正在生产</span>${cur}</div>
+      <div class="rl-nx-box"><span class="rl-k">${preparing ? '换到' : '下一个'}</span>${next}</div>
+      <div class="rl-side">
+        ${warn}
+        <span class="rl-on" title="这条线上有几块屏在线">在线 <b>${l.onlineCount}</b>/${l.clients.length}</span>
         ${preparing ? `<button class="btn sm danger" data-cancel="${H(l.id)}">放弃切换</button>` : ''}
       </div>
     </div>`;
   }).join('');
+}
 
-  $('boardHint').innerHTML =
-    '卡片上绿的是已就绪、黄的是正在下载或还没刷新、灰的是没上线。' +
-    '<b>换型</b>只会下发到这条线的终端；内容不齐时终端仍会播旧的一套，不会出现半新半旧。';
+/** 排产：挑一个机种作为"下一个要生产的"。只记库，不动终端 —— 可能提前一天做。 */
+async function pickNextModel(lineId) {
+  const line = S.board.find((x) => x.id === lineId);
+  if (!line) return;
+
+  const opts = S.models
+    .filter((m) => m.enabled && m.code !== line.currentModelCode)
+    .map((m) => `<option value="${H(m.code)}">${H(m.code)}${m.name ? '　' + H(m.name) : ''}</option>`)
+    .join('');
+  if (!opts) return toast('没有可排产的机种（除了正在生产的那个）', 'err');
+
+  const pick = await dialog({
+    title: `排产：${line.name} 下一个生产的机种`,
+    message: line.currentModelCode
+      ? `现在做的是 ${line.currentModelCode}，做完之后换哪个？`
+      : '这条线还没指定机种，之后要做哪个？',
+    html: `<select id="nextPick" class="dlg-sel">${opts}</select>
+           <div class="tip">这一步只记下来，不动终端。真要换，回到这一行点「换型」。</div>`,
+    okText: '排产',
+    read: (body) => body.querySelector('#nextPick').value,
+  });
+  if (!pick) return;
+
+  try {
+    await postJson('/api/board/next', { lineId, modelCode: pick });
+    toast(`已排产：${line.name} 下一个做 ${pick}`, 'ok');
+    await loadBoard();
+  } catch (e) { toast(e.message, 'err'); }
 }
 
 $('board').addEventListener('click', async (e) => {
+  const pick = e.target.closest('[data-picknext]');
+  if (pick) return pickNextModel(pick.dataset.picknext);
+
+  const clr = e.target.closest('[data-clearnext]');
+  if (clr) {
+    try {
+      await postJson('/api/board/next', { lineId: clr.dataset.clearnext, modelCode: '' });
+      toast('已取消排产');
+      await loadBoard();
+    } catch (err) { toast(err.message, 'err'); }
+    return;
+  }
+
   const goto = e.target.closest('[data-goto-model]');
   if (goto) {
-    S.tab = 'models';
+    S.tab = 'media';
     S.modelId = goto.dataset.gotoModel || '';
     syncNav();
-    await loadModels();
+    await loadStations();
     return;
   }
 
   const sw = e.target.closest('[data-switch]');
   if (sw) {
     const lid = sw.dataset.switch;
-    const sel = $('board').querySelector(`[data-sel="${lid}"]`);
-    const code = sel ? sel.value : '';
-    if (!code) return toast('没有可换的机种', 'err');
     const line = S.board.find((x) => x.id === lid);
-    if (line && code === line.currentModelCode && line.phase !== 'prepare') {
-      return toast(`「${line.name}」已经是 ${code}`);
-    }
+    if (!line) return;
+    const code = line.nextModelCode;
+    if (!code) return toast('先排产一个「下一个机种」', 'err');
     try {
       sw.disabled = true;
       const r = await postJson('/api/board/switch', { lineId: lid, modelCode: code });
@@ -415,6 +465,10 @@ $('board').addEventListener('click', async (e) => {
   }
 });
 
+$('runRefresh').addEventListener('click', () => {
+  loadBoard().then(() => toast('已刷新')).catch((e) => toast(e.message, 'err'));
+});
+
 // 总览 2 秒刷一次：换型进度和在线数要实时，切走页面就停
 S.boardTimer = setInterval(() => {
   if (S.tab !== 'board' || document.hidden) return;
@@ -423,28 +477,31 @@ S.boardTimer = setInterval(() => {
 
 // ---------- 侧栏底部 ----------
 function renderSideFoot() {
-  const on = S.board.filter((l) => l.enabled);
+  const on = S.board.filter((l) => l.status === 'running');
   const online = S.board.reduce((s, l) => s + l.onlineCount, 0);
   $('onlineTxt').textContent = online;
   $('dot').classList.toggle('on', online > 0);
-  $('curTxt').textContent = on.length ? on[0].name : '未指定';
+  // v3.5.0 起可以多条线同时跑：一条就报名字，多条报条数（报名字会写不下）
+  $('curTxt').textContent = !on.length ? '未指定'
+    : on.length === 1 ? on[0].name
+      : `${on.length} 条`;
   $('verTxt').textContent = S.version || '—';
 }
 
 function renderTopStats() {
   const bits = [];
   if (S.tab === 'board') {
-    const on = S.board.filter((l) => l.enabled);
+    const on = S.board.filter((l) => l.status === 'running');
     bits.push(`共 <b>${S.board.length}</b> 条线`);
-    bits.push(`启用 <b>${on.length ? H(on[0].name) : '无'}</b>`);
+    bits.push(`运行 <b>${on.length}</b> 条`);
     const online = S.board.reduce((s, l) => s + l.onlineCount, 0);
     bits.push(`在线 <b>${online}</b> 台`);
     const prep = S.board.filter((l) => l.phase === 'prepare').length;
     if (prep) bits.push(`<b class="warn-txt">${prep} 条线换型中</b>`);
   } else if (S.tab === 'lines') {
     bits.push(`共 <b>${S.lines.length}</b> 条线体`);
-    const on = S.lines.filter((l) => l.enabled);
-    bits.push(`启用中 <b>${on.length ? H(on[0].name) : '无'}</b>`);
+    const on = S.lines.filter((l) => l.status === 'running');
+    bits.push(`运行中 <b>${on.length}</b> 条`);
   } else if (S.tab === 'models') {
     bits.push(`共 <b>${S.models.length}</b> 个机种`);
     const m = S.models.find((x) => x.id === S.modelId);
@@ -463,7 +520,8 @@ $('refreshBtn').addEventListener('click', async () => {
     if (S.tab === 'board') await loadBoard();
     else if (S.tab === 'lines') await loadLines();
     else if (S.tab === 'models') await loadModels();
-    else if (S.tab === 'media') await loadMedia();
+    else if (S.tab === 'media') await loadStations();
+    else if (S.tab === 'files') await loadMedia();
     else if (S.tab === 'terms') await loadTerms();
     toast('已刷新');
   } catch (e) { toast(e.message, 'err'); }
@@ -491,11 +549,12 @@ function renderLineTable() {
   const sorted = [...S.lines].sort((a, b) => (a.sort - b.sort) || a.code.localeCompare(b.code));
 
   tbody.innerHTML = sorted.map((l, i) => `
-    <tr class="${l.enabled ? 'cur' : ''}" data-lid="${H(l.id)}">
+    <tr class="${l.status === 'running' ? 'cur' : ''}" data-lid="${H(l.id)}">
       <td>
-        <button class="ln-check${l.enabled ? ' on' : ''}" data-toggle="${H(l.id)}"
-          title="${l.enabled ? '取消启用这条线' : '启用这条线'}"
-          aria-pressed="${l.enabled ? 'true' : 'false'}">${l.enabled ? '✓' : ''}</button>
+        <select class="ln-status st-${H(l.status)}" data-status="${H(l.id)}"
+                title="只有「运行中」的线会让终端读它的内容">
+          ${LINE_ST.map(([v, t]) => `<option value="${v}"${l.status === v ? ' selected' : ''}>${t}</option>`).join('')}
+        </select>
       </td>
       <td class="mono">${H(l.code)}</td>
       <td><b>${H(l.name)}</b>${l.id === S.procLineId ? ' <span class="badge info">正在看工序</span>' : ''}</td>
@@ -516,41 +575,52 @@ function renderLineTable() {
     </tr>`).join('');
 }
 
-/** 启用/停用：同一时刻只有一条在跑 */
-async function toggleLine(lineId) {
-  const target = S.lines.find((l) => l.id === lineId);
-  if (!target) return;
+/** 线体四种状态。只有 running 会让终端读这条线的内容。 */
+const LINE_ST = [
+  ['running', '运行中'],
+  ['stopped', '停用'],
+  ['maintain', '维修中'],
+  ['care', '保养中'],
+];
 
-  if (!target.enabled) {
-    try {
-      await putJson('/api/lines/' + encodeURIComponent(lineId), { enabled: true });
-      await loadLines();
-      toast('已启用 ' + target.name + '，终端会自动切到这条线', 'ok');
-    } catch (e) { toast(e.message, 'err'); }
-    return;
+/**
+ * 改线体状态。v3.5.0 起允许多条线同时运行，所以这里不再"停掉别的线"。
+ * 从运行中改成别的要问一句 —— 那条线的屏会停在最后一屏。
+ */
+async function setLineStatusUI(line, to) {
+  if (!line || to === line.status) return;
+  const name = (LINE_ST.find(([v]) => v === to) || [, to])[1];
+
+  if (line.status === 'running' && to !== 'running') {
+    const ok = await dialog({
+      title: `把「${line.name}」改成${name}？`,
+      message: `这条线的终端会连不上服务端，屏上的内容停在最后一屏，不会变成空白。`
+        + `别的线不受影响；改回「运行中」随时可以。`,
+      okText: `改成${name}`,
+      danger: to === 'stopped',
+    });
+    if (!ok) return renderLineTable();   // 取消要把下拉框复位到原状态
   }
 
-  // 停用必问一句：enableOnlyLine 保证同一时刻只有一条在跑，
-  // 停掉它意味着**没有任何线体在跑**，终端会 404、屏上内容停住。
-  const ok = await dialog({
-    title: `停用「${target.name}」？`,
-    message: '停用后没有任何线体在跑，终端会连不上服务端、屏上的内容会停住不动。' +
-      '如果是要换到别的线，请直接勾选那一条。',
-    okText: '停用',
-    danger: true
-  });
-  if (!ok) return;
   try {
-    await putJson('/api/lines/' + encodeURIComponent(lineId), { enabled: false });
+    await putJson('/api/lines/' + encodeURIComponent(line.id), { status: to });
     await loadLines();
-    toast('已停用 ' + target.name, 'ok');
-  } catch (e) { toast(e.message, 'err'); }
+    toast(`「${line.name}」已改为${name}`, 'ok');
+  } catch (e) {
+    toast(e.message, 'err');
+    renderLineTable();
+  }
 }
 
-$('lineTable').addEventListener('click', async (e) => {
-  const tgl = e.target.closest('[data-toggle]');
-  if (tgl) return toggleLine(tgl.dataset.toggle);
+// 状态下拉用 change 而不是 click —— select 选完才触发，也不会被冒泡吃掉
+$('lineTable').addEventListener('change', (e) => {
+  const sel = e.target.closest('[data-status]');
+  if (!sel) return;
+  const line = S.lines.find((l) => l.id === sel.dataset.status);
+  setLineStatusUI(line, sel.value);
+});
 
+$('lineTable').addEventListener('click', async (e) => {
   const b = e.target.closest('[data-act]');
   if (!b) return;
   const id = b.dataset.lid;
@@ -635,7 +705,7 @@ $('lnNewBtn').addEventListener('click', async () => {
     const made = await postJson('/api/lines', { code: r.code, name: r.name || r.code });
     S.procLineId = made.id;
     await loadLines();
-    toast('已新建线体 ' + made.name + '（还没启用）', 'ok');
+    toast('已新建线体 ' + made.name + '（状态默认「停用」，要用就把状态改成「运行中」）', 'ok');
   } catch (err) { toast(err.message, 'err'); }
 });
 
@@ -857,8 +927,8 @@ function renderLinePick(boxId, activeId) {
   box.classList.remove('hide');
   box.innerHTML = '<span class="lp-lbl">线体</span>' + S.lines.map((l) => `
     <button class="lp${l.id === activeId ? ' on' : ''}" data-mline="${H(l.id)}"
-            title="${l.enabled ? '正在启用' : '未启用'}">
-      <span class="lp-dot${l.enabled ? ' live' : ''}"></span>${H(l.name)}
+            title="${l.status === 'running' ? '运行中' : (LINE_ST.find(([v]) => v === l.status) || [, '未运行'])[1]}">
+      <span class="lp-dot${l.status === 'running' ? ' live' : ''}"></span>${H(l.name)}
       <small>${l.processes} 道</small>
     </button>`).join('');
 }

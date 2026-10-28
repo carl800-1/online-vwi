@@ -97,7 +97,7 @@
     <div class="sidebar-foot">
       <!-- 在线 / 当前机种 / 版本号：现场最常被问的三个数，钉在视线终点 -->
       <div class="foot-line"><span class="dot" id="dot"></span>在线 <b id="onlineTxt">0</b></div>
-      <div class="foot-line">启用 <b id="curTxt">未指定</b></div>
+      <div class="foot-line">运行 <b id="curTxt">未指定</b></div>
       <small class="foot-version">ESOP 发布系统 v<span id="verTxt">—</span></small>
       <small class="foot-sign">design by Frank, 2026.10</small>
     </div>
@@ -117,12 +117,58 @@
     <section class="content">
 
       <!-- ========== 作业内容 = 总览 ==========
-           只回答四件事：今天哪几条线在跑、每条线做什么机种、
-           正在换型的话换到哪了、哪几块屏还没备齐。
-           内容录入不在这里 —— 那是「机种设置」的活。 -->
+           三段，从上往下读：
+             ① 产线概览   —— 今天几条线在跑、几条停 / 修 / 养（只看数字）
+             ② 运行产线   —— 每条在跑的线一行：做什么、下一个做什么、换型
+             ③ 操作说明   —— 这页每个按钮是什么意思
+           内容录入不在这里 —— 那是「机种设置」和「媒体库」的活。 -->
       <div class="view" id="view-board">
-        <div class="board" id="board"></div>
-        <p class="foot-hint" id="boardHint"></p>
+        <div class="card bsum">
+          <div class="card-head">
+            <h2>产线概览</h2>
+            <span class="sub" id="bsumSub">—</span>
+            <div class="spacer"></div>
+            <span class="sub" id="bsumTs"></span>
+          </div>
+          <div class="bsum-row" id="bsum"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>运行产线</h2>
+            <span class="sub" id="runSub">—</span>
+            <div class="spacer"></div>
+            <button class="btn sm" id="runRefresh">刷新</button>
+          </div>
+          <div class="run-list" id="board"></div>
+        </div>
+
+        <div class="card bhelp">
+          <div class="card-head">
+            <h2>操作说明</h2>
+            <span class="sub">这一页每个按钮在做什么</span>
+          </div>
+          <div class="bhelp-body">
+            <div class="bh"><span class="bh-i">🟢</span>
+              <div><b>运行中 / 停用 / 维修中 / 保养中</b>：只有「运行中」的线会让终端读它的内容。
+              改成另外三种，这条线的屏会停在最后一屏，不会变成空白；要改回运行先去「线体设置」。</div></div>
+            <div class="bh"><span class="bh-i">🔵</span>
+              <div><b>正在生产</b>：这条线当前下发的机种，屏上播的就是它。大字那个就是。</div></div>
+            <div class="bh"><span class="bh-i">➡️</span>
+              <div><b>下一个 / + 排产下一个机种</b>：提前把下一炉要做的机种排好，不用等真要换时才翻。
+              排在库里，关服务端也不丢；不想要了点 <b>✕</b> 取消。</div></div>
+            <div class="bh"><span class="bh-i">🔄</span>
+              <div><b>换型</b>：排产只是记一笔，<b>点「换型」才真正下发</b>。点了按钮会变亮，
+              显示「换型中 已就绪 3/5」—— 终端正在下载新内容。</div></div>
+            <div class="bh"><span class="bh-i">⏱</span>
+              <div><b>换型中</b>：全部就绪才一起切画面；5 分钟还没齐会强制切换，
+              没备齐的屏亮红字「内容未就绪 · 请勿作业」，旧的继续播，不会半新半旧。
+              想中止就点「放弃切换」。</div></div>
+            <div class="bh"><span class="bh-i">⚠️</span>
+              <div><b>内容不齐</b>：当前机种在某道工序连内容都没配，换型一定卡在那。
+              先去「媒体库」补，别硬切 —— 这一页只看不补。</div></div>
+          </div>
+        </div>
       </div>
 
       <!-- ========== 线体设置：线体 + 工序（这条线上有几块屏） ========== -->
@@ -130,7 +176,7 @@
         <div class="card">
           <div class="card-head">
             <h2>线体</h2>
-            <span class="sub">一条线体 = 一条物理产线。同一时刻只允许一条启用，终端读启用那条。</span>
+            <span class="sub">一条线体 = 一条物理产线。状态设成「运行中」终端才会读它，多条线可以同时运行。</span>
             <div class="spacer"></div>
             <button class="btn sm primary" id="lnNewBtn">+ 新建线体</button>
           </div>
@@ -138,7 +184,7 @@
             <table class="data-table" id="lineTable">
               <thead>
                 <tr>
-                  <th style="width:88px">启用</th>
+                  <th style="width:118px">状态</th>
                   <th style="width:110px">编码</th>
                   <th>名称</th>
                   <th style="width:90px">工序数</th>
@@ -152,7 +198,8 @@
             </table>
           </div>
           <p class="foot-hint">
-            勾选框打勾 = 这条线今天在跑。停用唯一启用的线会让终端连不上、屏上内容停住，所以会先问一句。
+            状态选「运行中」= 这条线今天在跑。改成停用 / 维修中 / 保养中，这条线的终端会连不上、屏上内容停在最后一屏（不会变空白）；
+            从运行中改走会先问一句。<b>多条线可以同时运行</b>，互不影响 —— 现场每条线有自己的终端。
             内容不挂在线体上：播什么由「机种设置」里的同码工位决定，所以改线体不会丢内容。
           </p>
         </div>

@@ -4,7 +4,7 @@
 //   今天哪几条线在跑？每条线在做哪个机种？正在换型的话换到哪了？哪几块屏还没备齐？
 // 所以它只读 + 换型，不做内容编辑 —— 内容的录入在「机种设置」里，
 // 那是工程部坐下来干的活，跟产线上盯着屏幕换型是两件事。
-import { q, lines, processesOf } from '../db.js';
+import { q, lines, processesOf, setNextModel } from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
 import { getState, terminalsOf, switchTo, SWITCH_TIMEOUT_MS } from '../switch.js';
 import { now } from '../util.js';
@@ -34,6 +34,9 @@ export function register(router) {
 
       const cur = st.currentModelId ? q.get('SELECT code, name FROM model WHERE id = ?', st.currentModelId) : null;
       const pend = st.pendingModelId ? q.get('SELECT code FROM model WHERE id = ?', st.pendingModelId) : null;
+      // 排产：下一个要生产的机种。和 pending 分开存 —— pending 是正在切，切完就空。
+      const nxtId = q.get('SELECT next_model_id n FROM line_state WHERE line_id = ?', l.id)?.n || '';
+      const nxt = nxtId ? q.get('SELECT code, name FROM model WHERE id = ?', nxtId) : null;
 
       // 该机种**在这条线上**每个工位有没有内容：换型前就看出来"OP40 这套机种压根没配"
       const have = new Map(
@@ -75,11 +78,15 @@ export function register(router) {
         code: l.code,
         name: l.name,
         enabled: !!l.enabled,
+        status: l.status || (l.enabled ? 'running' : 'stopped'),
         sort: l.sort,
         phase: st.phase,
         currentModelId: st.currentModelId,
         currentModelCode: cur?.code || '',
         currentModelName: cur?.name || '',
+        nextModelId: nxtId,
+        nextModelCode: nxt?.code || '',
+        nextModelName: nxt?.name || '',
         pendingModelId: st.pendingModelId,
         pendingModelCode: pend?.code || '',
         deadline: st.deadline,
@@ -92,7 +99,39 @@ export function register(router) {
       };
     });
 
-    sendJson(res, 200, { lines: out, ts: now() });
+    // 概览：今天开线几条、几条停用、几条在维修、几条在保养。
+    // 只数线体本身的状态，不掺在线数 —— 那是"屏连没连上"，另一回事。
+    const overview = { total: out.length, running: 0, stopped: 0, maintain: 0, care: 0 };
+    for (const l of out) overview[l.status] = (overview[l.status] || 0) + 1;
+
+    sendJson(res, 200, { lines: out, overview, ts: now() });
+  });
+
+  /**
+   * POST /api/board/next
+   * 排产：给这条线定"下一个要生产的机种"。传空 modelCode = 取消排产。
+   * 和 /api/board/switch 分开：这一步只记下来，不动终端 —— 排产可能提前一天做。
+   */
+  router.post('/api/board/next', async (req, res) => {
+    const body = await readJsonBody(req);
+    const lineId = String(body.lineId || '').trim();
+    const code = String(body.modelCode || '').trim();
+    const line = q.get('SELECT * FROM line WHERE id = ?', lineId);
+    if (!line) throw badRequest('线体不存在');
+
+    let modelId = '';
+    if (code) {
+      const model = q.get('SELECT * FROM model WHERE code = ?', code);
+      if (!model) throw badRequest(`机种 ${code} 不存在`);
+      modelId = model.id;
+    }
+
+    try {
+      setNextModel(line.id, modelId);
+    } catch (e) {
+      throw badRequest(e.message);
+    }
+    sendJson(res, 200, { ok: true, nextModelCode: code });
   });
 
   /**

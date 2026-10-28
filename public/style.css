@@ -1881,3 +1881,139 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
   background: var(--warn-bg); border: 1px solid #f0d3a8; border-radius: 8px;
   padding: 8px 11px;
 }
+
+/* ---------- 作业内容（v3.5.0）：概览 + 运行产线 + 操作说明 ----------
+   原来每条线一张大卡（.bcard），一屏放不下三条线，工序胶囊也不是这一页该操心的。
+   现在拆成"上面一排数字 / 中间一行一条线 / 下面一段说明"。
+   老的 .board / .bcard 样式保留但已无元素使用（删掉万一要回滚就没了）。 */
+
+/* 第 1 段：产线概览。五个数字横排，颜色区分类别 */
+.bsum-row { display: flex; flex-wrap: wrap; gap: 10px; padding: 15px 18px 17px; }
+.bs {
+  flex: 1 1 128px;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 9px 14px 10px;
+  border: 1px solid var(--line2); border-radius: 10px; background: #fbfcfe;
+}
+.bs-k { font-size: 12px; color: var(--ink2); }
+.bs-v {
+  font-size: 26px; font-weight: 700; line-height: 1.15;
+  font-variant-numeric: tabular-nums; color: var(--ink);
+}
+.bs-v.run { color: var(--ok); }
+.bs-v.off { color: var(--ink3); }
+.bs-v.warn { color: var(--warn); }
+.bs-v.care { color: var(--brand); }
+
+/* 第 2 段：运行产线。一行一条线 */
+.run-list { padding: 2px 0; }
+
+.rl {
+  display: flex; align-items: center; gap: 24px;
+  padding: 13px 18px;
+  border-bottom: 1px solid var(--line2);
+}
+.rl:last-child { border-bottom: 0; }
+.rl.preparing { background: #fffdf6; }
+
+.rl-id { display: flex; align-items: baseline; gap: 7px; min-width: 108px; }
+.rl-name { font-size: 15px; font-weight: 600; }
+.rl-code {
+  font-size: 11px; color: var(--ink3);
+  font-family: ui-monospace, SFMono-Regular, Consolas, 'Courier New', monospace;
+}
+
+.rl-cur { display: flex; align-items: baseline; gap: 8px; min-width: 196px; }
+.rl-k { font-size: 11.5px; color: var(--ink3); }
+.rl-big { font-size: 21px; font-weight: 700; letter-spacing: .3px; color: var(--brand-ink); }
+.rl-big.none { font-size: 14px; font-weight: 600; color: var(--ink3); }
+.rl-nm { font-size: 12.5px; color: var(--ink2); }
+
+.rl-nx-box {
+  display: flex; align-items: center; gap: 8px;
+  flex: 1; min-width: 0; flex-wrap: wrap;
+}
+.rl-nx {
+  font-size: 15px; font-weight: 600; color: var(--ink);
+  padding: 1px 9px; border-radius: 6px; background: var(--line2);
+}
+.rl-nx.go { color: var(--brand-ink); background: var(--brand-bg); }
+
+/* 换型按钮：平时是浅色的，换型中变亮（用户要的"点了变亮"就是这一条） */
+.rl-sw { flex: none; }
+.rl-sw.on {
+  background: var(--warn) !important;
+  border-color: var(--warn) !important;
+  color: #fff !important;
+  opacity: 1 !important;
+}
+
+.rl-add {
+  font: inherit; font-size: 12.5px; color: var(--ink3);
+  background: transparent; border: 1px dashed var(--line);
+  border-radius: 7px; padding: 4px 11px; cursor: pointer;
+}
+.rl-add:hover { color: var(--brand-ink); border-color: var(--brand); background: var(--brand-bg); }
+
+.rl-x {
+  font: inherit; font-size: 12px; color: var(--ink3);
+  background: transparent; border: 0; cursor: pointer;
+  padding: 2px 4px; border-radius: 5px;
+}
+.rl-x:hover { color: var(--danger); background: var(--danger-bg); }
+
+.rl-side { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+.rl-on { font-size: 12px; color: var(--ink3); white-space: nowrap; }
+.rl-on b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+.rl-warn {
+  font: inherit; font-size: 11.5px; cursor: pointer;
+  color: #8a4b06; background: var(--warn-bg);
+  border: 1px solid #f0d3a8; border-radius: 999px;
+  padding: 2px 9px; white-space: nowrap;
+}
+.rl-warn:hover { border-color: var(--warn); }
+
+/* 换型进度：一条细杠 + 就绪数 + 超时倒计时 */
+.rl-bar {
+  width: 88px; height: 6px; border-radius: 999px;
+  background: var(--line2); overflow: hidden;
+}
+.rl-bar i { display: block; height: 100%; background: var(--warn); transition: width .35s; }
+.rl-pg { font-size: 11.5px; color: var(--ink3); white-space: nowrap; }
+
+.run-empty {
+  display: flex; flex-direction: column; gap: 5px;
+  padding: 38px 18px; text-align: center;
+}
+.run-empty b { font-size: 14px; color: var(--ink2); font-weight: 600; }
+.run-empty span { font-size: 12.5px; color: var(--ink3); }
+
+/* 第 3 段：操作说明 */
+.bhelp-body { padding: 4px 18px 14px; }
+.bh {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 9px 0; border-bottom: 1px dashed var(--line2);
+}
+.bh:last-child { border-bottom: 0; }
+.bh-i { flex: none; width: 20px; font-size: 14px; line-height: 1.6; }
+.bh > div { font-size: 13px; color: var(--ink2); line-height: 1.72; }
+.bh b { color: var(--ink); font-weight: 600; }
+
+/* 线体设置：状态下拉。四种状态各给一个底色，扫一眼就知道哪条在跑 */
+.ln-status {
+  font: inherit; font-size: 12.5px; cursor: pointer;
+  padding: 4px 8px; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+}
+.ln-status.st-running { color: #15803d; border-color: #bbe7c9; background: var(--ok-bg); font-weight: 600; }
+.ln-status.st-stopped { color: var(--ink2); background: #f8fafc; }
+.ln-status.st-maintain { color: #8a4b06; border-color: #f0d3a8; background: var(--warn-bg); }
+.ln-status.st-care { color: var(--brand-ink); border-color: #cfe4ff; background: var(--brand-bg); }
+
+/* 窄屏：一行放不下就把"下一个"整块折到第二行 */
+@media (max-width: 1160px) {
+  .rl { flex-wrap: wrap; gap: 10px 18px; }
+  .rl-nx-box { flex-basis: 100%; }
+  .rl-side { margin-left: 0; }
+}

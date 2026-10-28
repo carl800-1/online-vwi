@@ -3,7 +3,7 @@
 // v1.7.0 起多了一层「线体」：每天的活不一定在同一条产线上，
 // 昨天用一线、今天用二线是常态。所以线体要能建、能启停，
 // 工序挂在具体线体下（一线 OP30 和二线 OP30 是两份不同的内容）。
-import { q, tx, coverage, processesOf, cloneStandardProcesses, enableOnlyLine, lines, ensureStationsForLine, ensureAllModelStations } from '../db.js';
+import { q, tx, coverage, processesOf, cloneStandardProcesses, setLineStatus, LINE_STATUS, lines, ensureStationsForLine, ensureAllModelStations } from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
 import { getState, resetLine, notifyContentChanged } from '../switch.js';
 import { now, uid, str, int } from '../util.js';
@@ -12,11 +12,16 @@ function lineStats(l) {
   const cov = coverage(l.id);
   const st = getState(l.id);
   const cur = st.currentModelId ? q.get('SELECT code FROM model WHERE id = ?', st.currentModelId) : null;
+  const nxt = q.get('SELECT next_model_id n FROM line_state WHERE line_id = ?', l.id)?.n || '';
+  const next = nxt ? q.get('SELECT code, name FROM model WHERE id = ?', nxt) : null;
   return {
     id: l.id,
     code: l.code,
     name: l.name,
     enabled: !!l.enabled,
+    status: l.status || (l.enabled ? 'running' : 'stopped'),
+    nextModelCode: next?.code || '',
+    nextModelName: next?.name || '',
     sort: l.sort,
     processes: processesOf(l.id).length,
     coverage: { done: cov.done, total: cov.total },
@@ -78,17 +83,20 @@ export function register(router) {
     }
     if (body.sort !== undefined) q.run('UPDATE line SET sort = ? WHERE id = ?', int(body.sort, l.sort), l.id);
 
-    if (body.enabled !== undefined) {
-      if (body.enabled) {
-        // 同一时刻只允许一条线体在跑：停掉别的，并把它们的在线/举手记录清掉，
-        // 否则下次启用时会读到上一次残留的"已就绪"。
-        const others = lines().filter((x) => x.id !== l.id && x.enabled);
-        enableOnlyLine(l.id);
-        for (const o of others) resetLine(o.id);
-      } else {
-        q.run('UPDATE line SET enabled = 0 WHERE id = ?', l.id);
-        resetLine(l.id);
+    // v3.5.0：状态取代「启用勾选框」。四种状态里只有 running 会让终端读这条线。
+    // 兼容老的 {enabled: true/false} 调用（3.4.0 及以前的界面、脚本）。
+    const want = body.status !== undefined
+      ? String(body.status)
+      : (body.enabled !== undefined ? (body.enabled ? 'running' : 'stopped') : '');
+
+    if (want) {
+      if (!LINE_STATUS.includes(want)) {
+        throw badRequest(`状态只能是 ${LINE_STATUS.join(' / ')}`);
       }
+      // 停下来的那一刻要清在线与举手记录，否则下次启用会读到上次残留的"已就绪"。
+      // 从非运行切到运行不用清；也不再停别的线 —— 现在允许多条线同时跑。
+      if (want !== 'running' && l.enabled) resetLine(l.id);
+      setLineStatus(l.id, want);
     }
 
     sendJson(res, 200, lineStats(q.get('SELECT * FROM line WHERE id = ?', l.id)));

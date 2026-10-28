@@ -265,13 +265,14 @@ async function upload(buf, name) {
   ok((await post('/api/lines', { code: 'L2', name: '重复' })).status === 400, '线体编码重复被拒绝');
 
   let en = await put('/api/lines/' + L2, { enabled: true });
-  ok(en.ok && en.body.enabled === true, '可以启用二线');
+  ok(en.ok && en.body.enabled === true && en.body.status === 'running', '可以启用二线（status 变 running）');
   ls = (await j('/api/lines')).body.lines;
-  ok(ls.filter((l) => l.enabled).length === 1, '同一时刻只有一条线体启用');
-  ok(ls.find((l) => l.code === 'L1').enabled === false, '启用二线后一线自动停用');
+  // v3.5.0 起多线可以同时跑：现场每条线有自己的终端，各带 ?line=，互不干扰
+  ok(ls.filter((l) => l.enabled).length === 2, '多条线体可以同时启用（3.5.0 起）');
+  ok(ls.find((l) => l.code === 'L1').enabled === true, '启用二线不会把一线停掉');
 
   const bootNoLine = (await j('/display/boot?op=OP30')).body;
-  ok(bootNoLine.lineCode === 'L2', '老终端不带 line 时回落到当前启用线体（升级不用改配置）');
+  ok(bootNoLine.lineCode === 'L1', '老终端不带 line 时回落到 sort 最前的启用线体（升级不用改配置）');
   const bootL1 = (await j('/display/boot?op=OP30&line=L1')).body;
   ok(bootL1.lineCode === 'L1' && bootL1.processName === '调试', '带 line 时按指线体定位工序');
 
@@ -285,19 +286,24 @@ async function upload(buf, name) {
   const st2During = (await j('/api/status?lineId=' + L2)).body;
   ok(!st2During.pendingModelCode && st2During.seq === 0, '一线换型不影响二线的状态机');
 
-  await post('/api/ready', { op: 'OP30', modelId: M.X220.id, line: 'L1' });
+  // 3.5.0 起启用二线不再顺带清掉一线的在线记录，所以**几条屏在线就要几条一起举手**
+  // —— 只有全部就绪才激活，这是两段式切换本来的规矩，以前只是被"停线"挡住了没暴露。
+  for (const op of st1Before.online) await post('/api/ready', { op, modelId: M.X220.id, line: 'L1' });
   const st1After = (await j('/api/status?lineId=' + ls.find((l) => l.code === 'L1').id)).body;
-  ok(st1After.modelCode === 'X220' && st1After.seq === st1Before.seq + 1, '一线切换到 X220 并 seq +1');
+  ok(st1After.modelCode === 'X220' && st1After.seq === st1Before.seq + 1, '一线切换到 X220 并 seq +1',
+    { before: st1Before, after: st1After });
   ok((await j('/api/status?lineId=' + L2)).body.modelCode === '', '二线仍然没有当前型号（完全隔离）');
 
   const pl2 = (await j('/display/playlist?op=OP30&line=L2')).body;
   ok(pl2.lineCode === 'L2' && pl2.empty === true, '二线 OP30 没配内容 → empty=true（不借用一线的图）');
 
-  // 不带 line 的举手要落到"当前启用"那条线上，不能算到别的线头上
+  // 不带 line 的请求要落到"sort 最前的启用线体"，不能算到别的线头上
+  // （3.5.0 起几条线可以同时启用，回落规则从"唯一那条"变成"sort 最前那条"）
   await put('/api/lines/' + L2, { enabled: true });
-  await post('/api/switch', { modelCode: 'X230' });          // 不带 lineId → 当前启用线体（二线）
+  await post('/api/switch', { modelCode: 'X230' });          // 不带 lineId → 落到一线（sort 最前）
   const readyNoLine = await post('/api/ready', { op: 'OP30', modelId: M.X230.id });
-  ok(readyNoLine.ok && readyNoLine.body.state.lineId === L2, '举手不带 line 时落到当前启用线体');
+  ok(readyNoLine.ok && readyNoLine.body.state.lineId === ls.find((l) => l.code === 'L1').id,
+    '举手不带 line 时落到 sort 最前的启用线体', readyNoLine.body.state);
 
   // v3.0.0：内容挂在「机种 × 线体 × 工位」上，完成度也按线体各算各的。
   // 二线刚建出来、还没配任何内容，它的完成度就是 0 —— 这才对，不能借用一线。
@@ -704,6 +710,87 @@ async function upload(buf, name) {
 
   ok((await fetch(BASE + '/api/export/stations.xlsx?modelId=md_not_exist')).status === 400,
     '机种不存在时返回 400，而不是给一张空表');
+
+  // ---------- 14. 产线状态与排产（v3.5.0） ----------
+  // 作业内容页改成"概览 + 运行产线 + 说明"三段，靠的就是这一组字段：
+  //   line.status      运行中 / 停用 / 维修中 / 保养中
+  //   line_state.next_model_id  下一个要生产的机种（排产，和换型的 pending 不是一回事）
+  console.log('\n[14] 产线状态与排产');
+
+  let bd = (await j('/api/board')).body;
+  ok(bd.overview && typeof bd.overview.total === 'number', '总览返回 overview 统计');
+  ok(bd.overview.total === bd.lines.length, 'overview.total 与线体数一致');
+  ok(bd.overview.running + bd.overview.stopped + bd.overview.maintain + bd.overview.care
+    === bd.overview.total, '四类状态之和等于总数（不会有"统计不上"的线）');
+
+  // 第 12 节可能已经把二线删了，这里重新取一次；不够两条就再建一条
+  let lsNow = (await j('/api/lines')).body.lines;
+  if (lsNow.length < 2) {
+    await post('/api/lines', { code: 'L9', name: '九线' });
+    lsNow = (await j('/api/lines')).body.lines;
+  }
+  const LN1 = lsNow.find((l) => l.code === 'L1').id;
+  const LN2 = lsNow.find((l) => l.id !== LN1).id;
+  ok(lsNow.length >= 2, `准备了两条线体用于验证多线并行（${lsNow.length} 条）`);
+
+  ok(bd.lines.every((l) => ['running', 'stopped', 'maintain', 'care'].includes(l.status)),
+    '每条线都带合法 status');
+
+  // 把两条都设成运行中，造出"多条线同时跑"
+  await put('/api/lines/' + LN1, { status: 'running' });
+  await put('/api/lines/' + LN2, { status: 'running' });
+  bd = (await j('/api/board')).body;
+  ok(bd.overview.running >= 2, `多条线可以同时运行（当前 ${bd.overview.running} 条）`);
+
+  // ---- 排产 ----
+  const curCode = bd.lines.find((l) => l.id === LN1).currentModelCode;
+  const other = Object.values(M).find((m) => m.code !== curCode && m.enabled);
+  let nx = await post('/api/board/next', { lineId: LN1, modelCode: other.code });
+  ok(nx.ok && nx.body.nextModelCode === other.code, '可以给线体排产下一个机种');
+  bd = (await j('/api/board')).body;
+  ok(bd.lines.find((l) => l.id === LN1).nextModelCode === other.code, '排产后 /api/board 能读到 nextModelCode');
+
+  ok((await post('/api/board/next', { lineId: LN1, modelCode: curCode })).status === 400,
+    '把"下一个"排成正在生产的机种会被拒绝');
+
+  // 取消排产
+  await post('/api/board/next', { lineId: LN1, modelCode: '' });
+  bd = (await j('/api/board')).body;
+  ok(bd.lines.find((l) => l.id === LN1).nextModelCode === '', '传空 modelCode 可以取消排产');
+
+  // ---- 换型会把排产摘掉（因为它已经进入"正在切"） ----
+  await post('/api/board/next', { lineId: LN1, modelCode: other.code });
+  const sw2 = await post('/api/board/switch', { lineId: LN1, modelCode: other.code });
+  ok(sw2.ok, '排产后可以直接换型到那个机种');
+  bd = (await j('/api/board')).body;
+  ok(bd.lines.find((l) => l.id === LN1).nextModelCode === '', '换型后 next 被清空（不留下过期的排产）');
+
+  // ---- 状态：维修中 ----
+  let chg = await put('/api/lines/' + LN1, { status: 'maintain' });
+  ok(chg.ok && chg.body.status === 'maintain' && chg.body.enabled === false,
+    '改成维修中：status 变 maintain、enabled 自动变 0');
+  bd = (await j('/api/board')).body;
+  ok(bd.overview.maintain >= 1, '概览里统计到维修中的线');
+  ok(bd.lines.find((l) => l.id === LN1).nextModelCode === '',
+    '不在运行的线，排产一并清掉（不留过期数据）');
+
+  // 维修中的线不出现在"运行产线"的筛选里（前端只渲染 status=running）
+  ok(bd.lines.filter((l) => l.status === 'running').every((l) => l.id !== LN1),
+    '维修中的线不在运行列表里');
+
+  ok((await put('/api/lines/' + LN1, { status: 'sleeping' })).status === 400, '非法状态被拒绝');
+
+  // ---- 老写法兼容（3.4.0 及以前的界面/脚本） ----
+  chg = await put('/api/lines/' + LN1, { enabled: true });
+  ok(chg.ok && chg.body.status === 'running', '{enabled:true} 仍可用，等价于 status=running');
+  chg = await put('/api/lines/' + LN1, { enabled: false });
+  ok(chg.ok && chg.body.status === 'stopped', '{enabled:false} 等价于 status=stopped');
+
+  // ---- 收尾：恢复成一条线在跑，别把状态留给后面的用例 ----
+  await put('/api/lines/' + LN1, { status: 'running' });
+  await put('/api/lines/' + LN2, { status: 'stopped' });
+  bd = (await j('/api/board')).body;
+  ok(bd.overview.running === 1, '收尾：恢复成一条线运行', bd.overview);
 
   // ---------- 汇总 ----------
   console.log('\n────────────────────────────');

@@ -12,13 +12,18 @@ PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
 
 -- 线体：一条物理产线。每天的活不一定在同一条线上，所以线体要能启停。
---   enabled = 1  表示"今天这条线在跑"，终端和内容矩阵都以它为基准。
---   同一时刻只允许一条线 enabled（服务端保证），这样不带 line 的老终端永远知道该找谁。
+--   status  是给人看的状态：running 运行中 / stopped 停用 / maintain 维修中 / care 保养中
+--   enabled 是给机器看的开关：只有 status = running 时才为 1，终端和内容矩阵都认它。
+--   两者冗余是故意的 —— 迁移、老版本、终端协议全都继续读 enabled，不用改一行。
+--
+-- v3.5.0 起**允许多条线同时运行**（现场每条线有自己的终端，各带 ?line=）。
+-- 只有一种情况仍然要求"唯一"：不带 line 参数的老终端按 sort 取第一条启用的线。
 CREATE TABLE IF NOT EXISTS line (
   id          TEXT PRIMARY KEY,
   code        TEXT NOT NULL UNIQUE,     -- L1
   name        TEXT NOT NULL,            -- 一线
   enabled     INTEGER NOT NULL DEFAULT 0,
+  status      TEXT NOT NULL DEFAULT 'stopped',  -- running | stopped | maintain | care
   sort        INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL
 );
@@ -133,6 +138,10 @@ CREATE TABLE IF NOT EXISTS line_state (
   current_model_id  TEXT NOT NULL DEFAULT '',
   pending_model_id  TEXT NOT NULL DEFAULT '',
   pending_deadline  INTEGER NOT NULL DEFAULT 0,
+  -- v3.5.0：下一个要生产的机种（排产）。和 pending 不是一回事 ——
+  --   next    = 排好了、还没开始切，可能放在这儿过夜；
+  --   pending = 正在切、切完就清空（切换失败的兜底也靠它）。
+  next_model_id     TEXT NOT NULL DEFAULT '',
   seq               INTEGER NOT NULL DEFAULT 0
 );
 
@@ -220,6 +229,21 @@ function migrate() {
 
   // ---- 线体（v1.7.0）：老库里的工序全部归到默认线体，行为和升级前完全一致 ----
   const dft = ensureDefaultLine();
+
+  // v3.5.0：线体状态。老库只有 enabled 两态，**只在第一次加列时**按它回填。
+  // 回填语句必须待在这个 if 里面 —— 放外面每次启动都会把"维修中"刷回"运行中"。
+  const lineCols = colsOf('line');
+  if (!lineCols.has('status')) {
+    db.exec("ALTER TABLE line ADD COLUMN status TEXT NOT NULL DEFAULT 'stopped'");
+    db.exec("UPDATE line SET status = CASE WHEN enabled = 1 THEN 'running' ELSE 'stopped' END");
+  }
+
+  // v3.5.0：下一个要生产的机种（排产）。pending_model_id 是"正在切"，这个是"排好了还没切"。
+  const lsCols = colsOf('line_state');
+  if (!lsCols.has('next_model_id')) {
+    db.exec("ALTER TABLE line_state ADD COLUMN next_model_id TEXT NOT NULL DEFAULT ''");
+  }
+
   const proc = colsOf('process');
   if (!proc.has('line_id')) rebuildProcessWithLine(dft.id);
   else q.run("UPDATE process SET line_id = ? WHERE line_id IS NULL OR line_id = ''", dft.id);
@@ -789,7 +813,44 @@ export function lines() {
   return q.all('SELECT * FROM line ORDER BY sort, code');
 }
 
-/** 当前启用的线体。正常情况下只有一条；一条都没有时返回 null。 */
+/** 线体的四种状态。running 才让终端读它，其余三种都按"没在跑"处理。 */
+export const LINE_STATUS = ['running', 'stopped', 'maintain', 'care'];
+
+/**
+ * 设线体状态。enabled 由 status 派生，老代码（终端、switch、activeLine）继续读 enabled。
+ *
+ * v3.5.0 起**允许多条线同时 running** —— 现场每条线有自己的终端，各带 ?line=，
+ * 互不干扰。只有不带 line 参数的老终端会按 sort 取第一条，这是它自己的事。
+ */
+export function setLineStatus(lineId, status) {
+  const s = LINE_STATUS.includes(status) ? status : 'stopped';
+  tx(() => {
+    q.run('UPDATE line SET status = ?, enabled = ? WHERE id = ?', s, s === 'running' ? 1 : 0, lineId);
+    // 不在跑的时候清掉排产：留着会让下次启用时看见一条过期的"下一炉"
+    if (s !== 'running') q.run("UPDATE line_state SET next_model_id = '' WHERE line_id = ?", lineId);
+  });
+  return q.get('SELECT * FROM line WHERE id = ?', lineId);
+}
+
+/** 排产：给这条线定一个"下一个要生产的机种"。传空字符串 = 取消排产。 */
+export function setNextModel(lineId, modelId) {
+  const mid = String(modelId || '');
+  if (mid) {
+    const m = q.get('SELECT id FROM model WHERE id = ?', mid);
+    if (!m) throw new Error('机种不存在');
+    if (q.get('SELECT COALESCE(current_model_id,\'\') c FROM line_state WHERE line_id = ?', lineId)?.c === mid) {
+      throw new Error('这就是当前正在生产的机种，不用再排一次');
+    }
+  }
+  q.run(
+    `INSERT INTO line_state(line_id, next_model_id) VALUES(?,?)
+     ON CONFLICT(line_id) DO UPDATE SET next_model_id = excluded.next_model_id`,
+    lineId, mid
+  );
+  return mid;
+}
+
+/** 当前启用的线体。多条线同时跑时取 sort 最前的一条（不带 line 的老终端会用它）。 */
 export function activeLine() {
   return q.get('SELECT * FROM line WHERE enabled = 1 ORDER BY sort, code LIMIT 1') || null;
 }
@@ -803,13 +864,6 @@ export function lineByCode(code) {
 }
 
 /** 启用某条线体：同时把别的线体停用（否则终端不知道该听谁的）。 */
-export function enableOnlyLine(lineId) {
-  tx(() => {
-    q.run('UPDATE line SET enabled = 0');
-    if (lineId) q.run('UPDATE line SET enabled = 1 WHERE id = ?', lineId);
-  });
-}
-
 export function processesOf(lineId) {
   return q.all('SELECT * FROM process WHERE line_id = ? ORDER BY sort, code', String(lineId || ''));
 }

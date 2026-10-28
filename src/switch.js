@@ -188,7 +188,10 @@ export function switchTo(line, model, now = Date.now()) {
   tx(() => {
     patchLineState(lineId, {
       pending_model_id: model.id,
-      pending_deadline: now + SWITCH_TIMEOUT_MS
+      pending_deadline: now + SWITCH_TIMEOUT_MS,
+      // 排产的那个机种现在进入"正在切"，从"下一个"里摘掉。
+      // 中途放弃切换的话排产就没了 —— 比留一条和 pending 打架的数据干净。
+      next_model_id: ''
     });
     setSetting('rev', String(++rev));
   });
