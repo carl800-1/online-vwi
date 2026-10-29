@@ -362,6 +362,7 @@ ESOP发布项目/
 │  ├─ e2e.mjs             协议级端到端测试：120 项断言
 │  └─ run.mjs             起临时实例跑测试，跑完焚毁数据
 ├─ tools/                 打包、图标生成、Release 上传
+│  └─ import-excel-models.py  工时定额表 → 机种批量导入（走 HTTP 接口，可重复跑）
 ├─ data/                  运行期数据（gitignore）
 └─ docs/
    ├─ 02-需求确认书.md      唯一需求依据

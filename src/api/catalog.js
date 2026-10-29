@@ -177,6 +177,18 @@ export function register(router) {
       if (!lineMap.has(r.model_id)) lineMap.set(r.model_id, []);
       lineMap.get(r.model_id).push({ id: r.id, code: r.code, name: r.name, status: r.status });
     }
+    // 覆盖率是一张 "机种:工序 → 已传条数" 的扁平表。机种上千个时必须先按机种分组：
+    // 原来在 map 里对每个机种都 filter 一遍整张表，1107 个机种 × 16605 个 cell
+    // 就是 1800 万次比较，接口要 12 秒。分组后是 O(n)。
+    const cellsByModel = new Map();
+    for (const [k, v] of Object.entries(cov.cells)) {
+      const cut = k.indexOf(':');
+      const mid = k.slice(0, cut);
+      let bag = cellsByModel.get(mid);
+      if (!bag) cellsByModel.set(mid, (bag = {}));
+      bag[k.slice(cut + 1)] = v;
+    }
+
     sendJson(res, 200, {
       models: models.map((m) => ({
         id: m.id,
@@ -188,11 +200,7 @@ export function register(router) {
         total: cov.byModel[m.id]?.total ?? 0,
         // 这个机种勾了哪几条线（可生产机种的反向），以及各线现在什么状态
         lines: lineMap.get(m.id) || [],
-        cells: Object.fromEntries(
-          Object.entries(cov.cells)
-            .filter(([k]) => k.startsWith(m.id + ':'))
-            .map(([k, v]) => [k.split(':')[1], v])
-        )
+        cells: cellsByModel.get(m.id) || {}
       })),
       coverage: { total: cov.total, done: cov.done },
       // 新建弹窗里「机种编号」的预填值：现场不想自己去想一个不重复的号
