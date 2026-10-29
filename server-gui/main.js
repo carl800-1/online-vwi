@@ -94,8 +94,15 @@ function fatal(err, where) {
  */
 function resolveDataDir() {
   const cands = [];
-  if (app.isPackaged && process.env.PORTABLE_EXECUTABLE_DIR) {
-    cands.push(path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'data'));
+  if (app.isPackaged) {
+    // portable 包（4.0.x 及以前）：进程其实跑在 %TEMP% 的解压目录里，
+    // 真实所在位置只有这个变量知道
+    if (process.env.PORTABLE_EXECUTABLE_DIR) {
+      cands.push(path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'data'));
+    }
+    // 目录版（4.1.0 起，zip 解压即用）：数据就放在 exe 同级。
+    // 少了这一条会退到 resources\app\data —— 升级覆盖时看着像"数据全丢了"
+    cands.push(path.join(path.dirname(process.execPath), 'data'));
   }
   cands.push(path.join(app.getAppPath(), 'data'));
   cands.push(path.join(app.getPath('userData'), 'data'));
