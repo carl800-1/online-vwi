@@ -196,6 +196,8 @@ export function register(router) {
         name: m.name,
         enabled: !!m.enabled,
         sort: m.sort,
+        // 标准产能（件/小时）：生产效率的分母。0 = 还没设，生产概况的效率会显示「—」
+        stdRate: Math.max(0, Math.round(Number(m.std_rate) || 0)),
         done: cov.byModel[m.id]?.done ?? 0,
         total: cov.byModel[m.id]?.total ?? 0,
         // 这个机种勾了哪几条线（可生产机种的反向），以及各线现在什么状态
@@ -222,8 +224,8 @@ export function register(router) {
 
     const maxSort = q.get('SELECT COALESCE(MAX(sort),0) s FROM model').s;
     const id = uid('md');
-    q.run('INSERT INTO model(id,code,name,enabled,sort,created_at) VALUES(?,?,?,?,?,?)',
-      id, code, name, 1, maxSort + 10, now());
+    q.run('INSERT INTO model(id,code,name,enabled,sort,created_at,std_rate) VALUES(?,?,?,?,?,?,?)',
+      id, code, name, 1, maxSort + 10, now(), Math.max(0, Math.round(Number(body.stdRate) || 0)));
 
     const count = int(body.processCount, 5);
     const made = createDefaultProcesses(id, count);
@@ -252,6 +254,10 @@ export function register(router) {
     }
     if (body.enabled !== undefined) q.run('UPDATE model SET enabled = ? WHERE id = ?', body.enabled ? 1 : 0, m.id);
     if (body.sort !== undefined) q.run('UPDATE model SET sort = ? WHERE id = ?', int(body.sort, m.sort), m.id);
+    // 标准产能：改完立刻影响所有用它算效率的台账（效率是现算的，不存副本）
+    if (body.stdRate !== undefined) {
+      q.run('UPDATE model SET std_rate = ? WHERE id = ?', Math.max(0, Math.round(Number(body.stdRate) || 0)), m.id);
+    }
 
     // 可生产线体：传数组就整批覆盖（这是机种设置里那个多选框）
     let lineCount;

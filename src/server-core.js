@@ -29,6 +29,8 @@ import { register as registerDisplay } from './api/display.js';
 import { register as registerBoard } from './api/board.js';
 import { register as registerImport } from './api/import.js';
 import { register as registerExport } from './api/export.js';
+import { register as registerLinesSheet } from './api/linesSheet.js';
+import { register as registerProd } from './api/prod.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -134,6 +136,8 @@ export function startServer(opts = {}) {
   registerBoard(router);
   registerImport(router);
   registerExport(router);
+  registerLinesSheet(router);
+  registerProd(router);
 
   const server = http.createServer(async (req, res) => {
     let url;

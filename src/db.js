@@ -204,6 +204,45 @@ CREATE TABLE IF NOT EXISTS profile_req (
   min_height  INTEGER NOT NULL DEFAULT 0, -- 仅图片：最小高
   UNIQUE(step_id, kind)
 );
+
+-- ============ 生产输入（v4.2.2：按「产线 × 日 × 段」） ============
+-- 生产概况里显示的每一项都由这张表算出来，没有别的数据源。
+--
+-- 为什么是产线而不是机种：产量本来就是"这条线今天做出来的"。
+-- 同一个机种同时在两条线上做（换型过渡、赶货），按机种记只能填一个数，
+-- 两条线各做多少就没了。所以一案一线，机种挂在行上。
+--
+-- 为什么又加了 seq（段）：一条线一天不止做一个型号。小批量切换时
+-- 上午 A 做 30 分钟、下午 B 做 30 分钟是常态，一线一行就填不下了。
+-- seq 只负责"这条线这天的第几段"和排序，没有别的含义 ——
+-- **不要把它当时间**：具体几点做的系统不知道，现场也没人记。
+--
+-- is_open：这条线这天开不开。只认 seq=1 那行（整线级），其余行冗余同值。
+-- 选「不开线」的线不进作业内容页的生产概况 —— 线体状态是 running
+-- 但今天没排产（待料、设备空闲）时，那一栏不该顶着一条"未录入"的红字。
+--
+-- **标准产能不在这张表里**：它是机种属性，在「机种设置」里维护。
+-- 台账只记"这条线今天做了什么、做了多少"；效率的分母由 prod_api 现算。
+--
+-- 为什么全是手填而不是自动采：终端只做只读展示、不上报产量，
+-- 管理端也没有谁一件件点。现场实际是下班前抄一次计数器，
+-- 那就老老实实给一张台账，比编一套「推算」出来好看的数字有用。
+CREATE TABLE IF NOT EXISTS prod_input (
+  line_id     TEXT    NOT NULL,
+  day         TEXT    NOT NULL,             -- 2026-11-02，本地日
+  seq         INTEGER NOT NULL DEFAULT 1,   -- 这条线这天的第几段（1 起，只用于排序）
+  is_open     INTEGER NOT NULL DEFAULT 1,   -- 1=开线 0=不开线（整线，读 seq=1 那行）
+  model_id    TEXT    NOT NULL DEFAULT '',  -- 这一段做的产品
+  shift_hours REAL    NOT NULL DEFAULT 0,   -- 这一段的计划开机工时（小时，可带小数）
+  plan_qty    INTEGER NOT NULL DEFAULT 0,   -- 计划产量（件）
+  done_qty    INTEGER NOT NULL DEFAULT 0,   -- 累计产量（件，这一段到目前为止）
+  hour_qty    INTEGER NOT NULL DEFAULT 0,   -- 最近一小时产量（件），现场整点抄一次
+  down_min    INTEGER NOT NULL DEFAULT 0,   -- 停机时长（分钟）
+  note        TEXT    NOT NULL DEFAULT '',
+  ts          INTEGER NOT NULL,
+  PRIMARY KEY(line_id, day, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_prodinput_day ON prod_input(day);
 `;
 
 let db = null;
@@ -222,6 +261,7 @@ export function openDb(dir) {
   db = new DatabaseSync(dbPath);
   db.exec(SCHEMA);
   migrate();
+  migrateProd();     // 4.2.1 的增量：不放在 migrate() 里，因为它对新库和老库都要跑
   ensureSettings();
   return db;
 }
@@ -251,6 +291,69 @@ function backupBeforeV4(dbPath) {
 }
 
 /**
+ * 4.2.1 的增量：标准产能挂到机种上 + 生产台账改成按产线记。
+ *
+ * 单独一个函数而不是塞进 migrate()：migrate() 对 4.x 的库是**提前 return** 的
+ * （见里面那句 colsOf('process').has('model_id')），而新装的库 process 表还是
+ * 3.x 形状，要走完整条链才重建 —— 两头都落不到 4.x 那个分支里。所以这段
+ * 无条件跑，靠 PRAGMA 判存在性，幂等。
+ */
+function migrateProd() {
+  const colsOf = (t) => new Set(q.all(`PRAGMA table_info(${t})`).map((r) => r.name));
+
+  // 标准产能挪到机种上：效率的分母是"这个产品该跑多快"，跟着产品走才对；
+  // 放台账里等于每天重填一遍同样的数，改一次节拍还得回头改每一天。
+  if (!colsOf('model').has('std_rate')) {
+    db.exec('ALTER TABLE model ADD COLUMN std_rate INTEGER NOT NULL DEFAULT 0');
+  }
+
+  // 生产台账换过两次主键：
+  //   4.2.0 及更早  「机种 × 日」     —— 没有线，搬不过来（本来也只有本机几条试数据）
+  //   4.2.1        「产线 × 日」     —— 一天一条线只能填一个型号，要搬成"第一段"
+  //   4.2.2 起     「产线 × 日 × 段」 —— 一条线一天可以做好几个型号
+  // 主键变了 ALTER 改不动，只能重建。老表**改名留档**而不是删：真要回退到老 exe，
+  // 把备份表改回 prod_input 就能接上。
+  const pi = colsOf('prod_input');
+  if (pi.size && !pi.has('line_id')) {
+    db.exec('DROP TABLE IF EXISTS prod_input_420_bak');
+    db.exec('ALTER TABLE prod_input RENAME TO prod_input_420_bak');
+  } else if (pi.size && !pi.has('seq')) {
+    db.exec('DROP TABLE IF EXISTS prod_input_421_byline_bak');
+    db.exec('ALTER TABLE prod_input RENAME TO prod_input_421_byline_bak');
+  }
+  db.exec(`CREATE TABLE IF NOT EXISTS prod_input (
+    line_id     TEXT    NOT NULL,
+    day         TEXT    NOT NULL,
+    seq         INTEGER NOT NULL DEFAULT 1,
+    is_open     INTEGER NOT NULL DEFAULT 1,
+    model_id    TEXT    NOT NULL DEFAULT '',
+    shift_hours REAL    NOT NULL DEFAULT 0,
+    plan_qty    INTEGER NOT NULL DEFAULT 0,
+    done_qty    INTEGER NOT NULL DEFAULT 0,
+    hour_qty    INTEGER NOT NULL DEFAULT 0,
+    down_min    INTEGER NOT NULL DEFAULT 0,
+    note        TEXT    NOT NULL DEFAULT '',
+    ts          INTEGER NOT NULL,
+    PRIMARY KEY(line_id, day, seq)
+  )`);
+  db.exec('CREATE INDEX IF NOT EXISTS idx_prodinput_day ON prod_input(day)');
+
+  // 4.2.1 录的台账原样搬成「第一段」——现场已经录过的产量不能因为升级就消失。
+  // INSERT OR IGNORE：重复跑迁移不会把手工改过的数覆盖回去。
+  if (colsOf('prod_input_421_byline_bak').size) {
+    db.exec(`INSERT OR IGNORE INTO prod_input
+      (line_id, day, seq, is_open, model_id, shift_hours, plan_qty, done_qty, hour_qty, down_min, note, ts)
+      SELECT line_id, day, 1, 1, model_id, shift_hours, plan_qty, done_qty, hour_qty, down_min, note, ts
+        FROM prod_input_421_byline_bak`);
+  }
+
+  // 兜底：万一表是"有 seq 没 is_open"的中间态
+  if (colsOf('prod_input').size && !colsOf('prod_input').has('is_open')) {
+    db.exec('ALTER TABLE prod_input ADD COLUMN is_open INTEGER NOT NULL DEFAULT 1');
+  }
+}
+
+/**
  * 增量迁移：给老库补新列。
  *
  * 为什么不靠 SCHEMA 里那句 CREATE TABLE IF NOT EXISTS —— 它只在表不存在时建表，
@@ -266,6 +369,7 @@ function migrate() {
     if (!colsOf('line').has('slots')) {
       db.exec('ALTER TABLE line ADD COLUMN slots INTEGER NOT NULL DEFAULT 5');
     }
+
     return;
   }
 
@@ -288,11 +392,15 @@ function migrate() {
 
   // v3.5.0：线体状态。老库只有 enabled 两态，**只在第一次加列时**按它回填。
   // 回填语句必须待在这个 if 里面 —— 放外面每次启动都会把"维修中"刷回"运行中"。
+  // 两列各判各的。原来写成 if / else-if，3.x 的老库这两列**都没有**，
+  // 只补了 status 就跳过 slots，接着 migrateToModelProcess() 里
+  // `UPDATE line SET slots = ...` 直接报 no such column、整个库打不开。
   const lineCols = colsOf('line');
   if (!lineCols.has('status')) {
     db.exec("ALTER TABLE line ADD COLUMN status TEXT NOT NULL DEFAULT 'stopped'");
     db.exec("UPDATE line SET status = CASE WHEN enabled = 1 THEN 'running' ELSE 'stopped' END");
-  } else if (!lineCols.has('slots')) {
+  }
+  if (!lineCols.has('slots')) {
     db.exec('ALTER TABLE line ADD COLUMN slots INTEGER NOT NULL DEFAULT 5');
   }
 

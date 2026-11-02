@@ -25,6 +25,14 @@ const S = {
   board: [],
   boardTimer: null,
 
+  // 生产概况：空字符串 = 今天，翻页时改成 YYYY-MM-DD
+  prod: null,
+  prodDay: '',
+
+  // 生产输入（机种设置页）：按产线一行一条线。同样支持翻日期，为的是补昨天的记录
+  pi: null,
+  piDay: '',
+
   models: [],
   nextCode: '',   // 新建机种弹窗里「机种编号」的预填值（服务端扫空号给 M1、M2…）
 
@@ -223,6 +231,7 @@ const VIEW_TITLE = {
   board: '作业内容',
   lines: '线体设置',
   models: '机种设置',
+  prod: '生产输入',
   media: '媒体库',
   files: '文件查询',
   terms: '终端监控',
@@ -249,9 +258,10 @@ document.querySelectorAll('.nav-item[data-view]').forEach((b) => {
     if (v === 'system' && !loadSysPanel) return;
     S.tab = v;
     syncNav();
-    if (v === 'board') loadBoard().catch(() => {});
+    if (v === 'board') { loadBoard().catch(() => {}); loadProd().catch(() => {}); }
     if (v === 'lines') { loadLines().catch(() => {}); }
     if (v === 'models') { loadModels().catch(() => {}); }   // 定义层：工序清单
+    if (v === 'prod') { loadProdInput(true).catch(() => {}); }  // 生产台账：按线记的当日产量
     if (v === 'media') loadStations().catch(() => {});      // 内容层：按工序传文件
     if (v === 'files') loadMedia();                         // 全库查询：体检与清理
     if (v === 'terms') loadTerms().catch(() => {});
@@ -388,6 +398,203 @@ function renderBoard() {
   }).join('');
 }
 
+/* ================= 生产概况（右侧栏） =================
+   这一块只回答四句话：今天做了多少 / 这一小时多少 / 效率多少 / 停了多久。
+   数据来自「登记产量」+ 线体状态流水，不接 MES、不读终端 —— 见 src/api/prod.js。
+   刻意不做趋势图：328px 宽画出来的折线没人看得清，要看趋势看「产量登记」里的明细。 */
+
+/** 毫秒 → 「42 分」/「6.5 h」，超过 10 小时就不带小数了（6.5h 有信息量，14.3h 没有） */
+function fmtDur(ms) {
+  const m = Math.round((Number(ms) || 0) / 60000);
+  if (m <= 0) return '0 分';
+  if (m < 60) return `${m} 分`;
+  const h = m / 60;
+  return `${h >= 10 ? Math.round(h) : h.toFixed(1)} h`;
+}
+
+function dayToday() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function shiftDay(day, n) {
+  const d = new Date(day + 'T00:00:00');
+  d.setDate(d.getDate() + n);
+  const p = (x) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/* ================= 生产概况 =================
+   作业内容页「运行产线」上方那一条。所有数字由服务端 /api/prod/day 算好，
+   这里只排布 —— 口径只能有一处，界面里再算一遍迟早会和服务端对不上。
+
+   数据来自左边「生产输入」录的台账（产线 × 日）。没录就明说没录，
+   不做任何估算：这一栏是要被拿去开早会的，宁可空着也不能编。 */
+
+async function loadProd() {
+  const d = await api('/api/prod/day' + (S.prodDay ? '?day=' + encodeURIComponent(S.prodDay) : ''));
+  S.prod = d;
+  renderProd();
+}
+
+const fmtN = (n) => (n == null || n === '' || !Number.isFinite(Number(n))
+  ? '—' : Number(n).toLocaleString('zh-CN'));
+
+/** 停机时长：满 1 小时给「1.2 h」，不到就给分钟 —— 现场对着表看分钟更准 */
+function fmtDown(min) {
+  const m = Math.round(Number(min) || 0);
+  if (!m) return '0<i>分钟</i>';
+  return m >= 60 ? `${(m / 60).toFixed(1)} <i>h</i>` : `${m} <i>分钟</i>`;
+}
+
+/** 效率的配色：≥95% 绿、≥80% 黄、其余红。null（没节拍）走灰，不算"差" */
+function rateCls(r) {
+  if (r == null) return 'mute';
+  if (r >= 0.95) return 'ok';
+  if (r >= 0.8) return 'warn';
+  return 'bad';
+}
+
+function renderProd() {
+  const d = S.prod;
+  const today = dayToday();
+  const day = (d && d.day) || S.prodDay || today;
+  const isToday = day === today;
+
+  $('pDayLabel').textContent = isToday ? '今天' : day.slice(5).replace('-', '/');
+  $('pNext').disabled = day >= today;   // 明天还没发生，翻过去只有空表
+
+  if (!d) { $('pBody').innerHTML = '<div class="p-empty">正在读取…</div>'; return; }
+
+  const t = d.totals || {};
+  const running = d.running || [];
+  const rows = d.rows || [];        // 台账：一条线一笔
+  const byModel = d.byModel || [];  // 同一个产品可能在两条线上做，合计层再并一次
+
+  // 说「在开」不说「在运行」：线体状态是物理的，生产输入里的开不开是排产的，
+  // 两条线状态都 running 但今天只开一条时，这里写「在运行 2 条」会让人以为数算错了
+  $('pSub').textContent = `${isToday ? '今天' : day} · ${running.length} 条线在开`
+    + (t.closedLines ? ` · ${t.closedLines} 条不开线` : '');
+  $('pMissing').textContent = t.missing
+    ? `${t.missing} 条线还没录生产输入` : '';
+  $('pMissing').hidden = !t.missing;
+
+  // 一条台账都没有：与其摆一排「—」，不如直接告诉人去哪录
+  if (!rows.length) {
+    $('pBody').innerHTML = `<div class="p-empty">
+      <b>还没有生产输入</b>
+      <span>去左边「生产输入」给当天在生产的产线填上计划开机、产量和停机，
+      这里才有数可看。点右上角「去录入」直接过去。</span>
+    </div>`;
+    return;
+  }
+
+  const rate = t.rate;
+  const cls = rateCls(rate);
+  const pct = rate == null ? 0 : Math.max(0, Math.min(100, Math.round(rate * 100)));
+
+  // ---- 四格主指标：用户点名要的四个数 ----
+  const kpis = `
+    <div class="pkpi">
+      <span class="pk-k">当前每小时产能</span>
+      <span class="pk-v"><b>${fmtN(t.hourQty)}</b><i>件/时</i></span>
+      <span class="pk-s">各产线「实际每小时」之和</span>
+    </div>
+    <div class="pkpi">
+      <span class="pk-k">累计产能</span>
+      <span class="pk-v"><b>${fmtN(t.doneQty)}</b><i>件</i></span>
+      <span class="pk-s">计划 ${fmtN(t.planQty)} 件${
+        t.planQty > 0 ? ` · 完成 ${Math.round((t.doneQty / t.planQty) * 100)}%` : ''}</span>
+    </div>
+    <div class="pkpi">
+      <span class="pk-k">生产效率</span>
+      <span class="pk-v"><b class="${cls}">${rate == null ? '—' : pct + '%'}</b></span>
+      <span class="p-bar ${cls}"><i style="width:${pct}%"></i></span>
+      <span class="pk-s">${t.noTheory
+        ? `${t.noTheory} 条线缺标准产能或工时，合计算不出`
+        : `累计 ÷ 理论${t.theory ? `（理论 ${fmtN(t.theory)} 件）` : ''}`}</span>
+    </div>
+    <div class="pkpi">
+      <span class="pk-k">停机时间</span>
+      <span class="pk-v"><b>${fmtDown(t.downMin)}</b></span>
+      <span class="pk-s">有效工时 ${t.effHours || 0} h / 计划 ${t.shiftHours || 0} h</span>
+    </div>`;
+
+  // ---- 当前生产的机种：实时取，不是台账 ----
+  const liveHtml = running.length ? running.map((r) => `
+    <div class="pg-line">
+      <span class="pg-dot${r.hasInput ? '' : ' miss'}"></span>
+      <span class="pg-ln">${H(r.lineName)}</span>
+      ${r.modelCode
+        ? `<b class="pg-mc">${H(r.modelCode)}</b><span class="pg-mn">${H(r.modelName)}</span>`
+        : '<span class="pg-none-mc">未指定机种</span>'}
+      ${r.hasInput
+        ? `<span class="pg-qty">${fmtN(r.hourQty)} 件/时</span>`
+          + (r.rate == null ? '' : `<em class="pg-rate ${rateCls(r.rate)}">${Math.round(r.rate * 100)}%</em>`)
+        : '<span class="pg-tag">未录入</span>'}
+    </div>`).join('')
+    : '<div class="pg-empty-line">没有在运行的产线</div>';
+
+  // ---- 效率明细：分子分母全部摊开，别让人只能看一个百分比 ----
+  const detail = [
+    ['录入产线', `${t.inputLines || 0} 条${t.closedLines ? `（${t.closedLines} 条不开线）` : ''}`],
+    ['生产段数', `${t.segCount || 0} 段`],
+    ['计划产量', `${fmtN(t.planQty)} 件`],
+    ['理论产量', `${fmtN(t.theory)} 件`],
+    ['产量缺口', t.gap == null ? '—' : `${fmtN(t.gap)} 件`, t.gap > 0 ? 'warn' : ''],
+    ['平均节拍', t.effHours > 0 ? `${fmtN(Math.round(t.doneQty / t.effHours))} 件/时` : '—'],
+    ['计划工时', `${t.shiftHours || 0} h`],
+    ['有效工时', `${t.effHours || 0} h`]
+  ].map(([k, v, c]) => `<div class="p-kv"><span>${k}</span><b class="${c || ''}">${v}</b></div>`).join('');
+
+  // 多个型号、或同一条线分了段，才需要拆开看（一个型号一段时上面那些数已经是它的了）。
+  // 放在左列「当前生产的机种」下面 —— 它回答的就是"这几个型号各做了多少"，
+  // 和上面的实时列表是同一个问题的两个角度。
+  const modelSec = (byModel.length > 1 || (t.segCount || 0) > (t.inputLines || 0)) ? `
+    <div class="p-sec pg-mdl-sec">按产品</div>
+    ${byModel.map((m) => {
+      const extra = [m.lineCount > 1 ? `${m.lineCount} 条线` : '', m.segs > 1 ? `${m.segs} 段` : '']
+        .filter(Boolean).join(' · ');
+      return `
+      <div class="pg-mdl">
+        <b>${H(m.code)}</b>
+        <span>${fmtN(m.doneQty)} / ${fmtN(m.theory)} 件${extra ? ' · ' + extra : ''}</span>
+        <em class="${rateCls(m.rate)}">${m.rate == null ? '—' : Math.round(m.rate * 100) + '%'}</em>
+      </div>`;
+    }).join('')}` : '';
+
+  $('pBody').innerHTML = `
+    <div class="pkpis">${kpis}</div>
+    <div class="p-cols">
+      <div>
+        <div class="p-sec">当前生产的机种</div>
+        <div class="pg-live">${liveHtml}</div>
+        ${modelSec}
+      </div>
+      <div>
+        <div class="p-sec">效率明细</div>
+        ${detail}
+      </div>
+    </div>`;
+}
+
+$('pPrev').addEventListener('click', () => {
+  S.prodDay = shiftDay(S.prodDay || dayToday(), -1);
+  loadProd().catch((e) => toast(e.message, 'err'));
+});
+$('pNext').addEventListener('click', () => {
+  const next = shiftDay(S.prodDay || dayToday(), 1);
+  if (next > dayToday()) return;
+  S.prodDay = next;
+  loadProd().catch((e) => toast(e.message, 'err'));
+});
+// 直接借导航按钮的现成逻辑切页，别在别处再写一份视图切换
+$('pInputBtn').addEventListener('click', () => {
+  const nav = document.querySelector('.nav-item[data-view="prod"]');
+  if (nav) nav.click();
+});
+
 /** 排产：挑一个机种作为"下一个要生产的"。只记库，不动终端 —— 可能提前一天做。 */
 async function pickNextModel(lineId) {
   const line = S.board.find((x) => x.id === lineId);
@@ -516,9 +723,13 @@ $('runRefresh').addEventListener('click', () => {
 });
 
 // 总览 2 秒刷一次：换型进度和在线数要实时，切走页面就停
+// 生产概况跟着刷，但隔一轮（4 秒）—— 它要算整条时间轴，比 /api/board 重，
+// 而且产能是按小时记的，2 秒和 4 秒刷新看到的数是同一个。
+let prodTick = 0;
 S.boardTimer = setInterval(() => {
   if (S.tab !== 'board' || document.hidden) return;
   loadBoard().catch(() => {});
+  if (++prodTick % 2 === 0) loadProd().catch(() => {});
 }, 2000);
 
 // ---------- 侧栏底部 ----------
@@ -796,6 +1007,175 @@ $('dialog').addEventListener('click', (e) => {
   e.preventDefault();
   $('dlgNewSt').querySelectorAll('.ln-stb').forEach((x) => x.classList.toggle('on', x === b));
 });
+
+// ==================== 线体：Excel 导入 / 导出 ====================
+// 和工序那条链同一个套路：导出一份表 → 在 Excel 里改 → 整份导回，
+// 先逐行判定给预览，确认了才写库。线体只有几条到几十条，风险不在"行多"，
+// 而在**改错编码** —— 现场终端 config.json 里填的就是它。
+const LN_IMP_FIELD = { name: '线体名称', code: '编码', slots: '工位数', status: '状态' };
+
+$('lnExportBtn').addEventListener('click', async () => {
+  const n = S.lines.length;
+  const r = await dialog({
+    title: '导出线体清单',
+    message: '四列：线体名称 / 编码 / 工位数 / 状态。在 Excel 里改完，可以用「导入 Excel」整份导回来。',
+    html: `<div class="dlg-row"><label for="lnExpWhat">导出内容</label>
+        <select id="lnExpWhat" class="dlg-sel">
+          <option value="now">当前 ${n} 条线体（连数据一起）</option>
+          <option value="tpl">空白模板（表头 + 两行示例 + 填写说明）</option>
+        </select>
+      </div>
+      <div class="tip">「状态」那一列只供查看，导入不会改任何一条线的状态。</div>`,
+    read: (b) => b.querySelector('#lnExpWhat').value,
+    okText: '下载'
+  });
+  if (!r) return;
+  try {
+    if (r === 'tpl') await downloadFile('/api/export/lines-template.xlsx', '线体清单导入模板.xlsx');
+    else await downloadFile('/api/export/lines.xlsx', '线体清单.xlsx');
+  } catch (err) { toast(err.message, 'err'); }
+});
+
+// 导入：选文件 → 服务端只解析不落库 → 预览逐行判定 → 确认才写。
+// 不直接导入是因为线体表是现场自己拼的，列一错位（把工位数填进名称列）
+// 一导就得一条条改回来。
+$('lnImportBtn').addEventListener('click', () => {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = '.xlsx,.csv,.txt';
+  inp.onchange = async () => {
+    const f = inp.files && inp.files[0];
+    if (!f) return;
+    const qs = new URLSearchParams({ filename: f.name });
+    let d;
+    try {
+      d = await api('/api/import/lines/parse?' + qs.toString(), { method: 'POST', body: await f.arrayBuffer() });
+    } catch (err) { return toast(err.message, 'err'); }
+    await showLineImportPreview(d);
+  };
+  inp.click();
+});
+
+/** 线体导入预览：逐行状态表 + 一个处理方式下拉，看清楚了才让点确认。 */
+async function showLineImportPreview(d) {
+  const c = d.counts;
+  const cols = ['name', 'code', 'slots', 'status']
+    .filter((f) => d.mapping[f] !== undefined)
+    .map((f) => LN_IMP_FIELD[f]).join(' · ');
+  const shown = d.rows.slice(0, IMP_LIMIT);
+  const canImport = c.new + c.diff + c.same;
+
+  const html = `
+    <div class="imp-meta">
+      <div>来源 <b>${H(d.filename)}</b> ｜ ${d.header ? `第 ${d.headerRow} 行是表头` : '没有表头，按前三列读（名称 / 编码 / 工位数）'} ｜ 认到 <b>${H(cols)}</b></div>
+      ${d.statusIgnored ? '<div class="imp-dim">「状态」列认出来了但不导入 —— 它是现场实时状态，不是配置。</div>' : ''}
+    </div>
+    <div class="imp-sum">
+      <span class="imp-k ok"><b>${c.new}</b> 条新增</span>
+      <span class="imp-k warn"><b>${c.diff}</b> 条有变化</span>
+      <span class="imp-k"><b>${c.same}</b> 条没变化</span>
+      ${c.bad ? `<span class="imp-k bad"><b>${c.bad}</b> 行不合要求</span>` : ''}
+    </div>
+    <div class="imp-wrap">
+      <table class="imp-table">
+        <thead><tr>
+          <th style="width:46px">行号</th><th style="width:92px">状态</th>
+          <th>线体名称</th><th style="width:96px">编码</th>
+          <th style="width:72px">工位数</th><th>说明</th>
+        </tr></thead>
+        <tbody>${shown.map((r) => `
+          <tr class="${r.status === 'bad' ? 'is-bad' : ''}">
+            <td class="imp-no">${r.row}</td>
+            <td>${IMP_BADGE[r.status] || H(r.status)}</td>
+            <td>${H(r.name || '—')}</td>
+            <td class="imp-code">${H(r.code || '（自动）')}</td>
+            <td class="num">${r.status === 'bad' ? '—' : (r.slots || 0)}</td>
+            <td class="imp-why">${H(r.reason || r.detail || '')}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    ${d.rows.length > shown.length ? `<p class="imp-more">表里共 ${d.rows.length} 行，预览只列前 ${shown.length} 行，导入按全表走。</p>` : ''}
+    ${c.bad ? '<p class="imp-more">不合要求的行不会导入。</p>' : ''}
+    <div class="dlg-row" style="margin-top:12px">
+      <label for="lnMode">已存在的线体怎么处理</label>
+      <select id="lnMode" class="dlg-sel">
+        <option value="update"${c.diff ? ' selected' : ''}>加新的 + 更新有变化的（${c.diff} 条）</option>
+        <option value="merge"${c.diff ? '' : ' selected'}>只加新的，已存在的一律跳过</option>
+        <option value="update-only">只更新已存在的，不新建线体</option>
+      </select>
+    </div>
+    <div class="tip">新导入的线体一律是「停线」，确认现场就位后再点「运行」。状态和排序不受导入影响。</div>`;
+
+  const r = await dialog({
+    title: canImport ? `导入预览 · ${canImport} 条可导` : '导入预览 · 没有可导的行',
+    html,
+    read: (b) => b.querySelector('#lnMode').value,
+    okText: '确认导入'
+  });
+  if (!r) return;
+
+  const send = d.rows
+    .filter((x) => x.status !== 'bad')
+    .map(({ row, name, code, slots }) => ({ row, name, code, slots }));
+
+  let out;
+  try { out = await postJson('/api/lines/import', { rows: send, mode: r }); }
+  catch (err) { return toast(err.message, 'err'); }
+
+  await loadLines();
+  await showLineImportResult(out, d);
+}
+
+/** 线体导入结果：写进去多少 + 没导进去的逐行原因。线体没有"撤销"（数量少，删两下就回去了）。 */
+async function showLineImportResult(out, d) {
+  const bad = d.rows.filter((x) => x.status === 'bad')
+    .map((x) => ({ row: x.row, name: x.name, code: x.code, reason: x.reason }));
+  // 落库阶段又失败的（预览本该拦住，兜底留证，别只留一个数字）
+  (out.bad || []).forEach((b) => bad.push({ row: b.row, name: b.name || '', code: b.code || '', reason: b.reason }));
+
+  const parts = [];
+  if (out.created) parts.push(`新增 <b>${out.created}</b> 条`);
+  if (out.updated) parts.push(`更新 <b>${out.updated}</b> 条`);
+  if (out.kept) parts.push(`没变化 <b>${out.kept}</b> 条`);
+  if (out.skipped) parts.push(`跳过 <b>${out.skipped}</b> 条`);
+  if (!parts.length) parts.push('没有需要写库的行');
+
+  const made = (out.lines || []).slice(0, 200).map((l) => `
+    <tr><td>${H(l.name)}</td>
+      <td class="imp-code">${H(l.code)}</td>
+      <td class="imp-dim">${l.from ? `原编码 ${H(l.from)}` : (l.kind === 'created' ? '新建' : '改名称 / 工位数')}</td></tr>`).join('');
+
+  const list = bad.slice(0, 200).map((b) => `
+    <tr><td class="imp-no">${b.row}</td>
+      <td>${H(b.name || '—')}</td>
+      <td class="imp-code">${H(b.code || '—')}</td>
+      <td class="imp-why">${H(b.reason)}</td></tr>`).join('');
+
+  const html = `
+    <div class="imp-meta"><div>${parts.join(' ｜ ')}</div></div>
+    ${made ? `
+      <div class="imp-sub">写进库的线体</div>
+      <div class="imp-wrap">
+        <table class="imp-table">
+          <thead><tr><th>线体名称</th><th style="width:96px">编码</th><th style="width:130px">说明</th></tr></thead>
+          <tbody>${made}</tbody>
+        </table>
+      </div>` : ''}
+    ${bad.length ? `
+      <div class="imp-sub">没导进去的 ${bad.length} 行</div>
+      <div class="imp-wrap">
+        <table class="imp-table">
+          <thead><tr><th style="width:46px">行号</th><th>线体名称</th><th style="width:96px">编码</th><th>原因</th></tr></thead>
+          <tbody>${list}</tbody>
+        </table>
+      </div>
+      ${bad.length > 200 ? '<p class="imp-more">只列前 200 行。</p>' : ''}` : ''}
+    <div class="tip">导入不动线体状态：新线体是「停线」，已有的状态保持原样。</div>`;
+
+  await dialog({ title: '导入完成', html, okText: '知道了', hideCancel: true });
+}
+
 /** 取机种列表。徽标上的 x/y 是这个机种配了几道工序的内容。 */
 async function loadModels(keepId) {
   const d = await api('/api/models');
@@ -880,6 +1260,463 @@ async function loadMdProcesses() {
   renderStTable();
 }
 
+/* ================= 生产输入（左侧独立页） =================
+   作业内容页「生产概况」的每一个数都从这块来。
+
+   v4.2.1 起按产线记账；v4.2.2 起一条线一天可以**分几段**：
+     · 小批量来回换型时一个型号只做半小时，一线一行根本填不下；
+     · 段只是"这条线这天的第几段"，不带时间 —— 几点做的系统不知道，也没人记；
+     · 「不开线」是整条线的开关。选了它，作业内容页的生产概况里就不出现这条线：
+       线体状态还挂着 running 但今天没排产（待料、设备空着）时，
+       那一栏不该顶一条"未录入"的红字。
+     · 效率不填，由 累计 ÷（有效工时 × 产品标准产能）现算；
+       标准产能是机种属性，在机种设置「改编号/名称」里维护，这儿不重复填。 */
+
+let PI = null;   // { day, groups[{ ...,segments[] }], lines[], models[], defaultShift }
+
+async function loadProdInput(force) {
+  const day = S.piDay || dayToday();
+  if (!force && PI && PI.day === day) { renderProdInput(); return; }
+  try {
+    const qs = new URLSearchParams();
+    if (S.piDay) qs.set('day', S.piDay);
+    const d = await api('/api/prod/input' + (qs.toString() ? '?' + qs.toString() : ''));
+    PI = {
+      ...d,
+      groups: (d.groups || []).map((g) => ({ ...g, segments: g.segments || [] }))
+    };
+    PI.day = d.day;
+    S.piDay = d.day;
+    renderProdInput();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/** 空的一段 */
+function piSegNew() {
+  return {
+    saved: false, modelId: '', modelCode: '', modelName: '', stdRate: 0,
+    shiftHours: 0, planQty: 0, hourQty: 0, doneQty: 0, downMin: 0, theory: 0, rate: null
+  };
+}
+
+/** 型号下拉：停用/已删的机种也要能显示出来，否则老台账一打开就成"别的型号" */
+function piModelOpts(s) {
+  const list = (PI.models || []).slice();
+  if (s.modelId && !list.some((m) => m.id === s.modelId)) {
+    list.unshift({
+      id: s.modelId, code: s.modelCode || '(已停用)',
+      name: s.modelName || '', stdRate: s.stdRate || 0
+    });
+  }
+  return ['<option value="">— 选型号 —</option>']
+    .concat(list.map((m) => `<option value="${H(m.id)}"${m.id === s.modelId ? ' selected' : ''}>`
+      + `${H(m.code)}${m.name ? '\u3000' + H(m.name) : ''}</option>`))
+    .join('');
+}
+
+/** 这行的标准产能：看选中型号的 std_rate（机种设置里维护的），没选就是 0。
+ *  fallback 是台账行自带的 stdRate —— 型号已停用、不在下拉列表里时靠它兜住 */
+function piStdOf(modelId, fallback) {
+  const m = (PI.models || []).find((x) => x.id === modelId);
+  if (m) return Math.max(0, Math.round(Number(m.stdRate) || 0));
+  return modelId ? Math.max(0, Math.round(Number(fallback) || 0)) : 0;
+}
+
+/** 和服务端 derive() 同一条公式 —— 界面只做展示，准数以保存后返回的为准 */
+function piDerive(shift, down, done, std) {
+  const eff = Math.max(0, shift - down / 60);
+  const theory = Math.round(eff * std);
+  return { eff: +eff.toFixed(2), theory, rate: theory > 0 ? done / theory : null };
+}
+
+const pct = (r) => (r == null ? '—' : Math.round(r * 100) + '%');
+
+/** 这一段一个字都没填过（没录过 + 四个数全 0）：效率显示「—」，不显示 0% */
+function piBlank(s) {
+  return !s.saved && !s.planQty && !s.doneQty && !s.hourQty && !s.downMin;
+}
+const numIn = (v) => (v == null || v === '' ? '' : v);
+
+/** 一条产线 = 一行或几行。第一行带产线格（rowspan 撑住整组），后面的行只填数据。
+ *  「+ 型号」和「开线 / 不开线」都挂在产线格里 —— 那是整线级的动作，
+ *  放在段行上会让人以为"这一段不开线"。 */
+function piGroupHtml(g, gi) {
+  const open = g.isOpen !== false;
+  const segs = g.segments.length ? g.segments : [piSegNew()];
+  const dis = open ? '' : ' disabled';
+
+  return segs.map((s, si) => {
+    const std = piStdOf(s.modelId, s.stdRate);
+    const d = piDerive(s.shiftHours || 0, s.downMin || 0, s.doneQty || 0, std);
+    // 自动带出来、一个字都没填的行，效率给「—」：算出来是 0%，
+    // 但那是"还没录"不是"干砸了"，红色 0% 会让人误会。
+    // 不开线的线更不该有百分比 —— 它今天没生产。
+    const shown = open && !piBlank(s) ? d.rate : null;
+    const cls = rateCls(shown);
+
+    const stdTip = open
+      ? `<span class="pt-std${std ? '' : ' miss'}">${std ? `标准 ${std} 件/时` : '这个型号还没设标准产能'}</span>`
+      : '<span class="pt-std off">今天不开线，不计入生产概况</span>';
+
+    const lineCell = si === 0 ? `
+      <td class="pt-ln" rowspan="${segs.length}">
+        <b>${H(g.lineCode)}</b><span>${H(g.lineName)}</span>
+        ${g.lineStatus === 'running' ? '' : `<em class="pt-off">${H(stName(g.lineStatus))}</em>`}
+        <div class="pt-act">
+          <button class="pt-open${open ? ' on' : ''}" data-open="${gi}"
+            title="${open ? '今天这条线不开，作业内容页的生产概况里不显示它' : '今天这条线开，重新计入生产概况'}">${open ? '开线' : '不开线'}</button>
+        </div>
+        ${segs.length > 1 ? `<span class="pt-cnt">${segs.length} 段</span>` : ''}
+      </td>` : '';
+
+    return `
+    <tr data-g="${gi}" data-s="${si}"${si > 0 ? ' class="pt-seg"' : ''}${open ? '' : ' data-off="1"'}>
+      ${lineCell}
+      <td>
+        <select class="pt-sel" data-f="modelId"${dis}>${piModelOpts(s)}</select>
+        ${stdTip}
+      </td>
+      <td><input class="pt-in" type="number" min="0" step="0.5" inputmode="decimal" data-f="shiftHours" value="${numIn(s.shiftHours)}" placeholder="0.5"${dis}></td>
+      <td><input class="pt-in" type="number" min="0" step="1" inputmode="numeric" data-f="planQty" value="${numIn(s.planQty)}" placeholder="0"${dis}></td>
+      <td><input class="pt-in" type="number" min="0" step="1" inputmode="numeric" data-f="hourQty" value="${numIn(s.hourQty)}" placeholder="0"${dis}></td>
+      <td><input class="pt-in strong" type="number" min="0" step="1" inputmode="numeric" data-f="doneQty" value="${numIn(s.doneQty)}" placeholder="0"${dis}></td>
+      <td><input class="pt-in" type="number" min="0" step="1" inputmode="numeric" data-f="downMin" value="${numIn(s.downMin)}" placeholder="0"${dis}></td>
+      <td class="pt-rate">
+        <b class="${cls}">${pct(shown)}</b>
+        <span class="pt-bar ${cls}"><i style="width:${shown == null ? 0 : Math.max(0, Math.min(100, Math.round(shown * 100)))}%"></i></span>
+      </td>
+      <td class="pt-ops">
+        <button class="pt-x" data-del="${gi}:${si}" title="${segs.length > 1 ? '这一段不录了' : '这条线这天不录了'}">✕</button>
+        ${open ? `<button class="pt-addseg" data-addseg="${gi}:${si}"
+          title="在这一段后面接着做另一个型号">+ 型号</button>` : ''}
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function renderProdInput() {
+  if (!PI) return;
+  const today = dayToday();
+  const day = PI.day || today;
+  const groups = PI.groups || [];
+
+  $('piDayLabel').textContent = day === today ? '今天' : day.slice(5).replace('-', '/');
+  $('piNext').disabled = day >= today;
+
+  // 段数只数开线的：不开线的线只有一条占位行，算进去会虚高
+  const segTotal = groups.reduce((n, g) => n + (g.isOpen === false ? 0 : g.segments.length), 0);
+  const rec = groups.filter((g) => g.isOpen !== false && g.segments.some((s) => s.saved)).length;
+  const closed = groups.filter((g) => g.isOpen === false).length;
+  $('piSaved').textContent = rec ? `${rec} 条线已录` : '这天还没录';
+  $('piSaved').className = 'pi-saved' + (rec ? ' on' : '');
+  $('piSub').textContent = groups.length
+    ? `${groups.length} 条产线 · ${segTotal} 段${closed ? ` · ${closed} 条不开线` : ''}`
+    : '当天在生产的产线，一条线可以分几段做不同型号';
+
+  if (!groups.length) {
+    piSetBody('<tbody><tr><td colspan="9" class="pt-empty">'
+      + '这天没有在运行的产线。要补录停线 / 维修中的线，点右上角「+ 添加产线」。</td></tr></tbody>');
+    $('piTfoot').innerHTML = '';
+    $('piCalc').innerHTML = '';
+    return;
+  }
+
+  // 一条产线一个 tbody：鼠标落在任意一段上，整组一起高亮 ——
+  // 一条线做十几段时（一个型号半小时），滚到中间光看行是认不出属于哪条线的
+  piSetBody(groups.map((g, gi) => `<tbody class="pt-grp" data-g="${gi}">${piGroupHtml(g, gi)}</tbody>`).join(''));
+  $('piTfoot').innerHTML = '<tr class="pt-sum">'
+    + '<td>合计</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>';
+  piCalc();
+}
+
+/** 重画表体：表里可能有多个 tbody（一条产线一个），整批换掉 */
+function piSetBody(html) {
+  const t = $('piTable');
+  [...t.tBodies].forEach((tb) => tb.remove());
+  $('piTfoot').insertAdjacentHTML('beforebegin', html);
+}
+
+/** 表里所有段行（跨 tbody） */
+function piRows() {
+  return [...$('piTable').querySelectorAll('tbody tr[data-g]')];
+}
+
+/** 这一段当前填了什么（从 DOM 读，唯一真源是输入框） */
+function piReadSeg(tr) {
+  const get = (f) => Math.max(0, Number(tr.querySelector(`[data-f="${f}"]`).value) || 0);
+  return {
+    modelId: tr.querySelector('[data-f="modelId"]').value,
+    shiftHours: get('shiftHours'), planQty: get('planQty'),
+    hourQty: get('hourQty'), doneQty: get('doneQty'), downMin: get('downMin')
+  };
+}
+
+/** 边填边算：每段效率 + 底部合计。公式必须和服务端一致 */
+function piCalc() {
+  const trs = piRows();
+  let plan = 0, hour = 0, done = 0, down = 0, eff = 0, theory = 0, shift = 0, noTheory = 0;
+  const openLines = new Set();
+
+  for (const tr of trs) {
+    const gi = Number(tr.dataset.g);
+    const si = Number(tr.dataset.s);
+    const g = PI.groups[gi];
+    if (!g) continue;
+    const open = g.isOpen !== false;
+    const seg = g.segments[si];
+    const v = piReadSeg(tr);
+    const std = piStdOf(v.modelId, seg && seg.stdRate);
+    const d = piDerive(v.shiftHours, v.downMin, v.doneQty, std);
+    const blank = !seg || (!seg.saved && !v.planQty && !v.doneQty && !v.hourQty && !v.downMin);
+    const shown = open && !blank ? d.rate : null;
+
+    if (open) {
+      openLines.add(gi);
+      plan += v.planQty; hour += v.hourQty; done += v.doneQty;
+      down += v.downMin; eff += d.eff; theory += d.theory; shift += v.shiftHours;
+      // 有产量却算不出理论产量 —— 合计效率必须给「—」，
+      // 否则分母缺一块，合计能虚高到 200%
+      if (v.doneQty > 0 && d.theory === 0) noTheory += 1;
+    }
+
+    const cls = rateCls(shown);
+    const cell = tr.querySelector('.pt-rate');
+    cell.innerHTML = `<b class="${cls}">${pct(shown)}</b>`
+      + `<span class="pt-bar ${cls}"><i style="width:${shown == null ? 0 : Math.max(0, Math.min(100, Math.round(shown * 100)))}%"></i></span>`;
+    cell.title = !open ? '这条线今天不开线，不计入合计'
+      : d.theory > 0
+        ? `有效 ${d.eff} h × 标准 ${std} 件/时 = 理论 ${d.theory.toLocaleString('zh-CN')} 件`
+        : (std ? '填了「计划开机」才会算效率' : '这个型号没设标准产能，效率算不出来');
+  }
+
+  const rate = theory > 0 && !noTheory ? done / theory : null;
+  const cls = rateCls(rate);
+  $('piTfoot').innerHTML = `<tr class="pt-sum">
+    <td>合计 · ${openLines.size} 条线</td>
+    <td class="pt-s-eff">有效 ${+eff.toFixed(1)} h</td>
+    <td>${+shift.toFixed(1)} h</td>
+    <td>${plan.toLocaleString('zh-CN')}</td>
+    <td>${hour.toLocaleString('zh-CN')}</td>
+    <td class="strong">${done.toLocaleString('zh-CN')}</td>
+    <td>${down}</td>
+    <td class="pt-rate"><b class="${cls}">${pct(rate)}</b></td>
+    <td></td>
+  </tr>`;
+
+  // 有型号没设标准产能时，效率会静默变成「—」。这里点明原因，否则现场只会说"算不出来"
+  const noStd = trs.some((tr) => {
+    const g = PI.groups[Number(tr.dataset.g)];
+    if (g && g.isOpen === false) return false;
+    return piNoStd(tr);
+  });
+  $('piCalc').innerHTML = rate == null
+    ? `<span class="pi-calc-tip">${noTheory
+      ? `有 ${noTheory} 段填了产量但没填「计划开机」（或型号没设标准产能），合计效率算不出来`
+      : noStd
+        ? '有产线的型号还没设「标准产能」——去「机种设置 → 改编号/名称/产能」补一个，效率才能算'
+        : '填了「计划开机」和「累计产能」才会算效率'}</span>`
+    : `<span>理论产量 <b>${theory.toLocaleString('zh-CN')}</b> 件</span>
+       <span>生产效率 <b class="${cls}">${pct(rate)}</b></span>
+       <span class="pi-calc-tip">理论 ${theory.toLocaleString('zh-CN')} 件，实际差 ${(theory - done).toLocaleString('zh-CN')} 件</span>`;
+}
+
+function piNoStd(tr) {
+  const mid = tr.querySelector('[data-f="modelId"]').value;
+  if (!mid) return false;
+  const g = PI.groups[Number(tr.dataset.g)];
+  const seg = g && g.segments[Number(tr.dataset.s)];
+  return !piStdOf(mid, seg && seg.stdRate);
+}
+
+/** 把表里的值读回 PI.groups（保存 / 翻页前都要，别让手上的改动白填） */
+function piCollect() {
+  for (const tr of piRows()) {
+    const g = PI.groups[Number(tr.dataset.g)];
+    const s = g && g.segments[Number(tr.dataset.s)];
+    if (!s) continue;
+    const v = piReadSeg(tr);
+    Object.assign(s, v);
+  }
+}
+
+$('piTable').addEventListener('input', piCalc);
+$('piTable').addEventListener('change', (e) => {
+  if (e.target.dataset.f !== 'modelId') return;
+  const tr = e.target.closest('tr');
+  const g = PI.groups[Number(tr.dataset.g)];
+  const s = g && g.segments[Number(tr.dataset.s)];
+  const m = (PI.models || []).find((x) => x.id === e.target.value);
+  if (s) {
+    s.modelCode = m ? m.code : '';
+    s.modelName = m ? m.name : '';
+    s.stdRate = m ? m.stdRate : 0;
+  }
+  // 换了型号，那一行下面的「标准 xxx 件/时」得跟着换
+  const std = piStdOf(e.target.value, s && s.stdRate);
+  const tip = tr.querySelector('.pt-std');
+  tip.textContent = std ? `标准 ${std} 件/时` : '这个型号还没设标准产能';
+  tip.className = 'pt-std' + (std ? '' : ' miss');
+  piCalc();
+});
+
+$('piTable').addEventListener('click', async (e) => {
+  // ---- 开线 / 不开线（整条线） ----
+  const openBtn = e.target.closest('[data-open]');
+  if (openBtn) {
+    piCollect();
+    const g = PI.groups[Number(openBtn.dataset.open)];
+    if (!g) return;
+    // 从"开线"切到"不开线"：这条线今天的产量会整条从生产概况里拿掉，
+    // 先说清楚再切，别让人手一抖把一上午的数弄没了（数字还在表里，能切回来）
+    if (g.isOpen !== false) {
+      const used = g.segments.filter((s) => s.modelId || s.doneQty || s.planQty);
+      const done = used.reduce((n, s) => n + (s.doneQty || 0), 0);
+      if (used.length) {
+        const ok = await ask(`${g.lineCode} 今天不开线？`,
+          `这条线今天录的 ${used.length} 段、累计 ${done} 件会从作业内容页的生产概况里去掉，`
+          + '点「保存」后生效。数字还留在表里，切回开线能改；但保存过再切回来就要重填。',
+          '设为不开线', false);
+        if (!ok) return;
+      }
+    }
+    g.isOpen = g.isOpen === false;   // 反转
+    renderProdInput();
+    toast(g.isOpen ? `${g.lineCode} 计入了生产概况` : `${g.lineCode} 今天不开线，生产概况里不显示`, 'ok');
+    return;
+  }
+
+  // ---- 再加一个型号 ----
+  const addBtn = e.target.closest('[data-addseg]');
+  if (addBtn) {
+    piCollect();
+    const [gi, si] = String(addBtn.dataset.addseg).split(':').map(Number);
+    const g = PI.groups[gi];
+    if (!g) return;
+    if (g.isOpen === false) return toast('这条线标了「不开线」，先切成开线再加型号', 'err');
+    // 插在点的那一段后面，不是一律加到最后 —— 换型的先后是现场定的，
+    // 补录上午漏掉的那一段也不该跑到末尾去。
+    const at = Number.isFinite(si) ? Math.min(si + 1, g.segments.length) : g.segments.length;
+    g.segments.splice(at, 0, piSegNew());
+    renderProdInput();
+    const tr = $('piTable').querySelector(`tr[data-g="${gi}"][data-s="${at}"]`);
+    if (tr) {
+      tr.scrollIntoView({ block: 'nearest' });
+      const sel = tr.querySelector('[data-f="modelId"]');
+      if (sel) sel.focus();
+    }
+    return;
+  }
+
+  // ---- 删一段 / 删整条线 ----
+  const delBtn = e.target.closest('[data-del]');
+  if (!delBtn) return;
+  piCollect();
+  const [gi, si] = delBtn.dataset.del.split(':').map(Number);
+  const g = PI.groups[gi];
+  const s = g && g.segments[si];
+  if (!s) return;
+
+  if (g.segments.length === 1) {
+    // 只剩一段 → 删的就是这条线这一天的台账，得走接口真删
+    const ok = await ask(`删掉 ${g.lineCode} 这一天？`,
+      `${PI.day} 这条线录的产量、停机、工时全部删掉，生产概况里就不再计这条线。不可撤销。`, '删掉', true);
+    if (!ok) return;
+    try {
+      await api('/api/prod/input?' + new URLSearchParams({ lineId: g.lineId, day: PI.day }), { method: 'DELETE' });
+      toast('已删掉 ' + g.lineCode, 'ok');
+      loadProd().catch(() => {});
+    } catch (err) { return toast(err.message, 'err'); }
+    PI.groups.splice(gi, 1);
+    PI.lines.push({ id: g.lineId, code: g.lineCode, name: g.lineName, status: g.lineStatus });
+    renderProdInput();
+    return;
+  }
+
+  // 组里还有别的段：只是把这一段从表里去掉，点「保存」才真正删
+  if (s.saved) {
+    const ok = await ask('删掉这一段？',
+      `${PI.day} ${g.lineCode} 的这一段（${s.modelCode || '未选型号'}）会从表里去掉，`
+      + '点「保存」后生效；保存前关掉页面就白改了。', '删掉', true);
+    if (!ok) return;
+  }
+  g.segments.splice(si, 1);
+  renderProdInput();
+});
+
+$('piAdd').addEventListener('click', async () => {
+  const pool = (PI && PI.lines) || [];
+  if (!pool.length) return toast('所有线体都已经在表里了', 'err');
+  const opts = pool.map((l) => `<option value="${H(l.id)}">${H(l.code)}　${H(l.name)}（${H(stName(l.status))}）</option>`).join('');
+  const pick = await dialog({
+    title: '添加一条产线',
+    message: '当天没在跑、但要补录产量的线（停线、维修中、下午才开）用这里加。',
+    html: `<select id="piAddPick" class="dlg-sel">${opts}</select>`,
+    okText: '添加',
+    read: (body) => body.querySelector('#piAddPick').value
+  });
+  if (!pick) return;
+
+  piCollect();
+  const l = pool.find((x) => x.id === pick);
+  PI.groups.push({
+    lineId: l.id, lineCode: l.code, lineName: l.name, lineStatus: l.status,
+    isOpen: true, saved: false, segs: 0,
+    segments: [{ ...piSegNew(), shiftHours: PI.defaultShift || 8 }]
+  });
+  PI.lines = pool.filter((x) => x.id !== l.id);
+  renderProdInput();
+});
+
+$('piSave').addEventListener('click', async () => {
+  if (!PI || !PI.groups.length) return toast('这天没有要保存的产线', 'err');
+  piCollect();
+
+  // 拍平：一「段」一行。不开线的线只发一行 isOpen:false ——
+  // 服务端见到它就只留一条占位，不会把停线前那几段的产量留在库里。
+  const rows = [];
+  for (const g of PI.groups) {
+    if (g.isOpen === false) {
+      rows.push({
+        lineId: g.lineId, seq: 1, isOpen: false, modelId: '',
+        shiftHours: 0, planQty: 0, doneQty: 0, hourQty: 0, downMin: 0
+      });
+      continue;
+    }
+    g.segments.forEach((s, i) => rows.push({
+      lineId: g.lineId, seq: i + 1, isOpen: true, modelId: s.modelId,
+      shiftHours: s.shiftHours, planQty: s.planQty,
+      doneQty: s.doneQty, hourQty: s.hourQty, downMin: s.downMin
+    }));
+  }
+
+  const noStd = PI.groups.some((g) => g.isOpen !== false
+    && g.segments.some((s) => s.modelId && !piStdOf(s.modelId, s.stdRate)));
+  if (noStd) {
+    const go = await ask('有型号还没设标准产能', '这些产线的效率会显示成「—」。'
+      + '标准产能在「机种设置 → 改编号/名称/产能」里填，填完效率立刻就有。要现在返回去补吗？', '先保存', false);
+    if (!go) return;
+  }
+  try {
+    const r = await postJson('/api/prod/input', { day: PI.day, rows });
+    toast(`已保存 ${r.saved} 条产线${r.segs > r.saved ? ` · ${r.segs} 段` : ''}的台账`, 'ok');
+    await loadProdInput(true);
+    loadProd().catch(() => {});   // 顺手把作业内容页那一栏也刷了，切回去就是新的
+  } catch (e) { toast(e.message, 'err'); }
+});
+
+$('piPrev').addEventListener('click', () => {
+  piCollect();
+  S.piDay = shiftDay(PI ? PI.day : dayToday(), -1);
+  loadProdInput(true).catch((e) => toast(e.message, 'err'));
+});
+$('piNext').addEventListener('click', () => {
+  const next = shiftDay(PI ? PI.day : dayToday(), 1);
+  if (next > dayToday()) return;
+  piCollect();
+  S.piDay = next;
+  loadProdInput(true).catch((e) => toast(e.message, 'err'));
+});
+
 /** 信息栏：编码、可生产线体、以及"改 / 删"两个操作。 */
 function renderMdMeta(m) {
   const lines = S.mdLines || [];
@@ -892,6 +1729,12 @@ function renderMdMeta(m) {
     <div class="mm-main">
       <div class="mm-blk">
         <span class="mm-k">机种编号</span><b class="mono">${H(m.code)}</b>
+      </div>
+      <div class="mm-blk">
+        <span class="mm-k">标准产能</span>
+        ${m.stdRate
+          ? `<b class="mono">${m.stdRate}</b><i class="mm-u">件/时</i>`
+          : '<span class="badge warn" title="生产效率要拿它当分母，在「改编号/名称」里填">未设</span>'}
       </div>
       <div class="mm-blk">
         <span class="mm-k">可生产线体</span>
@@ -909,7 +1752,7 @@ function renderMdMeta(m) {
         <span><b>${items}</b> 个文件</span>
         <span>${bytes ? fmtBytes(bytes) : '—'}</span>
       </div>
-      <button class="btn sm" data-mact="ren">改编号/名称</button>
+      <button class="btn sm" data-mact="ren" title="机种编号、产品名称、标准产能都在这儿改">改编号/名称/产能</button>
       <button class="btn sm danger" data-mact="del">删除机种</button>
     </div>`;
 }
@@ -930,14 +1773,21 @@ $('mdMeta').addEventListener('click', async (e) => {
       message: '机种编号是终端和工艺文件里对外的标识；改它不影响已配的内容。',
       fields: [
         { key: 'code', label: '机种编号', value: m.code },
-        { key: 'name', label: '产品名称', value: m.name }
+        { key: 'name', label: '产品名称', value: m.name },
+        {
+          key: 'stdRate', label: '标准产能（件/小时）', value: m.stdRate || '',
+          placeholder: '例如 1200',
+          tip: '稳定跑起来每小时能做多少件。生产输入的「生产效率」用它当分母，'
+            + '不填那几条线的效率就显示「—」。'
+        },
       ],
       okText: '保存'
     });
     if (!r) return;
     try {
       await putJson('/api/models/' + encodeURIComponent(m.id), {
-        code: r.code || m.code, name: r.name || m.name
+        code: r.code || m.code, name: r.name || m.name,
+        stdRate: Math.max(0, Math.round(Number(r.stdRate) || 0)),
       });
       await loadModels(m.id);
       toast('已保存', 'ok');
@@ -2414,6 +3264,7 @@ if (desk) {
     const m = await api('/api/models');
     S.models = m.models || [];
     await loadBoard();
+    await loadProd().catch(() => {});
     const st = await api('/api/status').catch(() => null);
     if (st && st.version) { S.version = st.version; renderSideFoot(); }
   } catch (err) {

@@ -13,13 +13,14 @@ import { buildWorkbook } from '../xlsx.js';
 const TITLE = ['机种', '工序码', '名称', '做什么'];
 const WIDTHS = [20, 12, 22, 66];
 
-function stamp() {
+// 下面两个给别的导出模块复用（线体清单），所以 export 出去
+export function stamp() {
   const d = new Date();
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
 }
 
-function sendXlsx(res, buf, filename) {
+export function sendXlsx(res, buf, filename) {
   // 中文文件名走 RFC 5987；另外给一个纯 ASCII 的 filename 兜底老客户端
   const ascii = filename.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, '');
   res.writeHead(200, {

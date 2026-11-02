@@ -2105,6 +2105,7 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
 
 .mm-blk { display: inline-flex; align-items: center; gap: 6px; }
 .mm-k { font-size: 11.5px; color: var(--ink3); }
+.mm-u { font-style: normal; font-size: 10.5px; color: var(--ink3); margin-left: 2px; }
 
 /* 可生产线体：点开是个多选框，平时就显示成几个小胶囊 */
 .mm-lines {
@@ -2204,3 +2205,328 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
   font-size: 12px; padding: 3px 9px; border-radius: 999px;
   background: var(--brand-bg); color: var(--brand-ink);
 }
+
+/* ==========================================================================
+   生产概况（v4.2.1）· 作业内容页「运行产线」上方那一条
+   --------------------------------------------------------------------------
+   横向排：四格主指标在上，下面两列（当前生产的机种 / 效率明细）。
+   沿用页面既有的卡头 + 淡灰格子 + 12px 小字标签，不新造视觉语言。
+   ========================================================================== */
+
+.pbody { padding: 14px 16px 15px; }
+
+/* ---------- 四格主指标 ---------- */
+.pkpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.pkpi {
+  min-width: 0;
+  background: #f8f9fc;
+  border: 1px solid var(--line2);
+  border-radius: var(--r);
+  padding: 10px 13px 11px;
+}
+.pk-k { display: block; font-size: 12px; color: var(--ink3); }
+.pk-v { display: flex; align-items: baseline; gap: 4px; margin-top: 2px; }
+.pk-v b {
+  font-size: 26px; font-weight: 700; line-height: 1.12;
+  letter-spacing: -.6px; font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.pk-v b.ok { color: var(--ok); }
+.pk-v b.warn { color: var(--warn); }
+.pk-v b.bad { color: var(--danger); }
+.pk-v b.mute { color: var(--ink3); }
+.pk-v i { font-style: normal; font-size: 12px; color: var(--ink3); }
+/* 停机那格用 fmtDown() 拼了 <i>，字号要跟着主数字走，不能掉到 12px */
+.pk-v b i { font-size: 12.5px; color: var(--ink3); font-weight: 400; margin-left: 2px; }
+.pk-s {
+  display: block; margin-top: 4px;
+  font-size: 11.5px; color: var(--ink3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* 效率条：和主数字同一个颜色语义 */
+.p-bar { display: block; height: 4px; border-radius: 3px; background: var(--line); margin-top: 7px; overflow: hidden; }
+.p-bar > i { display: block; height: 100%; border-radius: 3px; background: var(--ok); }
+.p-bar.warn > i { background: var(--warn); }
+.p-bar.bad > i { background: var(--danger); }
+.p-bar.mute > i { background: var(--line); }
+
+/* ---------- 下面两列 ---------- */
+.p-cols {
+  display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 12px 28px; margin-top: 14px;
+}
+@media (max-width: 980px) {
+  .pkpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .p-cols { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* 区块小标题：靠上边框分段，不再套第二层卡片 */
+.p-sec {
+  font-size: 11.5px; font-weight: 600; color: var(--ink3); letter-spacing: .2px;
+  margin: 0 0 6px; padding-top: 11px; border-top: 1px solid var(--line2);
+}
+.p-cols > div:first-child .p-sec { padding-top: 0; border-top: 0; }
+.p-cols > div .p-sec + * { margin-top: 0; }
+@media (max-width: 980px) {
+  .p-cols > div:nth-child(2) .p-sec { padding-top: 11px; border-top: 1px solid var(--line2); }
+}
+
+/* ---------- 当前生产的机种 ---------- */
+.pg-live { display: flex; flex-direction: column; gap: 6px; }
+.pg-line { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.pg-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex: none;
+  background: var(--ok); align-self: center;
+}
+.pg-dot.miss { background: var(--line); box-shadow: inset 0 0 0 1px #cbd2e0; }
+.pg-ln { font-size: 12.5px; color: var(--ink2); flex: none; min-width: 42px; }
+.pg-mc {
+  font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pg-mn {
+  font-size: 11.5px; color: var(--ink3);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pg-none-mc { font-size: 12.5px; color: var(--ink3); }
+.pg-tag {
+  flex: none; margin-left: auto;
+  font-size: 10.5px; padding: 1px 6px; border-radius: 4px;
+  background: var(--warn-bg, #fef6e7); color: var(--warn);
+}
+.pg-empty-line { font-size: 12.5px; color: var(--ink3); padding: 2px 0; }
+
+/* ---------- 效率明细 ---------- */
+.p-kv {
+  display: flex; justify-content: space-between; gap: 12px;
+  font-size: 12.5px; padding: 2.5px 0;
+}
+.p-kv span { color: var(--ink2); }
+.p-kv b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.p-kv b.warn { color: var(--warn); }
+
+/* 按机种分解：只有多机种时才出现 */
+.pg-mdl {
+  display: grid; grid-template-columns: 62px minmax(0, 1fr) 42px;
+  gap: 8px; align-items: baseline;
+  font-size: 12px; padding: 3px 0;
+  border-top: 1px dashed var(--line2);
+}
+.pg-mdl b { font-weight: 600; font-variant-numeric: tabular-nums;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pg-mdl span { color: var(--ink3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.pg-mdl em { font-style: normal; font-weight: 600; text-align: right; font-variant-numeric: tabular-nums; }
+.pg-mdl em.ok { color: var(--ok); }
+.pg-mdl em.warn { color: var(--warn); }
+.pg-mdl em.bad { color: var(--danger); }
+.pg-mdl em.mute { color: var(--ink3); }
+
+/* 卡头的「N 个机种还没录」提示 */
+.pg-warn {
+  font-size: 11.5px; color: var(--warn);
+  background: #fef6e7; border: 1px solid #f7e3bd;
+  border-radius: 999px; padding: 1px 9px;
+}
+.pg-day {
+  min-width: 46px; text-align: center;
+  font-size: 12px; color: var(--ink2); font-variant-numeric: tabular-nums;
+}
+
+/* 卡头翻页：今天之后没有数，所以「›」在今天时是灰的 */
+.pnav {
+  width: 24px; height: 24px; padding: 0; line-height: 1;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--ink2); font-size: 14px; cursor: pointer;
+}
+.pnav:hover:not(:disabled) { border-color: var(--brand); color: var(--brand-ink); background: var(--brand-bg); }
+.pnav:disabled { opacity: .32; cursor: default; }
+
+/* 空态：没录生产输入时整块只有一句话，不要留一大片白 */
+.p-empty { padding: 20px 4px 22px; text-align: center; color: var(--ink3); font-size: 12.5px; line-height: 1.7; }
+.p-empty b { display: block; color: var(--ink2); font-size: 13px; margin-bottom: 4px; }
+
+/* ==========================================================================
+   生产输入（机种设置页）
+   ========================================================================== */
+.pi-saved {
+  font-size: 11.5px; color: var(--ink3);
+  padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line);
+}
+.pi-saved.on { color: var(--ok); border-color: #bfe6cf; background: #f0faf4; }
+.pi-day {
+  min-width: 46px; text-align: center;
+  font-size: 12px; color: var(--ink2); font-variant-numeric: tabular-nums;
+}
+
+/* 台账表：一条产线一行。列宽用上面 th 的内联宽度定死，
+   输入框一律撑满格子 —— 现场是拿鼠标点着填，不是拿键盘 tab 过。 */
+.pt-wrap { padding: 4px 18px 0; overflow-x: auto; }
+.pt {
+  width: 100%; border-collapse: separate; border-spacing: 0;
+  table-layout: fixed;
+}
+.pt th {
+  padding: 8px 6px; text-align: left; white-space: nowrap;
+  font-size: 11.5px; font-weight: 600; color: var(--ink2);
+  border-bottom: 1px solid var(--line);
+}
+.pt th i { font-style: normal; font-weight: 400; color: var(--ink3); margin-left: 3px; }
+.pt td {
+  padding: 6px; vertical-align: middle;
+  border-bottom: 1px solid var(--line2);
+  font-size: 12.5px; color: var(--ink);
+}
+.pt tbody tr:hover td { background: #fafbfe; }
+
+/* 产线这一格：编码在前、名称在后，停线/维修再加一枚小标 */
+.pt-ln b { display: block; font-size: 12.5px; font-weight: 650; letter-spacing: .2px; }
+.pt-ln span { display: block; font-size: 11.5px; color: var(--ink3); margin-top: 1px; }
+.pt-off {
+  display: inline-block; margin-top: 3px; padding: 0 6px;
+  font-style: normal; font-size: 10.5px; color: var(--warn);
+  background: var(--warn-bg); border-radius: 999px;
+}
+
+.pt-sel {
+  width: 100%; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--ink);
+  font-size: 12.5px;
+}
+.pt-sel:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 2px var(--brand-bg); }
+.pt-std { display: block; margin-top: 3px; font-size: 11px; color: var(--ink3); }
+.pt-std.miss { color: var(--warn); }
+
+.pt-in {
+  width: 100%; padding: 6px 8px;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--ink);
+  font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.pt-in::placeholder { font-weight: 400; color: var(--ink3); }
+.pt-in:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 2px var(--brand-bg); }
+.pt-in.strong { color: var(--brand-ink); }
+/* 数字输入框的上下箭头占地又难按，去掉；改数值直接打字 */
+.pt-in::-webkit-outer-spin-button, .pt-in::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
+/* 效率：数字 + 一条细进度条，扫一眼就知道哪条线掉队 */
+.pt-rate { text-align: left; }
+.pt-rate b { font-size: 13px; font-variant-numeric: tabular-nums; }
+.pt-rate b.ok { color: var(--ok); }
+.pt-rate b.warn { color: var(--warn); }
+.pt-rate b.bad { color: var(--danger); }
+.pt-rate b.mute { color: var(--ink3); }
+.pt-bar {
+  display: block; width: 84px; height: 3px; margin-top: 4px; border-radius: 2px;
+  background: var(--line2); overflow: hidden;
+}
+.pt-bar i { display: block; height: 100%; border-radius: 2px; background: var(--ink3); }
+.pt-bar.ok i { background: var(--ok); }
+.pt-bar.warn i { background: var(--warn); }
+.pt-bar.bad i { background: var(--danger); }
+
+.pt-x {
+  width: 24px; height: 24px; padding: 0; cursor: pointer;
+  border: 1px solid transparent; border-radius: 6px;
+  background: none; color: var(--ink3); font-size: 13px; line-height: 1;
+}
+.pt-x:hover { color: var(--danger); border-color: var(--danger-bg); background: var(--danger-bg); }
+
+/* 合计行：贴着表格底，不再占一格一格的分隔感 */
+.pt-sum td {
+  padding: 9px 6px; border-bottom: 0; border-top: 1px solid var(--line);
+  background: #f8f9fc;
+  font-size: 12.5px; font-weight: 600; color: var(--ink2);
+  font-variant-numeric: tabular-nums;
+}
+.pt-sum td:first-child { border-radius: 6px 0 0 6px; color: var(--ink); }
+.pt-sum td:last-child { border-radius: 0 6px 6px 0; }
+.pt-sum td.strong { color: var(--brand-ink); }
+.pt-sum .pt-s-eff { font-weight: 400; color: var(--ink3); white-space: nowrap; }
+.pt-sum .pt-rate b { font-size: 13px; }
+
+.pt-empty { padding: 24px 6px 26px; text-align: center; color: var(--ink3); font-size: 12.5px; }
+
+/* ---- 一条线分几段：产线格撑住整组，段行往下排 ---- */
+.pt-ln { vertical-align: top; }
+
+/* 产线格里只剩「开线 / 不开线」—— 那是整线级的。放在段行上会让人以为"这一段不开线" */
+.pt-act { display: flex; align-items: flex-start; margin-top: 6px; }
+.pt-open {
+  padding: 2px 7px; cursor: pointer; white-space: nowrap;
+  font-size: 10.5px; line-height: 1.6; border-radius: 999px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink3);
+}
+.pt-open.on { color: var(--ok); border-color: #bbe7cb; background: var(--ok-bg); }
+.pt-open:not(.on) { color: var(--danger); border-color: #f6cfcf; background: var(--danger-bg); }
+
+/* 段行末尾：✕ 之后跟「+ 型号」。
+   跟着 ✕ 走而不是留在产线格里 —— 加的是"这一段的后面"，位置就在这一行上，
+   不用先想"点了会加到哪里"。顺带产线格也清净了。 */
+.pt-th-ops { display: block; text-align: center; font-weight: 400; }
+.pt-ops { white-space: nowrap; text-align: right; padding-right: 4px; }
+.pt-addseg {
+  height: 22px; padding: 0 7px; margin-left: 2px; cursor: pointer; white-space: nowrap;
+  font-size: 10.5px; line-height: 1; border-radius: 6px; vertical-align: middle;
+  border: 1px dashed #c7d7f7; background: none; color: var(--brand-ink);
+}
+.pt-addseg:hover { background: var(--brand-bg); border-style: solid; }
+/* 不开线的行没有「+ 型号」，右列只剩 ✕，让它靠右对齐不显得飘 */
+.pt tr[data-off="1"] .pt-ops { padding-right: 4px; }
+.pt-cnt { display: block; margin-top: 5px; font-size: 10.5px; color: var(--ink3); }
+.pt-std.off { color: var(--ink3); }
+
+/* 第二段起画一道竖线和一个小折角 └，看得出是同一条线下面的一段 */
+.pt tr.pt-seg td { background: #f7f9fd; }
+.pt tr.pt-seg td:first-child {
+  position: relative; padding-left: 20px;
+  box-shadow: inset 3px 0 0 #dbe4f5;
+}
+.pt tr.pt-seg td:first-child::before {
+  content: ''; position: absolute; left: 9px; top: -1px; bottom: 0;
+  border-left: 1px solid #dde3ee;
+}
+.pt tr.pt-seg td:first-child::after {
+  content: ''; position: absolute; left: 9px; top: 50%; width: 9px;
+  border-top: 1px solid #dde3ee;
+}
+
+/* 不开线的线：输入点不动、整组压灰，但数还留在框里 —— 改回开线不用重填 */
+.pt-in:disabled, .pt-sel:disabled { background: #f5f6fa; color: var(--ink3); cursor: not-allowed; }
+.pt tr[data-off="1"] td { background: #fafbfd; }
+.pt tr[data-off="1"] td:not(.pt-ln) { color: var(--ink3); }
+.pt tr[data-off="1"] .pt-rate b { color: var(--ink3); }
+
+/* 一条产线一个 tbody：鼠标落在任意一段上，整组一起亮。
+   段多时（一个型号做半小时，一天十几段）靠这个认出属于哪条线 ——
+   产线名在组顶端，滚到第 8 段就看不见了。
+   放在 .pt tbody tr:hover 之后，靠顺序压过单行高亮 */
+.pt tbody.pt-grp:hover td { background: #f2f6ff; }
+
+.pi-empty { padding: 26px 18px 30px; text-align: center; color: var(--ink3); font-size: 12.5px; }
+
+/* 线上的产量（右对齐，弱化），和「未录入」标签占同一个位置 */
+.pg-rate {
+  flex: none; margin-left: 8px;
+  font-style: normal; font-size: 11.5px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.pg-rate.ok { color: var(--ok); }
+.pg-rate.warn { color: var(--warn); }
+.pg-rate.bad { color: var(--danger); }
+.pg-rate.mute { color: var(--ink3); }
+
+.pg-qty {
+  flex: none; margin-left: auto;
+  font-size: 11.5px; color: var(--ink3);
+  font-variant-numeric: tabular-nums;
+}
+/* 「按机种」是左列的第二段，上边框由 .p-sec 自己带，这里只补间距 */
+.pg-mdl-sec { margin-top: 12px; }
