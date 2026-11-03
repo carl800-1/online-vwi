@@ -344,9 +344,9 @@ export function register(router) {
       }
     }
 
-    // name/note/maxMb/playMode/reqs/items 全部交给 saveProcess，
+    // name/note/maxMb/playMode/cycleSec/reqs/items 全部交给 saveProcess，
     // 兼容接口 /api/playlist 也走那条路，两处各写一遍迟早不一致。
-    const touched = ['name', 'maxMb', 'note', 'playMode', 'reqs', 'items']
+    const touched = ['name', 'maxMb', 'note', 'playMode', 'cycleSec', 'reqs', 'items']
       .some((k) => body[k] !== undefined);
     if (touched) {
       saveProcessBody(p.model_id, p.id, body);
@@ -378,6 +378,7 @@ function saveProcessBody(modelId, processId, body) {
     maxMb: body.maxMb,
     note: body.note,
     playMode: body.playMode,
+    cycleSec: body.cycleSec,
     reqs: Array.isArray(body.reqs) ? body.reqs : undefined,
     items: Array.isArray(body.items) ? body.items : undefined
   });

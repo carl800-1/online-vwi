@@ -369,6 +369,12 @@ function migrate() {
     if (!colsOf('line').has('slots')) {
       db.exec('ALTER TABLE line ADD COLUMN slots INTEGER NOT NULL DEFAULT 5');
     }
+    // 4.3.0：工序工时（秒/件）。一道工序 = 一个工位，所以它同时就是「工位工时分配」。
+    // 放在这个提前 return 的支里 + 上面 process_v4 的建表语句里 —— 两个入口各补一次，
+    // 老库走这里，新库/3.x 库走 migrateToModelProcess 重建时直接带上。
+    if (!colsOf('process').has('cycle_sec')) {
+      db.exec('ALTER TABLE process ADD COLUMN cycle_sec REAL NOT NULL DEFAULT 0');
+    }
 
     return;
   }
@@ -933,6 +939,7 @@ function migrateToModelProcess() {
       max_mb        INTEGER NOT NULL DEFAULT 0,
       note          TEXT NOT NULL DEFAULT '',
       play_mode     TEXT NOT NULL DEFAULT 'loop',
+      cycle_sec     REAL    NOT NULL DEFAULT 0,
       import_batch  TEXT NOT NULL DEFAULT '',
       created_at    INTEGER NOT NULL,
       UNIQUE(model_id, code)
@@ -1273,6 +1280,9 @@ export function processesOf(modelId) {
     note: p.note,
     // loop = 播完从头再来（默认）；once = 播完停在最后一屏
     playMode: p.play_mode === 'once' ? 'once' : 'loop',
+    // 工序工时（秒/件）：一道工序 = 一个工位，所以它同时是「工位工时分配」那一列的来源。
+    // 0 = 还没量过，不是"零工时"—— 导出的平衡率、瓶颈产能会留空，不拿 0 去算。
+    cycleSec: Math.max(0, Math.round((Number(p.cycle_sec) || 0) * 10) / 10),
     reqs: byId.get(p.id).reqs.sort(
       (a, b) => KINDS_ORDER.indexOf(a.kind) - KINDS_ORDER.indexOf(b.kind)
     ),
@@ -1292,9 +1302,9 @@ export function processByCode(modelId, code) {
 
 /**
  * 整份替换一道工序的元信息、类型要求与内容清单。
- * 五块各判 `!== undefined`：界面分「改名字」「改要求」「改内容」三次发，互不覆盖。
+ * 六块各判 `!== undefined`：界面分「改名字」「改要求」「改内容」三次发，互不覆盖。
  */
-export function saveProcess(modelId, processId, { name, maxMb, note, playMode, reqs, items }) {
+export function saveProcess(modelId, processId, { name, maxMb, note, playMode, cycleSec, reqs, items }) {
   tx(() => {
     const p = q.get('SELECT * FROM process WHERE id = ? AND model_id = ?', processId, modelId);
     if (!p) throw Object.assign(new Error('工序不存在'), { status: 400 });
@@ -1302,6 +1312,12 @@ export function saveProcess(modelId, processId, { name, maxMb, note, playMode, r
     if (name !== undefined) q.run('UPDATE process SET name = ? WHERE id = ?', str(name, 40) || p.code, p.id);
     if (maxMb !== undefined) q.run('UPDATE process SET max_mb = ? WHERE id = ?', int(maxMb, 0), p.id);
     if (note !== undefined) q.run('UPDATE process SET note = ? WHERE id = ?', str(note, 200), p.id);
+    // 工时按 0.1 秒取整：现场拿秒表量出来的是 8.6 这种数，硬转整数把 0.4 抹掉没道理。
+    // 上限 24 小时 —— 填 99999 多半是手滑，留着会把平衡率的量纲带歪。
+    if (cycleSec !== undefined) {
+      const sec = Math.round((Number(cycleSec) || 0) * 10) / 10;
+      q.run('UPDATE process SET cycle_sec = ? WHERE id = ?', Math.min(86400, Math.max(0, sec)), p.id);
+    }
     if (playMode !== undefined) {
       q.run('UPDATE process SET play_mode = ? WHERE id = ?',
         playMode === 'once' ? 'once' : 'loop', p.id);

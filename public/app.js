@@ -441,6 +441,9 @@ async function loadProd() {
 const fmtN = (n) => (n == null || n === '' || !Number.isFinite(Number(n))
   ? '—' : Number(n).toLocaleString('zh-CN'));
 
+/** 一位小数：工时秒数用它，别让 62.500000001 上界面 */
+const round1 = (n) => Math.round((Number(n) || 0) * 10) / 10;
+
 /** 停机时长：满 1 小时给「1.2 h」，不到就给分钟 —— 现场对着表看分钟更准 */
 function fmtDown(min) {
   const m = Math.round(Number(min) || 0);
@@ -1017,22 +1020,28 @@ const LN_IMP_FIELD = { name: '线体名称', code: '编码', slots: '工位数',
 $('lnExportBtn').addEventListener('click', async () => {
   const n = S.lines.length;
   const r = await dialog({
-    title: '导出线体清单',
-    message: '四列：线体名称 / 编码 / 工位数 / 状态。在 Excel 里改完，可以用「导入 Excel」整份导回来。',
+    title: '导出线体 Excel',
+    message: `当前 ${n} 条线体。导出后可以在 Excel 里改，改完拿「导入 Excel」导回来。`,
     html: `<div class="dlg-row"><label for="lnExpWhat">导出内容</label>
         <select id="lnExpWhat" class="dlg-sel">
-          <option value="now">当前 ${n} 条线体（连数据一起）</option>
+          <option value="full">全量参数（5 页：线体清单 / 线体配置 / 工时设定 / 工序参数 / 字段说明）</option>
+          <option value="line">只有线体清单（4 列，文件小、打开快）</option>
           <option value="tpl">空白模板（表头 + 两行示例 + 填写说明）</option>
         </select>
       </div>
-      <div class="tip">「状态」那一列只供查看，导入不会改任何一条线的状态。</div>`,
+      <div class="tip">全量那份把工时、节拍、瓶颈、工序参数都带上了（1.6 万行，约 10 MB），
+        换一套系统照着它就能重建。<b>第 1 页「线体清单」</b>改完导回改线体，
+        <b>第 3 页「线体工时设定」</b>改「标准产能」能批量导回机种，
+        <b>第 4 页「工序参数」</b>要到「机种设置 → 导入」里导回。
+        「状态 / 当前机种 / 播放项数」这些是运行态和快照，只导出不导回。</div>`,
     read: (b) => b.querySelector('#lnExpWhat').value,
     okText: '下载'
   });
   if (!r) return;
   try {
     if (r === 'tpl') await downloadFile('/api/export/lines-template.xlsx', '线体清单导入模板.xlsx');
-    else await downloadFile('/api/export/lines.xlsx', '线体清单.xlsx');
+    else await downloadFile('/api/export/lines.xlsx?sheet=' + (r === 'line' ? 'line' : 'full'),
+      r === 'line' ? '线体清单.xlsx' : '线体全量参数.xlsx');
   } catch (err) { toast(err.message, 'err'); }
 });
 
@@ -1064,6 +1073,37 @@ async function showLineImportPreview(d) {
     .map((f) => LN_IMP_FIELD[f]).join(' · ');
   const shown = d.rows.slice(0, IMP_LIMIT);
   const canImport = c.new + c.diff + c.same;
+
+  // 「线体工时设定」页：同一个文件里带着就一起导。标准产能是机种属性，
+  // 和线体那张表分开算，所以单独一段，别混进上面的行表里。
+  const std = d.std && d.std.rows ? d.std : null;
+  const stdDiff = std ? std.rows.filter((r) => r.status === 'diff') : [];
+  const stdBadRows = std ? std.rows.filter((r) => r.status === 'bad') : [];
+  const stdBlock = !std ? '' : `
+    <div class="imp-sub">「线体工时设定」页 · 标准产能</div>
+    ${std.error ? `<p class="imp-more">${H(std.error)}</p>` : `
+      <div class="imp-sum">
+        <span class="imp-k warn"><b>${stdDiff.length}</b> 个机种有变化</span>
+        <span class="imp-k"><b>${std.counts.same}</b> 个没变化</span>
+        ${stdBadRows.length ? `<span class="imp-k bad"><b>${stdBadRows.length}</b> 行不合要求</span>` : ''}
+      </div>
+      ${stdDiff.length || stdBadRows.length ? `
+      <div class="imp-wrap">
+        <table class="imp-table">
+          <thead><tr><th style="width:46px">行号</th><th style="width:92px">状态</th>
+            <th style="width:110px">机种</th><th>说明</th></tr></thead>
+          <tbody>${stdDiff.slice(0, 40).map((r) => `
+            <tr><td class="imp-no">${r.row}</td><td>${IMP_BADGE.diff}</td>
+              <td class="imp-code">${H(r.code)}</td><td class="imp-why">${H(r.detail)}</td></tr>`).join('')}
+          ${stdBadRows.slice(0, 20).map((r) => `
+            <tr class="is-bad"><td class="imp-no">${r.row}</td><td>${IMP_BADGE.bad}</td>
+              <td class="imp-code">${H(r.code)}</td><td class="imp-why">${H(r.reason)}</td></tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${stdDiff.length > 40 ? `<p class="imp-more">还有 ${stdDiff.length - 40} 个机种，导入按全表走。</p>` : ''}` : ''}
+      <p class="imp-more">标准产能是<b>机种</b>的属性：同一个机种在多条线上只写一个值。
+        这一页没填的机种保持原样，不会被清成 0。</p>`}`;
 
   const html = `
     <div class="imp-meta">
@@ -1097,6 +1137,7 @@ async function showLineImportPreview(d) {
     </div>
     ${d.rows.length > shown.length ? `<p class="imp-more">表里共 ${d.rows.length} 行，预览只列前 ${shown.length} 行，导入按全表走。</p>` : ''}
     ${c.bad ? '<p class="imp-more">不合要求的行不会导入。</p>' : ''}
+    ${stdBlock}
     <div class="dlg-row" style="margin-top:12px">
       <label for="lnMode">已存在的线体怎么处理</label>
       <select id="lnMode" class="dlg-sel">
@@ -1119,8 +1160,11 @@ async function showLineImportPreview(d) {
     .filter((x) => x.status !== 'bad')
     .map(({ row, name, code, slots }) => ({ row, name, code, slots }));
 
+  // 标准产能只送「有变化」的：没变化的不用写库，bad 的不能写
+  const stdSend = stdDiff.map(({ row, modelId, rate }) => ({ row, modelId, rate }));
+
   let out;
-  try { out = await postJson('/api/lines/import', { rows: send, mode: r }); }
+  try { out = await postJson('/api/lines/import', { rows: send, mode: r, stdRows: stdSend }); }
   catch (err) { return toast(err.message, 'err'); }
 
   await loadLines();
@@ -1139,6 +1183,8 @@ async function showLineImportResult(out, d) {
   if (out.updated) parts.push(`更新 <b>${out.updated}</b> 条`);
   if (out.kept) parts.push(`没变化 <b>${out.kept}</b> 条`);
   if (out.skipped) parts.push(`跳过 <b>${out.skipped}</b> 条`);
+  // 标准产能是另一件事（写 model 不写 line），单独报一句，别混进线体那几个数里
+  if (out.std && out.std.updated) parts.push(`标准产能改了 <b>${out.std.updated}</b> 个机种`);
   if (!parts.length) parts.push('没有需要写库的行');
 
   const made = (out.lines || []).slice(0, 200).map((l) => `
@@ -2012,22 +2058,35 @@ const PLAY_MODES = [
  * 25 道工序用表格而不是卡片：一行 34px，表头固定、表内滚动，
  * 页面高度不随工序数增长；「内容」列直接点进媒体库对应的工序。
  */
+/** 工序表副标题：道数 / 已配 / 工时合计 / 瓶颈。改一格工时只刷这一行，不碰表体 */
+function renderStSub() {
+  const el = $('stTableSub');
+  if (!el) return;
+  const total = S.mdStations.length;
+  if (!total) { el.innerHTML = '—'; return; }
+  const filled = S.mdStations.filter((x) => x.items.length > 0).length;
+  // 工时填了才有得算：合计 = 各工位相加，瓶颈 = 最长那道。
+  // 这两个数不用来算效率（效率看机种的标准产能），但排产的人一眼就知道线卡在哪。
+  const secs = S.mdStations.map((x) => Number(x.cycleSec) || 0);
+  const secSum = secs.reduce((a, b) => a + b, 0);
+  const secMax = Math.max(...secs);
+  el.innerHTML = `${total} 道工序 · 已配 <b>${filled}</b> 道`
+    + (secSum > 0 ? ` · 工时合计 <b>${round1(secSum)}</b> 秒 · 瓶颈 <b>${round1(secMax)}</b> 秒` : '');
+}
+
 function renderStTable() {
   const tb = $('stTbody');
   if (!tb) return;
 
+  renderStSub();
   const total = S.mdStations.length;
-  const filled = S.mdStations.filter((x) => x.items.length > 0).length;
-  $('stTableSub').innerHTML = total
-    ? `${total} 道工序 · 已配 <b>${filled}</b> 道`
-    : '—';
 
   if (!S.mdModelId) {
-    tb.innerHTML = '<tr><td colspan="6" class="st-empty">上面选一个机种，这里显示它的工序。</td></tr>';
+    tb.innerHTML = '<tr><td colspan="7" class="st-empty">上面选一个机种，这里显示它的工序。</td></tr>';
     return;
   }
   if (!total) {
-    tb.innerHTML = `<tr><td colspan="6" class="st-empty">
+    tb.innerHTML = `<tr><td colspan="7" class="st-empty">
       这个机种还没有工序。点右上「+ 批量加工序」一次贴多行（一行 <b>OP1 装配</b>）。</td></tr>`;
     return;
   }
@@ -2037,7 +2096,7 @@ function renderStTable() {
     !kw || (st.code || '').toLowerCase().includes(kw) || (st.name || '').toLowerCase().includes(kw));
 
   if (!shown.length) {
-    tb.innerHTML = '<tr><td colspan="6" class="st-empty">没有匹配的工序</td></tr>';
+    tb.innerHTML = '<tr><td colspan="7" class="st-empty">没有匹配的工序</td></tr>';
     return;
   }
 
@@ -2055,6 +2114,9 @@ function renderStTable() {
             (st.playMode || 'loop') === v ? ' selected' : ''}>${t}</option>`).join('')}
         </select>
       </td>
+      <td><input class="cell-in cell-num" data-f="cycleSec" data-num="1" inputmode="decimal"
+                 maxlength="7" value="${st.cycleSec ? H(st.cycleSec) : ''}"
+                 placeholder="—" title="这一工位做一件要几秒；留空 = 未测"></td>
       <td>${n
         ? `<button class="cell-n on" data-jump="${H(st.id)}">${n} 项</button>`
         : `<button class="cell-n" data-jump="${H(st.id)}">未配</button>`}</td>
@@ -2078,8 +2140,26 @@ $('stTbody').addEventListener('change', async (e) => {
   if (!st) return;
 
   const f = inp.dataset.f;
-  const v = inp.value.trim();
-  if ((st[f] || '') === v) return;
+  const raw = inp.value.trim();
+  let v = raw;
+
+  if (inp.dataset.num) {
+    // 工时是数字：留空 = 没测（存 0），乱填直接退回去 —— 别让「8,5」静默变成 0
+    if (!raw) {
+      v = 0;
+    } else {
+      v = Number(raw.replace(/[，,]/g, '.'));
+      if (!Number.isFinite(v) || v < 0) {
+        inp.value = st[f] ? st[f] : '';
+        return toast('工时填秒数，例如 8.5；留空表示还没测', 'err');
+      }
+      v = round1(v);
+    }
+    if ((Number(st[f]) || 0) === v) {
+      inp.value = v ? v : '';   // 把「8.50」这种顺手规整掉
+      return;
+    }
+  } else if ((st[f] || '') === v) return;
 
   inp.classList.add('saving');
   try {
@@ -2088,10 +2168,14 @@ $('stTbody').addEventListener('change', async (e) => {
     inp.classList.remove('saving');
     inp.classList.add('saved');
     setTimeout(() => inp.classList.remove('saved'), 1200);
+    if (inp.dataset.num) {
+      inp.value = v ? v : '';
+      renderStSub();         // 合计 / 瓶颈在副标题上，只更那一行，表体不动（Tab 连着填不丢焦点）
+    }
     renderMdList();          // 徽标跟着变
     renderMdMeta(S.models.find((x) => x.id === S.mdModelId));
   } catch (err) {
-    inp.value = st[f] || '';
+    inp.value = inp.dataset.num ? (st[f] ? st[f] : '') : (st[f] || '');
     inp.classList.remove('saving');
     toast(err.message, 'err');
   }
@@ -2358,6 +2442,12 @@ function stationHtml(st) {
         <option value="loop"${(st.playMode || 'loop') === 'loop' ? ' selected' : ''}>循环播放</option>
         <option value="once"${st.playMode === 'once' ? ' selected' : ''}>播一遍停</option>
       </select>
+      <i class="st-div"></i>
+      <span class="st-lbl">工时</span>
+      <input class="knum" type="number" min="0" max="86400" step="0.1"
+             style="width:64px" data-sid="${H(st.id)}" data-f="cycleSec"
+             value="${st.cycleSec ? st.cycleSec : ''}" placeholder="—"
+             title="这一工位做一件要几秒；留空 = 还没测。线和机种设置里那一格是同一个数"> 秒
     </div>
 
     <div class="st-drop" data-sid="${H(st.id)}">
@@ -2499,6 +2589,10 @@ $('stations').addEventListener('change', async (e) => {
     if (numField) payload.maxMb = Math.max(0, Number(t.value) || 0);
     else if (t.dataset.f === 'name') payload.name = t.value.trim() || st.code;
     else if (t.dataset.f === 'playMode') payload.playMode = t.value === 'once' ? 'once' : 'loop';
+    else if (t.dataset.f === 'cycleSec') {
+      // 留空就是「还没测」，存 0；上限一天，别让人误填成几十万
+      payload.cycleSec = Math.min(86400, Math.max(0, round1(t.value)));
+    }
 
     if (t.dataset.kn || t.dataset.kw || t.dataset.kh) {
       const kind = t.dataset.kn || t.dataset.kw || t.dataset.kh;
@@ -2572,7 +2666,12 @@ const IMP_BADGE = {
   same: '<span class="badge muted">没变化</span>',
   bad: '<span class="badge danger">不合要求</span>'
 };
-const IMP_FIELD = { code: '工序码', name: '名称', note: '做什么', model: '机种', line: '线体' };
+const IMP_FIELD = {
+  code: '工序码', name: '名称', note: '做什么', model: '机种', line: '线体',
+  // 4.3.0：全量导出里的「工序参数」页多这几列，认到哪列就报哪列
+  play: '播放方式', maxMb: '单文件上限', cycleSec: '工序工时',
+  kinds: '允许类型', minSize: '图片最小尺寸'
+};
 
 function blobSave(blob, name) {
   const a = document.createElement('a');
@@ -2683,8 +2782,10 @@ async function showImportPreview(d) {
 
   const html = `
     <div class="imp-meta">
-      <div>来源 <b>${H(d.filename)}</b> ｜ ${d.header ? `第 ${d.headerRow} 行是表头` : '没有表头，按前三列读'} ｜ 认到 <b>${H(cols)}</b></div>
+      <div>来源 <b>${H(d.filename)}</b>${d.sheet ? ` · 页签 <b>${H(d.sheet)}</b>` : ''} ｜ ${d.header ? `第 ${d.headerRow} 行是表头` : '没有表头，按前三列读'} ｜ 认到 <b>${H(cols)}</b></div>
       <div>${scope}</div>
+      ${d.sheet === '工序参数' ? `<div class="imp-dim">这是线体设置导出的全量表里的「工序参数」页：除名称和做什么，还会把
+        播放方式、单文件上限、允许类型、图片最小尺寸、工序工时一起写回去。内容项（播放项数）不动。</div>` : ''}
     </div>
     <div class="imp-sum">
       <span class="imp-k ok"><b>${c.new}</b> 道新增</span>
@@ -2730,9 +2831,11 @@ async function showImportPreview(d) {
   });
   if (!r) return;
 
+  // extra 要原样带上（播放方式 / 上限 / 工时 / 允许类型 / 最小尺寸），
+  // 少了它预览说有变化、导进去却只改了名字
   const send = d.rows
     .filter((x) => x.status !== 'bad')
-    .map(({ row, modelId, lineId, code, name, note }) => ({ row, modelId, lineId, code, name, note }));
+    .map(({ row, modelId, code, name, note, extra }) => ({ row, modelId, code, name, note, extra }));
 
   let out;
   try { out = await postJson('/api/processes/import', { rows: send, mode: r }); }

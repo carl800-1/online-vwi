@@ -1804,6 +1804,14 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
 .st-table .cell-in.saving { border-color: var(--warn); background: #fff; }
 .st-table .cell-in.saved { border-color: var(--ok); background: var(--ok-bg); }
 
+/* 工时那一格：数字靠右、去掉上下箭头，一列扫下来对得齐 */
+.st-table .cell-num {
+  text-align: right; font-variant-numeric: tabular-nums;
+  -moz-appearance: textfield;
+}
+.st-table .cell-num::-webkit-outer-spin-button,
+.st-table .cell-num::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
 /* 「内容」列：点一下就跳到媒体库对应的工位 */
 .st-table .cell-n {
   border: none; background: none; cursor: pointer; font: inherit;
@@ -2377,6 +2385,8 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
   border-bottom: 1px solid var(--line);
 }
 .pt th i { font-style: normal; font-weight: 400; color: var(--ink3); margin-left: 3px; }
+/* 表头里的单位（工时那列的「秒/件」）。跟 .pt 里同一套写法，别让两处各长一个样 */
+.data-table th i { font-style: normal; font-weight: 400; color: var(--ink3); margin-left: 5px; font-size: 10.5px; }
 .pt td {
   padding: 6px; vertical-align: middle;
   border-bottom: 1px solid var(--line2);

@@ -11,11 +11,19 @@
 // v4.0.0：工序归机种，表里不再有「线体」列。带机种列就按行分流到各自机种，
 // 没有机种列才退回「导到界面当前选中的机种」—— 老的带线体列的文件也能导，
 // 线体列会被识别出来并忽略，不会因为多一列就整表错位。
+//
+// v4.3.0：线体设置导出的那份**全量五页**里的「工序参数」页也能导回来了。
+// 除四列之外还认：播放方式 / 单文件上限 / 允许类型 / 图片最小尺寸 / 工序工时。
+// 认得出哪列就写哪列，认不出（比如老的纯四列表、或者用户自己删了某列）就跳过 ——
+// 所以同一份解析代码同时对付「四列老表」和「十二列全量表」，不用两套。
+//
+// 只读认出「工序参数」页：多页工作簿直接丢进来时按页名找，找不到才退回第一页。
+// 否则拿线体设置导出的那份表来导工序，读到的会是「线体清单」，一屏幕全是不合要求。
 import { q, tx } from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
 import { notifyContentChanged } from '../switch.js';
 import { now, str, uid } from '../util.js';
-import { parseSheet } from '../xlsx.js';
+import { parseSheets } from '../xlsx.js';
 
 /** 工序码：字母或数字开头，允许 - _ . 。中文工序码现场也有，所以不强制字母 */
 const CODE_RE = /^[\w\u4e00-\u9fa5][\w\u4e00-\u9fa5.-]{0,15}$/;
@@ -31,14 +39,29 @@ const CODE_RE = /^[\w\u4e00-\u9fa5][\w\u4e00-\u9fa5.-]{0,15}$/;
  * 「线体」仍然认（为了不让多出来的列把表头顶乱），但映射成 ignore，读到了也不写库。
  */
 const ALIAS = {
-  model: ['机种', '机种名称', '机种编码', '机种代号', '机型', '产品', '产品名称', 'model'],
+  // 「机种编号」是 4.3.0 全量导出里的列名，**必须认**：同一张表里紧跟其后的是
+  // 「产品名称」，而很多机种共用同一个产品名称（一堆「电钻」）。认不出来就会把
+  // 产品名称当成机种去查，几十行里挑出一个碰巧唯一的，其余全报「有重名」。
+  model: ['机种', '机种名称', '机种编码', '机种编号', '机种代号', '机型', '产品',
+    '产品名称', '产品编号', '型号', 'model'],
   line: ['线体', '线体名称', '线体编码', '产线', '产线名称', '生产线', 'line'],
   code: ['工序码', '工序号', '工序编码', '工序编号', '工位码', '工位编号', '编号', 'code', 'op', 'opcode'],
   name: ['名称', '工序名称', '工位名称', '工序名', 'name'],
-  note: ['做什么', '工序内容', '工位内容', '内容', '说明', '描述', '备注', '用途', '要求', 'note', 'remark', 'desc']
+  note: ['做什么', '工序内容', '工位内容', '内容', '说明', '描述', '备注', '用途', '要求', 'note', 'remark', 'desc'],
+
+  // ---- 4.3.0 新认的五列（全量导出里的「工序参数」页带的就是它们）----
+  play: ['播放方式', '播放模式', '播放', 'playmode', 'play'],
+  maxMb: ['单文件上限', '单文件上限mb', '文件大小上限', '大小上限', 'maxmb'],
+  cycleSec: ['工序工时', '工时秒件', '工序工时秒件', '标准工时', '工时', 'cyclesecond', 'cycleseconds'],
+  kinds: ['允许类型', '允许的文件类型', '允许的文件类型与数量', '文件类型', '允许', 'kinds'],
+  minSize: ['图片最小尺寸', '最小尺寸', '最小分辨率', '分辨率', 'minsize']
 };
 
-const FIELDS = ['model', 'line', 'code', 'name', 'note'];
+const FIELDS = ['model', 'line', 'code', 'name', 'note',
+  'play', 'maxMb', 'cycleSec', 'kinds', 'minSize'];
+
+/** 导入时优先认这几页（按顺序），都找不到才退回第一页 */
+const SHEET_ORDER = ['工序参数', '工序清单', '工序表', 'Sheet1'];
 
 function normHeader(s) {
   return String(s == null ? '' : s)
@@ -89,25 +112,87 @@ function indexTargets(list) {
   return out;
 }
 
-function readBuf(req, limit = 8 * 1024 * 1024) {
+// 上限 64 MB：线体设置导出的那份全量表带着 1.6 万道工序，约 10~12 MB。
+// 以前卡 8 MB，全量表根本导不进来。
+//
+// 超限时**不要 req.destroy()** —— 那会让浏览器显示"连接被重置"，看不到这句人话。
+// 改成继续把数据读完但不再往 chunks 里塞，最后统一回一个 400 JSON。
+const MAX_BUF = 64 * 1024 * 1024;
+
+function readBuf(req, limit = MAX_BUF) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    let over = false;
     req.on('data', (c) => {
       size += c.length;
-      if (size > limit) {
-        reject(badRequest('文件太大（上限 8 MB），工序表一般几十 KB'));
-        req.destroy();
-        return;
-      }
+      if (size > limit) { over = true; return; }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('end', () => {
+      if (over) reject(badRequest(`文件太大（上限 ${Math.round(limit / 1048576)} MB）`));
+      else resolve(Buffer.concat(chunks));
+    });
     req.on('error', reject);
   });
 }
 
 const cellAt = (row, i) => (i === undefined || i === null ? '' : str(row && row[i], 500).trim());
+
+/** 「循环播放 / 播一遍停 / loop / once / 循环 / 一遍」→ loop|once|undefined（没填） */
+function parsePlay(v) {
+  const t = String(v || '').trim().toLowerCase();
+  if (!t) return undefined;
+  if (t.includes('once') || t.includes('一遍') || t.includes('停') || t === 'b') return 'once';
+  if (t.includes('loop') || t.includes('循环') || t.includes('重复')) return 'loop';
+  return undefined;   // 认不出就当没填，不瞎猜
+}
+
+/** 数字列：空串 = 没填（undefined），乱填 = NaN（调用方记 bad） */
+function parseNum(v) {
+  const t = String(v == null ? '' : v).trim();
+  if (!t) return undefined;
+  const n = Number(t.replace(/[，,]/g, '.'));
+  return Number.isFinite(n) ? n : NaN;
+}
+
+const KIND_OF_CN = { 图片: 'image', 图像: 'image', image: 'image', img: 'image',
+  pdf: 'pdf', PDF: 'pdf', 文档: 'pdf',
+  视频: 'video', video: 'video', mp4: 'video' };
+
+/**
+ * 「允许类型」解析成 [{kind, minCount}]。
+ * 认这些写法：`图片≥1`、`图片1`、`图片`、`图片≥1；PDF≥1`、`图片,PDF`，
+ * 以及导出时写的 `不限` / 空 → []（= 不限类型，process_req 整表为空）。
+ */
+function parseKinds(v) {
+  const t = String(v || '').trim();
+  if (!t || /^(不限|无|none|-|—)$/i.test(t)) return [];
+  const out = [];
+  for (const part of t.split(/[；;、,，\/|]/)) {
+    const seg = part.trim();
+    if (!seg) continue;
+    const m = seg.match(/^([^≥>\d\s]+)\s*[≥>≥]?\s*(\d*)$/);
+    const cn = m ? m[1] : seg;
+    const kind = KIND_OF_CN[cn] || KIND_OF_CN[cn.toLowerCase()];
+    if (!kind) return null;                  // 认不出类型 → 整格算坏，不半懂半不懂地写
+    if (out.some((x) => x.kind === kind)) continue;
+    out.push({ kind, minCount: m && m[2] ? Number(m[2]) : 0 });
+  }
+  return out.length ? out : [];
+}
+
+/** 「1280×720」「1280x720」「宽≥1280」「高≥720」→ {w,h}；空 → null */
+function parseSize(v) {
+  const t = String(v || '').trim();
+  if (!t) return null;
+  const m = t.match(/(\d+)\s*[×xX*]\s*(\d+)/);
+  if (m) return { w: Number(m[1]), h: Number(m[2]) };
+  const w = t.match(/宽\D*(\d+)/);
+  const h = t.match(/高\D*(\d+)/);
+  if (w || h) return { w: w ? Number(w[1]) : 0, h: h ? Number(h[1]) : 0 };
+  return null;
+}
 
 export function register(router) {
   // 第一步：只解析、只判定，不落库
@@ -122,8 +207,15 @@ export function register(router) {
     if (!buf.length) throw badRequest('文件是空的');
 
     let all;
+    let sheetName = '';
     try {
-      all = parseSheet(buf);
+      const sheets = parseSheets(buf);
+      // 多页工作簿按页名找「工序参数」；单页 / 老文件就用第一页
+      const hit = SHEET_ORDER.map((n) => sheets.find((x) => x.name === n)).find((x) => x && x.rows.length)
+        || sheets.find((x) => x.rows.length)
+        || sheets[0];
+      all = hit.rows;
+      sheetName = hit.name;
     } catch (e) {
       throw badRequest(e.message || '读不出这个文件，请确认是 .xlsx 或 .csv');
     }
@@ -194,20 +286,93 @@ export function register(router) {
       }
       seen.set(key, rowNo);
 
+      // ---- 4.3.0：额外的五列。认得出列才解析，没这列就当老四列表处理 ----
+      // 解析出问题（数字里混了字母、类型名认不出）整行记 bad —— 宁可让人改，
+      // 也别把「8.5」写成 0、把「图片」猜成「视频」。
+      const extra = {};
+      const extraBad = [];
+      if (map.play !== undefined) {
+        const raw = cellAt(r, map.play);
+        const v = parsePlay(raw);
+        if (v) extra.playMode = v;
+        else if (raw) extraBad.push(`播放方式「${raw}」认不出，写「循环播放」或「播一遍停」`);
+      }
+      if (map.maxMb !== undefined) {
+        const v = parseNum(cellAt(r, map.maxMb));
+        if (v === undefined) { /* 留空 = 不改 */ }
+        else if (Number.isNaN(v) || v < 0) extraBad.push('单文件上限要填 0 或正数（0 = 不限）');
+        else extra.maxMb = Math.min(9999, Math.round(v));
+      }
+      if (map.cycleSec !== undefined) {
+        const v = parseNum(cellAt(r, map.cycleSec));
+        if (v === undefined) { /* 留空 = 不改 */ }
+        else if (Number.isNaN(v) || v < 0) extraBad.push('工序工时填秒数（例如 8.5），留空表示还没测');
+        else extra.cycleSec = Math.min(86400, Math.round(v * 10) / 10);
+      }
+      if (map.kinds !== undefined) {
+        const raw = cellAt(r, map.kinds);
+        if (raw) {
+          const k = parseKinds(raw);
+          if (k === null) extraBad.push(`允许类型「${raw}」认不出，写「图片≥1；PDF≥1」或「不限」`);
+          else extra.kinds = k;
+        }
+      }
+      if (map.minSize !== undefined) {
+        const raw = cellAt(r, map.minSize);
+        if (raw) {
+          const sz = parseSize(raw);
+          if (!sz) extraBad.push(`图片最小尺寸「${raw}」认不出，写「1280×720」`);
+          else extra.minSize = sz;
+        }
+      }
+
+      if (extraBad.length) {
+        rec.status = 'bad';
+        rec.reason = extraBad[0];
+        out.push(rec);
+        return;
+      }
+
       const old = q.get('SELECT * FROM process WHERE model_id = ? AND code = ?', rec.modelId, code);
       if (!old) {
         rec.status = 'new';
       } else {
-        const sameName = (old.name || '') === (name || code);
-        const sameNote = (old.note || '') === note;
-        rec.status = sameName && sameNote ? 'same' : 'diff';
-        if (rec.status === 'diff') {
-          const bits = [];
-          if (!sameName) bits.push(`名称 ${old.name || '—'} → ${name || code}`);
-          if (!sameNote) bits.push('「做什么」有改动');
-          rec.detail = bits.join('，');
+        const bits = [];
+        if ((old.name || '') !== (name || code)) bits.push(`名称 ${old.name || '—'} → ${name || code}`);
+        if ((old.note || '') !== note) bits.push('「做什么」有改动');
+
+        // 只在"表里有这一列"时才比对，否则老四列表会把每一行都标成有变化
+        if (extra.playMode !== undefined && (old.play_mode || 'loop') !== extra.playMode) {
+          bits.push(`播放方式 ${old.play_mode === 'once' ? '播一遍停' : '循环播放'} → ${
+            extra.playMode === 'once' ? '播一遍停' : '循环播放'}`);
         }
+        if (extra.maxMb !== undefined && Number(old.max_mb || 0) !== extra.maxMb) {
+          bits.push(`单文件上限 ${Number(old.max_mb || 0)} → ${extra.maxMb} MB`);
+        }
+        if (extra.cycleSec !== undefined && (Number(old.cycle_sec) || 0) !== extra.cycleSec) {
+          bits.push(`工序工时 ${Number(old.cycle_sec) || 0} → ${extra.cycleSec} 秒`);
+        }
+        if (extra.kinds !== undefined) {
+          const cur = q.all('SELECT * FROM process_req WHERE process_id = ? ORDER BY kind', old.id);
+          const curText = cur.map((x) => `${x.kind}:${x.min_count}`).sort().join(',');
+          const newText = extra.kinds.map((x) => `${x.kind}:${x.minCount}`).sort().join(',');
+          if (curText !== newText) bits.push(`允许类型 ${curText || '不限'} → ${newText || '不限'}`);
+        }
+        if (extra.minSize !== undefined) {
+          const img = q.get("SELECT * FROM process_req WHERE process_id = ? AND kind = 'image'", old.id);
+          const cw = img ? Number(img.min_width) || 0 : 0;
+          const ch = img ? Number(img.min_height) || 0 : 0;
+          if (cw !== extra.minSize.w || ch !== extra.minSize.h) {
+            bits.push(`图片最小尺寸 ${cw || ch ? `${cw}×${ch}` : '不限'} → ${extra.minSize.w}×${extra.minSize.h}`);
+          }
+        }
+
+        rec.status = bits.length ? 'diff' : 'same';
+        if (bits.length) rec.detail = bits.join('，');
       }
+
+      // 额外的值随行带着走：写库那一步照着它改，不再回头读一遍表
+      if (Object.keys(extra).length) rec.extra = extra;
       out.push(rec);
     });
 
@@ -228,6 +393,7 @@ export function register(router) {
 
     sendJson(res, 200, {
       filename,
+      sheet: sheetName,
       header: head ? (all[head.index] || []) : null,
       headerRow: head ? head.index + 1 : 0,
       mapping: map,
@@ -285,20 +451,30 @@ export function register(router) {
 
         const old = q.get('SELECT * FROM process WHERE model_id = ? AND code = ?', modelId, code);
 
+        const extra = (r && r.extra) || {};
+
         if (!old) {
           if (mode === 'update-only') { stat.skipped += 1; return; }
           // 排在最后：新导入的工序接在已有工序后面，不插队
           const maxSort = q.get('SELECT COALESCE(MAX(sort),0) s FROM process WHERE model_id = ?', modelId).s;
           const id = uid('pr');
           q.run(
-            'INSERT INTO process(id,model_id,code,name,sort,max_mb,note,play_mode,import_batch,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
-            id, modelId, code, name || code, maxSort + 10, 20, note, 'loop', batchId, ts
+            'INSERT INTO process(id,model_id,code,name,sort,max_mb,note,play_mode,cycle_sec,import_batch,created_at)'
+            + ' VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+            id, modelId, code, name || code, maxSort + 10,
+            extra.maxMb === undefined ? 20 : extra.maxMb, note,
+            extra.playMode || 'loop', extra.cycleSec === undefined ? 0 : extra.cycleSec,
+            batchId, ts
           );
-          // 新工序默认允许图片、至少 1 张，和界面上按「+ 加工序」建出来的一致
-          q.run(
-            'INSERT OR IGNORE INTO process_req(id,process_id,kind,min_count,min_width,min_height) VALUES(?,?,?,?,?,?)',
-            uid('sr'), id, 'image', 1, 1280, 720
-          );
+          if (extra.kinds !== undefined || extra.minSize !== undefined) {
+            applyReqs(id, extra);
+          } else {
+            // 新工序默认允许图片、至少 1 张，和界面上按「+ 加工序」建出来的一致
+            q.run(
+              'INSERT OR IGNORE INTO process_req(id,process_id,kind,min_count,min_width,min_height) VALUES(?,?,?,?,?,?)',
+              uid('sr'), id, 'image', 1, 1280, 720
+            );
+          }
           stat.created += 1;
           touched.add(modelId);
           return;
@@ -307,11 +483,29 @@ export function register(router) {
         if (mode === 'merge') { stat.skipped += 1; return; }
 
         const nextName = str(name || old.name, 40);
-        if ((old.name || '') === nextName && (old.note || '') === note) {
+        const nextMb = extra.maxMb === undefined ? Number(old.max_mb || 0) : extra.maxMb;
+        const nextPlay = extra.playMode === undefined ? (old.play_mode || 'loop') : extra.playMode;
+        const nextSec = extra.cycleSec === undefined ? (Number(old.cycle_sec) || 0) : extra.cycleSec;
+
+        // 允许类型要不要动，先算出来再比 —— 全量导出每行都带「允许类型」，
+        // 不先比一下的话，导一次「什么都没改」的表也会把 1.6 万行全标成更新
+        const needReqs = extra.kinds !== undefined || extra.minSize !== undefined;
+        const curReqs = needReqs ? q.all('SELECT * FROM process_req WHERE process_id = ?', old.id) : [];
+        const nextReqs = needReqs ? planReqs(curReqs, extra) : [];
+        const reqSame = needReqs ? sameReqs(curReqs, nextReqs) : true;
+
+        // 四列老表走到这里时 extra 是空的，行为和 4.2.x 完全一样
+        if ((old.name || '') === nextName && (old.note || '') === note
+            && Number(old.max_mb || 0) === nextMb && (old.play_mode || 'loop') === nextPlay
+            && (Number(old.cycle_sec) || 0) === nextSec && reqSame) {
           stat.kept += 1; // 内容一模一样，不算更新，省得库里白改一遍
           return;
         }
-        q.run('UPDATE process SET name = ?, note = ? WHERE id = ?', nextName, note, old.id);
+        q.run(
+          'UPDATE process SET name = ?, note = ?, max_mb = ?, play_mode = ?, cycle_sec = ? WHERE id = ?',
+          nextName, note, nextMb, nextPlay, nextSec, old.id
+        );
+        if (needReqs && !reqSame) writeReqs(old.id, nextReqs);
         stat.updated += 1;
         touched.add(modelId);
       });
@@ -404,4 +598,69 @@ async function handleLegacyImport(req, res) {
   });
   if (stat.created || stat.updated) notifyContentChanged();
   sendJson(res, 200, { ...stat, mode, batchId: stat.created ? batchId : '', touched: [] });
+}
+
+/**
+ * 按 extra 重写一道工序的 process_req（允许哪些类型、各要几份、图片最小尺寸）。
+ *
+ * 「允许类型」是**整份替换**语义：表里写了什么就是什么，没写到的类型等于取消允许。
+ * 只给了「图片最小尺寸」没给类型时，只改 image 那一条的宽高，不动别的。
+ * 结果是空表 = 不限类型（老库和界面都按这个口径，见 process_req 建表注释）。
+ */
+function planReqs(cur, extra) {
+  const byKind = new Map(cur.map((r) => [r.kind, r]));
+
+  let list;
+  if (extra.kinds !== undefined) {
+    list = extra.kinds.map((k) => {
+      const had = byKind.get(k.kind);
+      return {
+        kind: k.kind,
+        minCount: Math.max(0, Number(k.minCount) || 0),
+        w: had ? Number(had.min_width) || 0 : 0,
+        h: had ? Number(had.min_height) || 0 : 0
+      };
+    });
+  } else {
+    list = cur.map((r) => ({
+      kind: r.kind,
+      minCount: Number(r.min_count) || 0,
+      w: Number(r.min_width) || 0,
+      h: Number(r.min_height) || 0
+    }));
+  }
+
+  if (extra.minSize !== undefined) {
+    const img = list.find((x) => x.kind === 'image');
+    // 没允许图片时尺寸没有意义，忽略而不是偷偷把图片类型加回来
+    if (img) { img.w = Math.max(0, extra.minSize.w || 0); img.h = Math.max(0, extra.minSize.h || 0); }
+  }
+  return list;
+}
+
+const reqKey = (list) => list
+  .map((r) => `${r.kind}:${r.minCount}:${r.w}:${r.h}`).sort().join('|');
+
+/** 表里写的和库里一模一样 → 不必写库（全量导出每行都带「允许类型」，否则每次导都全量更新一遍） */
+function sameReqs(cur, next) {
+  return reqKey(cur.map((r) => ({
+    kind: r.kind, minCount: Number(r.min_count) || 0,
+    w: Number(r.min_width) || 0, h: Number(r.min_height) || 0
+  }))) === reqKey(next);
+}
+
+function writeReqs(processId, list) {
+  q.run('DELETE FROM process_req WHERE process_id = ?', processId);
+  for (const r of list) {
+    q.run(
+      'INSERT INTO process_req(id,process_id,kind,min_count,min_width,min_height) VALUES(?,?,?,?,?,?)',
+      uid('sr'), processId, r.kind, r.minCount, r.w, r.h
+    );
+  }
+}
+
+/** 新建工序时用：没有 reqs 列就直接按默认（允许图片≥1、1280×720）建 */
+function applyReqs(processId, extra) {
+  const cur = q.all('SELECT * FROM process_req WHERE process_id = ?', processId);
+  writeReqs(processId, planReqs(cur, extra));
 }

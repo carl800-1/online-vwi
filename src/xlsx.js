@@ -176,33 +176,69 @@ function parseText(buf) {
   return splitCsv(text.replace(/^\uFEFF/, ''));
 }
 
+/** 从 xl/workbook.xml + 它的 rels 里取出「第几页叫什么」 */
+function sheetIndex(files) {
+  const wb = files.get('xl/workbook.xml');
+  if (!wb) return [];
+  const rels = files.get('xl/_rels/workbook.xml.rels');
+  const target = new Map();
+  if (rels) {
+    for (const m of rels.toString('utf8').matchAll(/<Relationship\b[^>]*>/g)) {
+      const id = (m[0].match(/\bId="([^"]+)"/) || [])[1];
+      const t = (m[0].match(/\bTarget="([^"]+)"/) || [])[1];
+      if (id && t) target.set(id, t.replace(/^\.?\//, '').replace(/^xl\//, ''));
+    }
+  }
+  const out = [];
+  for (const m of wb.toString('utf8').matchAll(/<sheet\b[^>]*>/g)) {
+    const name = decodeXml((m[0].match(/\bname="([^"]*)"/) || [])[1] || '');
+    const rid = (m[0].match(/\br:id="([^"]+)"/) || [])[1];
+    const file = rid && target.get(rid);
+    if (file) out.push({ name, path: `xl/${file}` });
+  }
+  return out;
+}
+
 /**
- * 入口：给一段文件内容，回二维字符串数组。
- * 靠前两个字节判断是不是 ZIP（PK），不是就按纯文本表格读。
+ * 读**多页**工作簿：回 [{ name, rows }]，顺序与工作簿里的页签一致。
+ * 导出改成多页之后（线体设置的全量表），导入得先认页名再认列名 ——
+ * 只读第一页的话，一张五页的表导进来只会读到「线体清单」。
  */
-export function parseSheet(buf) {
-  // 老版 .xls 是 OLE 复合文档（D0 CF 11 E0），不是 ZIP。当文本读会得到一屏乱码，
-  // 所以这里直接拦住，让现场另存为 .xlsx —— 比"导入成功 0 行"好排查得多。
+export function parseSheets(buf) {
   if (buf.length > 8 && buf[0] === 0xd0 && buf[1] === 0xcf && buf[2] === 0x11 && buf[3] === 0xe0) {
     throw new Error('这是老版 .xls（97-2003），请在 Excel 里「另存为」.xlsx 或 .csv 再导入');
   }
-
   const isZip = buf.length > 4 && buf[0] === 0x50 && buf[1] === 0x4b;
-  if (!isZip) return tidy(parseText(buf));
+  if (!isZip) return [{ name: 'Sheet1', rows: tidy(parseText(buf)) }];
 
   const files = unzip(buf);
   const sstXml = files.get('xl/sharedStrings.xml');
   const sst = sstXml ? parseSst(sstXml.toString('utf8')) : [];
 
-  let path = 'xl/worksheets/sheet1.xml';
-  if (!files.has(path)) {
-    const first = [...files.keys()]
+  let list = sheetIndex(files).filter((x) => files.has(x.path));
+  if (!list.length) {
+    // workbook.xml 读不出来（某些工具生成的文件没有），退回按文件名排序
+    list = [...files.keys()]
       .filter((k) => /^xl\/worksheets\/sheet\d+\.xml$/.test(k))
-      .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }))[0];
-    if (!first) throw new Error('xlsx 里没有找到工作表');
-    path = first;
+      .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }))
+      .map((k, i) => ({ name: `Sheet${i + 1}`, path: k }));
   }
-  return tidy(parseSheetXml(files.get(path).toString('utf8'), sst));
+  if (!list.length) throw new Error('xlsx 里没有找到工作表');
+
+  return list.map((x) => ({
+    name: x.name,
+    rows: tidy(parseSheetXml(files.get(x.path).toString('utf8'), sst))
+  }));
+}
+
+/**
+ * 入口：给一段文件内容，回二维字符串数组（第一页）。
+ * 靠前两个字节判断是不是 ZIP（PK），不是就按纯文本表格读。
+ */
+export function parseSheet(buf) {
+  // 老版 .xls 是 OLE 复合文档（D0 CF 11 E0），不是 ZIP。当文本读会得到一屏乱码，
+  // 所以这里直接拦住，让现场另存为 .xlsx —— 比"导入成功 0 行"好排查得多。
+  return parseSheets(buf)[0].rows;
 }
 
 // ============================================================
@@ -321,13 +357,17 @@ function sheetXml(rows, widths, freeze) {
         `<col min="${i + 1}" max="${i + 1}" width="${w}" customWidth="1"/>`).join('') + '</cols>'
     : '';
 
-  // 全部用 inlineStr：不建 sharedStrings 表，而且「0010」这种带前导零的工序码
-  // 不会被 Excel 当成数字吃掉
+  // 字符串一律用 inlineStr：不建 sharedStrings 表，而且「0010」这种带前导零的
+  // 工序码不会被 Excel 当成数字吃掉。
+  // **传进来的数字（typeof number）写成真数值单元格**（t="n"）：工位数、节拍、
+  // 工时这些要能在 Excel 里直接求和、排序、画图。之前全按文本写，Excel 会在左上角
+  // 挂一片绿三角，SUM 出来是 0 —— 一份"含全部参数"的表，数字不能用就没意义了。
   const body = rows.map((r, ri) => {
     const cells = (r || []).map((v, ci) => {
+      const ref = `${colName(ci)}${ri + 1}`;
       if (v === null || v === undefined || v === '') return '';
-      return `<c r="${colName(ci)}${ri + 1}" t="inlineStr"><is><t xml:space="preserve">${
-        escXml(v)}</t></is></c>`;
+      if (typeof v === 'number' && Number.isFinite(v)) return `<c r="${ref}"><v>${v}</v></c>`;
+      return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${escXml(v)}</t></is></c>`;
     }).join('');
     return `<row r="${ri + 1}">${cells}</row>`;
   }).join('');
