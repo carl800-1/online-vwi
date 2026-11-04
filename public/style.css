@@ -711,6 +711,16 @@ tr.row-cur td.model { box-shadow: inset 3px 0 0 var(--brand); }
 }
 .mediacard .meta .s { font-size: 11px; color: var(--ink3); margin-top: 3px; }
 .mediacard .meta .s b { color: var(--ink2); font-weight: 600; }
+/* 文件在盘上的位置：等宽、单行、超出省略，鼠标悬停看全路径 */
+.mediacard .meta .s.path {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 10.5px;
+  color: var(--ink3);
+  opacity: .85;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 /* ---------- 右侧抽屉：清单编辑 ---------- */
 .overlay {

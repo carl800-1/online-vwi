@@ -1816,7 +1816,8 @@ $('mdMeta').addEventListener('click', async (e) => {
   if (act.dataset.mact === 'ren') {
     const r = await dialog({
       title: '改机种',
-      message: '机种编号是终端和工艺文件里对外的标识；改它不影响已配的内容。',
+      message: '机种编号是终端和工艺文件里对外的标识，改它不影响已配的内容；'
+        + '产品名称改了，媒体库里这个机种的文件夹会跟着改名（位置不变，还是那些文件）。',
       fields: [
         { key: 'code', label: '机种编号', value: m.code },
         { key: 'name', label: '产品名称', value: m.name },
@@ -2974,10 +2975,17 @@ $('stAddBtn').addEventListener('click', async () => {
 });
 
 // ==================== 上传 ====================
-function uploadFile(file, onProgress) {
+/**
+ * 上传。4.4.0 起文件按「机种 / 工序」落盘，所以要带上归属：
+ * 拖进哪张工序卡就落到 media/<机种编号>/<工序码>/，媒体库右上角直接传的进 _未分配。
+ */
+function uploadFile(file, onProgress, owner) {
   return new Promise((resolve, reject) => {
+    const qs = new URLSearchParams({ filename: file.name });
+    if (owner && owner.modelId) qs.set('modelId', owner.modelId);
+    if (owner && owner.processId) qs.set('processId', owner.processId);
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/media/upload?filename=' + encodeURIComponent(file.name));
+    xhr.open('POST', '/api/media/upload?' + qs.toString());
     xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total);
@@ -3042,7 +3050,8 @@ async function handleFiles(files) {
   for (const f of list) {
     const row = uplRow(f.name);
     try {
-      const d = await uploadFile(f, (v) => row.set(v, v >= 1 ? '处理中' : Math.round(v * 100) + '%'));
+      const d = await uploadFile(f, (v) => row.set(v, v >= 1 ? '处理中' : Math.round(v * 100) + '%'),
+        { modelId: st.modelId || S.modelId, processId: sid });
 
       if (d.kind === 'pdf') {
         for (const p of d.pages || []) {
@@ -3110,13 +3119,14 @@ async function loadMedia() {
     S.media = d;
     $('mediaTxt').textContent = `${d.stats.count} 个文件 · ${fmtBytes(d.stats.bytes)}`;
     $('mediagrid').innerHTML = d.media.map((m) => `
-      <div class="mediacard">
+      <div class="mediacard" title="${H(m.path || m.name)}">
         <div class="thumb">${m.kind === 'image'
           ? `<img src="${H(m.url)}" loading="lazy" alt="">`
-          : (m.kind === 'video' ? '视频' : 'PDF 页')}</div>
+          : (m.kind === 'video' ? '视频' : (m.kind === 'source' ? 'PDF 原件' : '文件'))}</div>
         <div class="meta">
           <div class="t" title="${H(m.name)}">${H(m.name)}</div>
           <div class="s">${fmtBytes(m.bytes)}${m.width ? ` · ${m.width}×${m.height}` : ''} · 被引用 <b>${m.used}</b> 次</div>
+          <div class="s path" title="${H(m.path)}">${H(m.path || '（老文件，未归档）')}</div>
         </div>
       </div>
     `).join('') || '<div class="empty" style="grid-column:1/-1">媒体库是空的。点右上角「上传文件」，或在工序里直接拖进去。</div>';
@@ -3140,8 +3150,10 @@ $('uploadBtn').addEventListener('click', () => {
   inp.onchange = async () => {
     for (const f of inp.files) {
       try {
+        // 这一页是「全库查询」，不认机种：文件先进 media/_未分配/，
+        // 等在哪道工序里绑定它，就自动搬进那个机种的工序目录。
         const d = await uploadFile(f);
-        toast(`已上传 ${d.kind === 'pdf' ? f.name + '（拆成 ' + d.pageCount + ' 页）' : d.name}${d.duplicated ? '（已存在）' : ''}`, 'ok');
+        toast(`已上传 ${d.kind === 'pdf' ? f.name + '（拆成 ' + d.pageCount + ' 页）' : d.name}${d.duplicated ? '（已存在）' : ''}，绑定工序后自动归档`, 'ok');
       } catch (e) { toast(e.message, 'err'); }
     }
     loadMedia();

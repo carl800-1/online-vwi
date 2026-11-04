@@ -136,9 +136,13 @@ async function upload(buf, name) {
   console.log('\n[1] 上传与清单');
   const u1 = await upload(tinyPng(20, 80, 160), 'op3-a.png');
   const u2 = await upload(tinyPng(160, 60, 40), 'op3-b.png');
-  const u3 = await upload(tinyPng(20, 80, 160), 'op3-a-copy.png');
+  // 4.4.0 起文件按「机种/工序/原文件名」实存：同名同内容复用一份，
+  // 不同文件名各存一份 —— 文件名是现场能认出来的东西，不因内容相同就合并掉。
+  const u3 = await upload(tinyPng(20, 80, 160), 'op3-a.png');
+  const u3b = await upload(tinyPng(20, 80, 160), 'op3-a-copy.png');
   ok(u1.status === 200 && u1.body.kind === 'image', '上传图片成功');
-  ok(u3.body.duplicated === true && u3.body.id === u1.body.id, '同文件二次上传识别为重复（不重复占盘）');
+  ok(u3.body.duplicated === true && u3.body.id === u1.body.id, '同名同内容二次上传识别为重复（不重复占盘）');
+  ok(u3b.body.id !== u1.body.id, '不同文件名各存一份（实存的代价，换来目录可读）');
   ok(u1.body.width === 8 && u1.body.height === 8, '服务端解析出图片宽高');
 
   let r = await put('/api/playlist', {

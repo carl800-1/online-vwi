@@ -262,8 +262,68 @@ export function openDb(dir) {
   db.exec(SCHEMA);
   migrate();
   migrateProd();     // 4.2.1 的增量：不放在 migrate() 里，因为它对新库和老库都要跑
+  migrateMedia();    // 4.4.0 的增量：media 换成「按机种/工序实存」，同样两头都要跑
   ensureSettings();
   return db;
+}
+
+/**
+ * 4.4.0：媒体从「全局内容寻址池」改成「按机种/工序实存」。
+ *
+ * 为什么要重建整张表：老 schema 里 `sha256 UNIQUE`，一个内容全库只能有一条记录。
+ * 实存之后同一张标准图在两个机种下各有一份文件，必须是两条记录 —— 而 SQLite
+ * 不能 DROP CONSTRAINT，只能建新表搬过去。搬家时 rel_path 一律留空：
+ * 空 = 这条还是老结构、文件仍在 media/xx/<sha>.<ext>，取文件时自动回落，
+ * 所以老库不需要搬文件，打开就能用。
+ *
+ * item 表有 `REFERENCES media(id)`，DROP 前必须关外键（PRAGMA 只能在事务外设）。
+ */
+function migrateMedia() {
+  const cols = new Set(q.all('PRAGMA table_info(media)').map((r) => r.name));
+  if (cols.has('rel_path')) return;
+
+  db.exec('PRAGMA foreign_keys = OFF');
+  try {
+    db.exec('BEGIN');
+    db.exec(`CREATE TABLE media_v2 (
+      id          TEXT PRIMARY KEY,
+      sha256      TEXT NOT NULL,
+      model_id    TEXT NOT NULL DEFAULT '',
+      process_id  TEXT NOT NULL DEFAULT '',
+      rel_path    TEXT NOT NULL DEFAULT '',
+      kind        TEXT NOT NULL,
+      ext         TEXT NOT NULL DEFAULT 'bin',
+      mime        TEXT NOT NULL DEFAULT 'application/octet-stream',
+      bytes       INTEGER NOT NULL DEFAULT 0,
+      width       INTEGER NOT NULL DEFAULT 0,
+      height      INTEGER NOT NULL DEFAULT 0,
+      duration_ms INTEGER NOT NULL DEFAULT 0,
+      name        TEXT NOT NULL DEFAULT '',
+      src_sha     TEXT NOT NULL DEFAULT '',
+      page_no     INTEGER NOT NULL DEFAULT 0,
+      created_at  INTEGER NOT NULL
+    )`);
+    // 归属能从 item 反推的就先填上（仅供界面显示；取文件仍按 rel_path 为空回落 CAS）
+    db.exec(`INSERT INTO media_v2
+      (id,sha256,model_id,process_id,rel_path,kind,ext,mime,bytes,width,height,duration_ms,name,src_sha,page_no,created_at)
+      SELECT id, sha256,
+             COALESCE((SELECT i.model_id   FROM item i WHERE i.media_id = media.id LIMIT 1), ''),
+             COALESCE((SELECT i.process_id FROM item i WHERE i.media_id = media.id LIMIT 1), ''),
+             '', kind, ext, mime, bytes, width, height, duration_ms, name, src_sha, page_no, created_at
+        FROM media`);
+    db.exec('DROP TABLE media');
+    db.exec('ALTER TABLE media_v2 RENAME TO media');
+    // sha256 从唯一键降级成普通索引：同内容允许多份（每个机种一份），校验和 ETag 仍靠它
+    db.exec('CREATE INDEX IF NOT EXISTS idx_media_sha ON media(sha256)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_media_owner ON media(model_id, process_id)');
+    db.exec('COMMIT');
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* 已经回滚过就算了 */ }
+    throw e;
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON');
+  }
+  console.log('[db] media 表已升级：按机种/工序实存（新增 model_id / process_id / rel_path）');
 }
 
 function backupBeforeV4(dbPath) {

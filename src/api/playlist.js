@@ -5,6 +5,7 @@
 // processId 直接定位，stationId 也收（老脚本可能还在传）。
 // 新代码请直接用 PUT /api/processes/:id。
 import { q, processesOf, processById, saveProcess } from '../db.js';
+import { adoptMedia } from '../media.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
 import { notifyContentChanged } from '../switch.js';
 
@@ -99,6 +100,10 @@ export function register(router) {
     });
 
     saveProcess(modelId, p.id, { items: rows });
+    // 池子里的文件搬到这道工序的目录（已有归属的不动）
+    try { adoptMedia(rows.map((r) => r.mediaId), modelId, p.id); } catch (e) {
+      console.warn('[media] 认领文件失败：', e.message);
+    }
     notifyContentChanged();
 
     sendJson(res, 200, { ok: true, count: rows.length, items: loadItems(p.id) });

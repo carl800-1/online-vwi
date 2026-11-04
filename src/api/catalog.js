@@ -12,6 +12,7 @@ import {
   q, tx, coverage, processesOf, processById, saveProcess, modelsOfLine, modelLines, setModelLines,
   createDefaultProcesses, setLineStatus, LINE_STATUS, lines
 } from '../db.js';
+import { adoptMedia, moveDir, modelDirOf, moveProcessFolder } from '../media.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
 import { getState, resetLine } from '../switch.js';
 import { now, uid, str, int } from '../util.js';
@@ -247,9 +248,18 @@ export function register(router) {
       if (code !== m.code && q.get('SELECT id FROM model WHERE code = ?', code)) {
         throw badRequest(`机种 ${code} 已存在`);
       }
+      // 媒体目录是按机种编号建的（media/X200/OP1/…），编号一改整个目录跟着改，
+      // 否则那些文件会突然变成"没有归属"，在媒体库里看着像丢了。
+      const fromDir = code !== m.code ? modelDirOf(m) : '';
       q.run('UPDATE model SET code = ? WHERE id = ?', code, m.id);
+      if (fromDir) {
+        try { moveDir(fromDir, modelDirOf({ ...m, code })); } catch (e) {
+          console.warn(`[media] 机种目录改名失败（${m.code} → ${code}）：`, e.message);
+        }
+      }
     }
     if (body.name !== undefined) {
+      // 名称不进路径：改产品名称只是换个显示，媒体目录一点不动
       q.run('UPDATE model SET name = ? WHERE id = ?', str(body.name, 80).trim() || m.code, m.id);
     }
     if (body.enabled !== undefined) q.run('UPDATE model SET enabled = ? WHERE id = ?', body.enabled ? 1 : 0, m.id);
@@ -340,6 +350,10 @@ export function register(router) {
           throw badRequest(`「${p.model_id}」已经有工序 ${code}`);
         }
         q.run('UPDATE process SET code = ? WHERE id = ?', code, p.id);
+        // 目录是按工序码分的（media/X200/OP1/），改码跟着改目录
+        try { moveProcessFolder(p.model_id, p.code, code); } catch (e) {
+          console.warn(`[media] 工序目录改名失败（${p.code} → ${code}）：`, e.message);
+        }
         renamed = 1;
       }
     }
@@ -350,6 +364,13 @@ export function register(router) {
       .some((k) => body[k] !== undefined);
     if (touched) {
       saveProcessBody(p.model_id, p.id, body);
+      // 先在媒体库里传、后来才绑到工序的文件，第一次绑定就搬进正式目录；
+      // 已经有归属的一律不动（跨机种共用是现场故意为之，偷偷搬会让另一块屏黑掉）
+      if (Array.isArray(body.items)) {
+        try { adoptMedia(body.items.map((x) => x && x.mediaId), p.model_id, p.id); } catch (e) {
+          console.warn('[media] 认领文件失败：', e.message);
+        }
+      }
     }
 
     sendJson(res, 200, {
