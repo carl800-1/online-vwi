@@ -26,6 +26,7 @@ import { register as registerPlaylist } from './api/playlist.js';
 import { register as registerMediaApi } from './api/mediaApi.js';
 import { register as registerState } from './api/state.js';
 import { register as registerDisplay } from './api/display.js';
+import { register as registerClients } from './api/clients.js';
 import { register as registerBoard } from './api/board.js';
 import { register as registerImport } from './api/import.js';
 import { register as registerExport } from './api/export.js';
@@ -133,6 +134,7 @@ export function startServer(opts = {}) {
   registerMediaApi(router);
   registerState(router);
   registerDisplay(router);
+  registerClients(router);
   registerBoard(router);
   registerImport(router);
   registerExport(router);

@@ -243,6 +243,43 @@ CREATE TABLE IF NOT EXISTS prod_input (
   PRIMARY KEY(line_id, day, seq)
 );
 CREATE INDEX IF NOT EXISTS idx_prodinput_day ON prod_input(day);
+
+-- ============ 客户端（屏）与工序绑定（4.4.0） ============
+-- 为什么要有这两张表：4.0.0 之后服务端只知道"L1 的 OP10 有人在"（在线表的键是
+-- lineId|op），**机器本身是匿名的**。于是"哪台屏该放哪道工序"只能跑到那台屏前面
+-- 去设 —— 三条线 × 二三十道工序，逐台点必然点错。
+--
+-- 现在把"设备"单独记一份：谁连上来了（ip / 计算机名 / 自报的线体工序 / 最后心跳），
+-- 再记一条绑定（某条线的某道工序 ↔ 某台屏）。绑定**不参与播放**：屏上还是按自己
+-- 填的线号工序号拉内容，绑定的用处是"知道这道工序该是哪台屏"和"发现它被改了号"。
+--
+-- id 现在就是 IP：终端 1.7.1 一行不改就能进这张表。等终端下次出包上报
+-- 计算机名后再按 name 显示，id 仍是 IP（换 IP 等于换一台，绑定要重做，说清楚了）。
+CREATE TABLE IF NOT EXISTS client (
+  id          TEXT PRIMARY KEY,           -- = ip
+  ip          TEXT NOT NULL DEFAULT '',
+  name        TEXT NOT NULL DEFAULT '',   -- 计算机名；终端 1.8 之前一直是空
+  line_code   TEXT NOT NULL DEFAULT '',   -- 它自己填的线号（已按服务端回落后解析）
+  op_code     TEXT NOT NULL DEFAULT '',   -- 它自己填的工序号
+  ver         TEXT NOT NULL DEFAULT '',
+  res         TEXT NOT NULL DEFAULT '',
+  first_seen  INTEGER NOT NULL DEFAULT 0,
+  last_seen   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_client_seen ON client(last_seen);
+
+-- 一道工序只绑一台屏：主键 (line_id, process_code)。
+-- process_code 而不是 process_id —— 工序码跨机种通用，换型时工位上的屏不该变，
+-- 绑定要跟着"这道工序"而不是"这个机种的这道工序"。
+CREATE TABLE IF NOT EXISTS client_bind (
+  line_id      TEXT NOT NULL,
+  process_code TEXT NOT NULL,
+  client_id    TEXT NOT NULL,
+  bound_at     INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (line_id, process_code)
+);
+-- 反过来也成立：一台屏只能占一个工位，否则"这台屏到底播哪道工序"说不清
+CREATE UNIQUE INDEX IF NOT EXISTS ux_bind_client ON client_bind(client_id);
 `;
 
 let db = null;
@@ -1222,6 +1259,94 @@ function ensureSettings() {
   for (const [k, v] of init) {
     q.run('INSERT OR IGNORE INTO setting(key, value) VALUES(?, ?)', k, v);
   }
+}
+
+// ---------- 客户端（屏）与工序绑定 ----------
+/**
+ * 心跳：登记 / 刷新一台客户端。id 现在就是 IP。
+ *
+ * 为什么 id 用 IP：终端 1.7.1 本来就每 5 秒发一次 telemetry，服务端从 socket 就能
+ * 拿到地址，**终端一行不用改**就能进这张表。代价写在明处：DHCP 换了地址就算新设备，
+ * 原来的绑定要重做。等终端下次出包上报计算机名，列表里就按名字显示，id 仍是 IP。
+ *
+ * name / ver / res 用"有值才覆盖"：老终端不报计算机名，不能让空串把之前存的抹掉。
+ */
+export function upsertClient({ ip, name, lineCode, opCode, ver, res }) {
+  const id = String(ip || '').trim();
+  if (!id) return null;
+  const t = now();
+  q.run(
+    `INSERT INTO client(id, ip, name, line_code, op_code, ver, res, first_seen, last_seen)
+     VALUES(?,?,?,?,?,?,?,?,?)
+     ON CONFLICT(id) DO UPDATE SET
+       name      = CASE WHEN excluded.name <> '' THEN excluded.name ELSE client.name END,
+       line_code = excluded.line_code,
+       op_code   = excluded.op_code,
+       ver       = CASE WHEN excluded.ver <> '' THEN excluded.ver ELSE client.ver END,
+       res       = CASE WHEN excluded.res <> '' THEN excluded.res ELSE client.res END,
+       last_seen = excluded.last_seen`,
+    id, id, str(name, 64), str(lineCode, 16), str(opCode, 16), str(ver, 24), str(res, 24), t, t
+  );
+  return q.get('SELECT * FROM client WHERE id = ?', id);
+}
+
+/** 全部客户端，最近有心跳的排前面 */
+export function clients() {
+  return q.all('SELECT * FROM client ORDER BY last_seen DESC');
+}
+
+export function clientOf(id) {
+  return q.get('SELECT * FROM client WHERE id = ?', String(id || ''));
+}
+
+/** 这道工序绑的是哪台屏 */
+export function bindOfProcess(lineId, processCode) {
+  return q.get('SELECT * FROM client_bind WHERE line_id = ? AND process_code = ?',
+    String(lineId || ''), String(processCode || ''));
+}
+
+/** 这台屏被绑到哪个工位 */
+export function bindOfClient(clientId) {
+  return q.get('SELECT * FROM client_bind WHERE client_id = ?', String(clientId || ''));
+}
+
+export function binds(lineId = '') {
+  return lineId
+    ? q.all('SELECT * FROM client_bind WHERE line_id = ? ORDER BY process_code', String(lineId))
+    : q.all('SELECT * FROM client_bind');
+}
+
+/**
+ * 绑定：这道工序 ↔ 这台屏。
+ *
+ * 两条唯一纪律都在这一处落实（表上有主键和唯一索引兜底）：
+ *   ① 一道工序只一台屏 —— 先解掉这道工序原来的
+ *   ② 一台屏只占一个工位 —— 先解掉这台屏原来的
+ *
+ * **绑定不动播放**：屏上仍旧按它自己填的线号 / 工序号拉清单。绑定只是台账，
+ * 以及用来发现"这台屏被改成别的工位了"。所以这里既不推 contentRev，也不碰 item。
+ */
+export function bindClient(clientId, lineId, processCode) {
+  const cid = String(clientId || '').trim();
+  const lid = String(lineId || '').trim();
+  const pc = String(processCode || '').trim();
+  if (!cid || !lid || !pc) throw new Error('客户端、线体、工序都不能为空');
+  tx(() => {
+    q.run('DELETE FROM client_bind WHERE client_id = ?', cid);
+    q.run('DELETE FROM client_bind WHERE line_id = ? AND process_code = ?', lid, pc);
+    q.run('INSERT INTO client_bind(line_id, process_code, client_id, bound_at) VALUES(?,?,?,?)',
+      lid, pc, cid, now());
+  });
+  return bindOfProcess(lid, pc);
+}
+
+export function unbindClient(clientId) {
+  return q.run('DELETE FROM client_bind WHERE client_id = ?', String(clientId || '')).changes;
+}
+
+export function unbindProcess(lineId, processCode) {
+  return q.run('DELETE FROM client_bind WHERE line_id = ? AND process_code = ?',
+    String(lineId || ''), String(processCode || '')).changes;
 }
 
 // ---------- 线体 ----------

@@ -1,5 +1,5 @@
 // 切换与状态：这是整个系统最核心的三个接口，全部按线体独立
-import { q, activeLine, lineById, lineByCode, processesOf } from '../db.js';
+import { q, activeLine, lineById, lineByCode, processesOf, upsertClient } from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
 import {
   getState, switchTo, markReady, waitForChange, cancelSwitch, touch,
@@ -135,6 +135,25 @@ export function register(router) {
     if (body.done !== undefined || body.total !== undefined) {
       setProgress(term.line.id, term.process.code, body.done, body.total, body.model);
     }
+
+    // 顺便把"这台机器"记进 client 表（4.4.0）。
+    // 为什么挂在心跳上而不是新开一条上报：终端已经在发这个请求了，**老终端一行不改**
+    // 就能出现在管理端的客户端列表里。新开一条会变成两条心跳互相打架，还多占一次连接。
+    //
+    // 线号记的是 resolveTerminal 解析后的**实际线体**，不是终端填的那个（可能是空 =
+    // 跟随服务端）。否则"跟随服务端"的屏永远和绑定对不上，一绑就显示改配了。
+    //
+    // body.ip 只给自动化测试用（本机跑多个"屏"时 socket 都是 127.0.0.1）。
+    const ip = String(body.ip || ctx.ip || '').replace(/^::ffff:/, '');
+    upsertClient({
+      ip,
+      name: body.name,
+      lineCode: term.line.code,
+      opCode: term.process.code,
+      ver: body.ver,
+      res: body.res
+    });
+
     sendJson(res, 200, { ok: true, ts: now() });
   });
 

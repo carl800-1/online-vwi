@@ -36,6 +36,12 @@ function lineStats(l) {
     // 「可生产机种」：机种设置里勾了这条线的那些机种
     modelCount: models.length,
     modelCodes: models.map((m) => m.code),
+    // 这条线有几道工序 = 它当前机种有几道工序（工序归机种，线体本身没有工序）。
+    // 还没指定机种时退回"可生产机种的工序码去重数"，让装机向导不至于显示 0。
+    // 用一次查询而不是 processesOf 循环：/api/lines 是高频接口，1107 个机种时扛不住。
+    processes: (st.currentModelId
+      ? q.get('SELECT COUNT(*) n FROM process WHERE model_id = ?', st.currentModelId).n
+      : q.get('SELECT COUNT(DISTINCT p.code) n FROM process p JOIN model_line ml ON ml.model_id = p.model_id WHERE ml.line_id = ?', l.id).n) || 0,
     currentModelId: st.currentModelId,
     currentModelCode: cur?.code || '',
     nextModelCode: next?.code || '',
@@ -293,12 +299,65 @@ export function register(router) {
   });
 
   // ---------- 工序（= 内容槽位）----------
+  /**
+   * 工序清单。两种问法：
+   *   ?modelId=  管理端：这个机种有哪些工序
+   *   ?lineId=   终端 1.7.x 的装机向导：这条线有哪些工序
+   *
+   * 第二种是**兼容口子，不能删**：屏第一次装机时，人只知道"这是二线的第几道工序"，
+   * 不知道机种。4.0.0 把工序并进机种之后这个参数就废了，结果向导点「检测」
+   * 直接 400「机种不存在」，新屏一台都装不上（老屏有配置，所以现场没暴露）。
+   *
+   * 回答方式：按这条线的**当前机种**；还没指定机种时，退化成"这条线可生产
+   * 机种的工序码去重合集"，并把 from 标成 union，让调用方自己决定要不要提示。
+   */
   router.get('/api/processes', (req, res, ctx) => {
-    const model = mustModel(ctx.query.modelId);
+    const mid = String(ctx.query.modelId || '').trim();
+
+    if (mid) {
+      const model = mustModel(mid);
+      sendJson(res, 200, {
+        model: { id: model.id, code: model.code, name: model.name, enabled: !!model.enabled },
+        lines: modelLines(model.id).map((l) => ({ id: l.id, code: l.code, name: l.name, status: l.status })),
+        processes: processesOf(model.id)
+      });
+      return;
+    }
+
+    const lid = String(ctx.query.lineId || '').trim();
+    const lcode = String(ctx.query.lineCode || '').trim();
+    const line = lid
+      ? q.get('SELECT * FROM line WHERE id = ?', lid)
+      : (lcode
+        ? q.get('SELECT * FROM line WHERE code = ?', lcode)
+        : q.get('SELECT * FROM line WHERE enabled = 1 ORDER BY sort, code LIMIT 1'));
+    if (!line) throw badRequest(lid || lcode ? `线体不存在：${lid || lcode}` : '还没有启用任何线体');
+
+    const cur = getState(line.id).currentModelId;
+    if (cur) {
+      const model = q.get('SELECT * FROM model WHERE id = ?', cur);
+      sendJson(res, 200, {
+        line: { id: line.id, code: line.code, name: line.name },
+        model: model ? { id: model.id, code: model.code, name: model.name } : null,
+        from: 'current',
+        processes: processesOf(cur)
+      });
+      return;
+    }
+
+    // 还没指定机种：把这条线能做的机种的工序按 code 去重（同码只留一条）
+    const seen = new Map();
+    for (const m of modelsOfLine(line.id)) {
+      for (const p of processesOf(m.id)) if (!seen.has(p.code)) seen.set(p.code, p);
+    }
+    const list = [...seen.values()].sort((a, b) =>
+      (Number(a.sort) || 0) - (Number(b.sort) || 0) || String(a.code).localeCompare(String(b.code)));
+
     sendJson(res, 200, {
-      model: { id: model.id, code: model.code, name: model.name, enabled: !!model.enabled },
-      lines: modelLines(model.id).map((l) => ({ id: l.id, code: l.code, name: l.name, status: l.status })),
-      processes: processesOf(model.id)
+      line: { id: line.id, code: line.code, name: line.name },
+      model: null,
+      from: 'union',
+      processes: list
     });
   });
 

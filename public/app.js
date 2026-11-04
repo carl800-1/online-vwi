@@ -40,6 +40,10 @@ const S = {
   mdModelId: '',
   mdStations: [],
   mdQuery: '',
+  mdLines: [],          // 这个机种能在哪几条线上做
+  bindsByCode: {},      // 工序码 → [{lineCode, ip, state, ...}]，工序表「屏」那一列用
+  bindCode: '',         // 正在给哪道工序分配屏
+  bindClients: null,    // 分配弹窗里用的客户端清单（/api/clients 原样）
 
   // 媒体库（内容层）：选机种 → 选工序 → 传文件
   modelId: '',
@@ -54,6 +58,8 @@ const S = {
 
   terms: null,
   termLineId: '',
+  termMode: 'op',    // op = 按工序看（这道工序的屏在不在）；client = 按客户端看（哪些机器连上来了）
+  clients: null,
 
   media: null,
   libAll: null,
@@ -1292,13 +1298,20 @@ async function loadMdProcesses() {
   }
 
   try {
-    const d = await api('/api/processes?modelId=' + encodeURIComponent(m.id));
+    // 绑定和工序一起取：工序表「屏」那一列要显示"这道工序在哪条线绑了哪台屏"，
+    // 分两次串行取会让表格先画一遍再跳一下
+    const [d, b] = await Promise.all([
+      api('/api/processes?modelId=' + encodeURIComponent(m.id)),
+      api('/api/binds').catch(() => ({ binds: [] }))
+    ]);
     S.mdStations = d.processes || [];
     S.mdLines = d.lines || [];
     Object.assign(m, { lines: d.lines || [] });
+    indexBinds(b.binds || []);
   } catch (e) {
     S.mdStations = [];
     S.mdLines = [];
+    S.bindsByCode = {};
     toast(e.message, 'err');
   }
 
@@ -2095,11 +2108,11 @@ function renderStTable() {
   const total = S.mdStations.length;
 
   if (!S.mdModelId) {
-    tb.innerHTML = '<tr><td colspan="8" class="st-empty">上面选一个机种，这里显示它的工序。</td></tr>';
+    tb.innerHTML = '<tr><td colspan="9" class="st-empty">上面选一个机种，这里显示它的工序。</td></tr>';
     return;
   }
   if (!total) {
-    tb.innerHTML = `<tr><td colspan="8" class="st-empty">
+    tb.innerHTML = `<tr><td colspan="9" class="st-empty">
       这个机种还没有工序。点右上「+ 批量加工序」一次贴多行（一行 <b>OP1 装配</b>）。</td></tr>`;
     return;
   }
@@ -2109,7 +2122,7 @@ function renderStTable() {
     !kw || (st.code || '').toLowerCase().includes(kw) || (st.name || '').toLowerCase().includes(kw));
 
   if (!shown.length) {
-    tb.innerHTML = '<tr><td colspan="8" class="st-empty">没有匹配的工序</td></tr>';
+    tb.innerHTML = '<tr><td colspan="9" class="st-empty">没有匹配的工序</td></tr>';
     return;
   }
 
@@ -2138,10 +2151,209 @@ function renderStTable() {
       <td>${n
         ? `<button class="cell-n on" data-jump="${H(st.id)}">${n} 项</button>`
         : `<button class="cell-n" data-jump="${H(st.id)}">未配</button>`}</td>
+      <td>${bindCell(st.code)}</td>
       <td><button class="cell-x" data-del="${H(st.id)}" title="删除这道工序">✕</button></td>
     </tr>`;
   }).join('');
 }
+
+/* ================= 工序 ↔ 屏（客户端）绑定 =================
+   为什么绑在"线体 × 工序"上：工序属于机种（换型时工位上的屏不该变），
+   而一块屏物理上装在一条线的某个工位上。所以键是 (线体, 工序码)，不是 process_id。
+   绑定不参与播放 —— 屏上仍按自己填的线号 / 工序号拉内容，这里只是台账 + 校验。 */
+
+/** 服务端回来的绑定按工序码归组：工序表一行一个码，格子里要一次看全它绑了几条线 */
+function indexBinds(list) {
+  const map = {};
+  for (const b of list) (map[b.processCode] = map[b.processCode] || []).push(b);
+  for (const k of Object.keys(map)) {
+    map[k].sort((a, b) => String(a.lineCode).localeCompare(String(b.lineCode)));
+  }
+  S.bindsByCode = map;
+}
+
+const BIND_STATE = {
+  online: ['on', '在线'],
+  moved: ['warn', '已改配'],
+  offline: ['off', '离线'],
+  missing: ['off', '记录丢了'],
+  unbound: ['off', '未绑']
+};
+const bindStateText = (k) => (BIND_STATE[k] || [, k || '—'])[1];
+const bindStateCls = (k) => (BIND_STATE[k] || BIND_STATE.offline)[0];
+const shortIp = (ip) => String(ip || '').split('.').pop() || String(ip || '—');
+
+/**
+ * 工序表「屏」那一格。
+ *
+ * 一条线一个绑定，格子只放得下一个 —— 显示第一条，其余 +N 带过。
+ * 只要这条工序有"改配了"或"离线"的，整格标红：不这样的话，
+ * 出问题的那台排在第二条，界面上就什么异常都看不见。
+ */
+function bindCell(code) {
+  const list = S.bindsByCode[code] || [];
+  if (!list.length) return `<button class="cell-bind" data-bindop="${H(code)}">未绑</button>`;
+  const first = list[0];
+  const extra = list.length > 1 ? ` +${list.length - 1}` : '';
+  const bad = list.some((b) => b.state === 'moved' || b.state === 'offline');
+  const tip = list.map((b) =>
+    `${b.lineCode} / ${b.processCode} → ${b.ip}　${bindStateText(b.state)}` +
+    (b.state === 'moved' ? `（它现在报 ${b.seenLineCode}/${b.seenOpCode}）` : '')).join('\n');
+  return `<button class="cell-bind has${bad ? ' bad' : ''}" data-bindop="${H(code)}" title="${H(tip)}"><i class="bd ${bindStateCls(first.state)}"></i>${H(first.lineCode)} · ${H(shortIp(first.ip))}${extra}</button>`;
+}
+
+/** 弹窗里那台屏多久没心跳 */
+function bindAge(b) {
+  if (!b.lastSeen) return '没有心跳记录';
+  return ageShort(b.ageMs) + '前';
+}
+
+/** 候选排序：自报和这一格完全一致的排最前（现场正常情况就是这一台） */
+function candRank(c, lineCode, opCode) {
+  const sameLine = c.lineCode === lineCode;
+  const sameOp = c.opCode === opCode;
+  if (sameLine && sameOp) return 0;
+  if (sameOp) return 1;
+  if (sameLine) return 2;
+  return 3;
+}
+
+async function openBindModal(code) {
+  const st = S.mdStations.find((x) => x.code === code);
+  if (!st) return;
+  S.bindCode = code;
+  $('bindTitle').textContent = `「${code}${st.name ? ' ' + st.name : ''}」的屏`;
+  $('bindHint').textContent = '';
+  $('bindBody').innerHTML = '<div class="bind-loading">正在读取客户端…</div>';
+  $('bindModal').classList.add('show');
+  await refreshBindClients();
+}
+
+async function refreshBindClients() {
+  try {
+    const d = await api('/api/clients');
+    S.bindClients = d;
+    const b = await api('/api/binds').catch(() => ({ binds: [] }));
+    indexBinds(b.binds || []);
+    renderBindBody();
+    $('bindHint').textContent =
+      `全厂 ${d.total} 台客户端 · 在线 ${d.online} 台 · 已分配 ${d.bound} 台` +
+      (d.problem ? ` · ${d.problem} 台有问题` : '');
+  } catch (e) {
+    $('bindBody').innerHTML = `<div class="bind-loading">读不到客户端：${H(e.message)}</div>`;
+  }
+}
+
+function closeBindModal() {
+  $('bindModal').classList.remove('show');
+  S.bindCode = '';
+  S.bindClients = null;
+}
+
+function renderBindBody() {
+  const code = S.bindCode;
+  const body = $('bindBody');
+  if (!code || !S.bindClients) return;
+
+  // 这个机种能做的线体；已经绑了、但不在这份清单里的线体也要列出来，否则解不掉
+  const base = (S.mdLines && S.mdLines.length)
+    ? S.mdLines.map((l) => ({ id: l.id, code: l.code, name: l.name, status: l.status }))
+    : S.lines.map((l) => ({ id: l.id, code: l.code, name: l.name, status: l.status }));
+  const extra = (S.bindsByCode[code] || [])
+    .filter((b) => !base.some((l) => l.id === b.lineId))
+    .map((b) => ({ id: b.lineId, code: b.lineCode, name: b.lineName, status: '' }));
+  const lines = [...base, ...extra];
+
+  if (!lines.length) {
+    body.innerHTML = '<div class="bind-loading">还没有线体。先在「线体设置」建一条。</div>';
+    return;
+  }
+  body.innerHTML = lines.map((l) => bindLineHtml(l, code)).join('');
+}
+
+function bindLineHtml(l, code) {
+  const bind = (S.bindsByCode[code] || []).find((b) => b.lineId === l.id);
+
+  const nowHtml = !bind
+    ? '<span class="bind-none">这道工序还没指定屏</span>'
+    : `<i class="bd ${bindStateCls(bind.state)}"></i>
+       <b class="mono">${H(bind.ip)}</b>
+       <span class="bstate ${bindStateCls(bind.state)}">${H(bindStateText(bind.state))}</span>
+       <span class="muted">${H(bindAge(bind))}</span>
+       ${bind.state === 'moved'
+         ? `<span class="bind-warn">它现在报 ${H(bind.seenLineCode || '—')}/${H(bind.seenOpCode || '—')}</span>`
+         : ''}
+       <button class="btn xs ghost" data-unbind="${H(bind.ip)}">解除</button>`;
+
+  // 候选：把已经绑在这一格的那台排除掉（它就在上面那行），其余按匹配度排
+  const cands = (S.bindClients.clients || [])
+    .filter((c) => !(bind && c.ip === bind.ip))
+    .map((c) => ({ ...c, rank: candRank(c, l.code, code) }))
+    .sort((a, b) => (a.rank - b.rank) || (b.online - a.online) ||
+      a.ip.localeCompare(b.ip, undefined, { numeric: true }));
+
+  const candHtml = cands.length
+    ? cands.map((c) => `<button class="bind-cand${c.rank === 0 ? ' match' : ''}"
+         data-assign="${H(c.ip)}" data-line="${H(l.id)}">
+        <i class="bd ${c.online ? 'on' : 'off'}"></i>
+        <b class="mono">${H(c.ip)}</b>
+        <span class="mono muted">自报 ${H(c.lineCode || '—')} / ${H(c.opCode || '—')}</span>
+        ${c.rank === 0 ? '<span class="tag-ok">就是这台</span>' : ''}
+        <span class="muted">${H(ageShort(c.ageMs))}前</span>
+      </button>`).join('')
+    : '<span class="bind-none">没有可分配的客户端 —— 屏还没连上服务器</span>';
+
+  return `<div class="bind-line">
+    <div class="bind-lh"><b>${H(l.code)}</b> <span class="muted">${H(l.name || '')}</span>
+      ${l.status === 'running' ? '<span class="badge ok">运行中</span>' : ''}</div>
+    <div class="bind-now-row">${nowHtml}</div>
+    <div class="bind-cands">${candHtml}</div>
+  </div>`;
+}
+
+$('bindBody').addEventListener('click', async (e) => {
+  const asg = e.target.closest('[data-assign]');
+  if (asg) {
+    const ip = asg.dataset.assign;
+    const lineId = asg.dataset.line;
+    if (asg.disabled) return;
+    asg.disabled = true;
+    try {
+      const r = await postJson(`/api/clients/${encodeURIComponent(ip)}/bind`,
+        { lineId, processCode: S.bindCode });
+      if (r.warning) toast(r.warning, 'warn');
+      else if (r.replacedClientId) toast(`「${S.bindCode}」改由 ${ip} 负责，原来那台换下了`, 'ok');
+      else toast(`已把 ${ip} 分配给「${S.bindCode}」`, 'ok');
+      await refreshBindClients();
+      renderStTable();
+    } catch (err) {
+      asg.disabled = false;
+      toast(err.message, 'err');
+    }
+    return;
+  }
+
+  const un = e.target.closest('[data-unbind]');
+  if (un) {
+    const ip = un.dataset.unbind;
+    const ok = await ask('解除分配？',
+      `${ip} 不再对应「${S.bindCode}」。屏上的内容和播放都不受影响，只是这里不再记录它。`);
+    if (!ok) return;
+    try {
+      await postJson(`/api/clients/${encodeURIComponent(ip)}/unbind`, {});
+      toast('已解除', 'ok');
+      await refreshBindClients();
+      renderStTable();
+    } catch (err) { toast(err.message, 'err'); }
+  }
+});
+
+$('bindClose').addEventListener('click', closeBindModal);
+$('bindX').addEventListener('click', closeBindModal);
+$('bindModal').addEventListener('click', (e) => {
+  // 点遮罩关掉。点面板里面不关 —— 里面还要连续点选
+  if (e.target === $('bindModal')) closeBindModal();
+});
 
 $('stTableSearch').addEventListener('input', (e) => {
   S.mdQuery = e.target.value;
@@ -2244,6 +2456,10 @@ $('stTbody').addEventListener('click', async (e) => {
   // 点「内容」列 → 切到媒体库并直接把那道工序选中
   const jump = e.target.closest('[data-jump]');
   if (jump) { await openInMedia(jump.dataset.jump); return; }
+
+  // 点「屏」列 → 分配客户端。用工序码而不是 process id：绑定键是 (线体, 工序码)
+  const bop = e.target.closest('[data-bindop]');
+  if (bop) { await openBindModal(bop.dataset.bindop); return; }
 
   const del = e.target.closest('[data-del]');
   if (!del) return;
@@ -3232,7 +3448,31 @@ $('adviceBtn').addEventListener('click', async () => {
 });
 
 // ==================== 终端监控 ====================
+/**
+ * 两个视角共用这一页：
+ *   按工序   这道工序有没有屏、在不在线 —— 现场"哪块屏没开机"用这个
+ *   按客户端 哪些机器连上来了、被分配在哪个工位 —— "这台到底是谁"用这个
+ * 切换只换数据源和表格，不重新挂事件。
+ */
+function setTermMode(mode) {
+  S.termMode = mode === 'client' ? 'client' : 'op';
+  const isClient = S.termMode === 'client';
+  $('tmOp').classList.toggle('primary', !isClient);
+  $('tmClient').classList.toggle('primary', isClient);
+  $('termLineWrap').classList.toggle('hide', isClient);
+  $('termOpWrap').classList.toggle('hide', isClient);
+  $('termClientWrap').classList.toggle('hide', !isClient);
+  $('termFoot').textContent = isClient
+    ? 'IP 由服务端从连接来源读取。分配在哪个工位去「机种设置 → 工序设定」的「屏」那一列设；'
+      + '屏上把线号 / 工序号改了，这里会显示「已改配」并报出它现在报的是什么。'
+    : 'IP 由服务端从连接来源读取，不采信终端自报；终端每 5 秒上报一次参数。'
+      + '未上线的工序也会列出来，方便区分"没装机"和"装了没开机"。';
+  loadTerms().catch(() => {});
+}
+
 async function loadTerms() {
+  if (S.termMode === 'client') return loadClients();
+
   if (!S.termLineId || !S.lines.some((l) => l.id === S.termLineId)) {
     S.termLineId = (S.lines.find((l) => l.enabled) || S.lines[0] || {}).id || '';
   }
@@ -3315,9 +3555,92 @@ function renderTermTable() {
 
 $('termRefresh').addEventListener('click', () => loadTerms().catch(() => {}));
 
+async function loadClients() {
+  // 客户端是全厂口径，不按线体筛：现场最常问的是"到底连上来几台"
+  try {
+    S.clients = await api('/api/clients');
+  } catch {
+    S.clients = null;
+  }
+  renderClientTable();
+  renderTopStats();
+}
+
+function renderClientTable() {
+  const tb = $('clientTable').querySelector('tbody');
+  const d = S.clients;
+  if (!d) {
+    tb.innerHTML = '<tr><td colspan="7" class="empty">读不到客户端列表</td></tr>';
+    $('termSub').textContent = '—';
+    return;
+  }
+  if (!d.clients.length) {
+    $('termSub').textContent = '还没有客户端连上来';
+    tb.innerHTML = `<tr><td colspan="7" class="empty">
+      还没有任何客户端连上来。屏第一次启动时在「终端设置」里填服务器地址，
+      之后每 5 秒自动登记一次，这里就会出现。</td></tr>`;
+    return;
+  }
+
+  $('termSub').textContent =
+    `全厂 ${d.total} 台 · 在线 ${d.online} 台 · 已分配 ${d.bound} 台` +
+    (d.problem ? ` · ${d.problem} 台有问题` : '') + ' · 每 2 秒自动刷新';
+
+  tb.innerHTML = d.clients.map((c) => {
+    const b = c.bind;
+    const alloc = b
+      ? `${H(b.lineCode)} / <b>${H(b.processCode)}</b>`
+      : '<span class="muted">未分配</span>';
+
+    let state;
+    if (!c.online) {
+      state = `<span class="badge danger">离线 ${H(ageShort(c.ageMs))}</span>`;
+    } else if (!b) {
+      state = '<span class="badge muted">在线 · 未分配</span>';
+    } else if (b.state === 'moved') {
+      state = `<span class="badge warn">已改配 · 现在报 ${H(c.lineCode || '—')}/${H(c.opCode || '—')}</span>`;
+    } else {
+      state = '<span class="badge ok">在线 · 与分配一致</span>';
+    }
+
+    return `<tr>
+      <td class="mono">${H(c.ip)}</td>
+      <td>${c.name ? H(c.name) : '<span class="muted">—</span>'}</td>
+      <td class="mono">${H(c.lineCode || '—')} / ${H(c.opCode || '—')}</td>
+      <td class="num">${H(ageShort(c.ageMs))}前</td>
+      <td>${alloc}</td>
+      <td>${state}</td>
+      <td>${b ? `<button class="btn xs ghost" data-cunbind="${H(c.ip)}">解除</button>` : ''}</td>
+    </tr>`;
+  }).join('');
+}
+
+$('tmOp').addEventListener('click', () => setTermMode('op'));
+$('tmClient').addEventListener('click', () => setTermMode('client'));
+
+$('clientTable').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-cunbind]');
+  if (!btn) return;
+  const ip = btn.dataset.cunbind;
+  const ok = await ask('解除分配？', `${ip} 不再对应任何工序。屏上的内容和播放都不受影响，只是这里不再记录它。`);
+  if (!ok) return;
+  try {
+    await postJson('/api/clients/' + encodeURIComponent(ip) + '/unbind', {});
+    toast('已解除', 'ok');
+    await loadClients();
+  } catch (err) { toast(err.message, 'err'); }
+});
+
 // 终端监控页 2 秒刷新；不在这一页就不占带宽
 setInterval(() => {
-  if (S.tab !== 'terms' || document.hidden || !S.termLineId) return;
+  if (S.tab !== 'terms' || document.hidden) return;
+  if (S.termMode === 'client') {
+    api('/api/clients')
+      .then((d) => { S.clients = d; renderClientTable(); })
+      .catch(() => {});
+    return;
+  }
+  if (!S.termLineId) return;
   api('/api/terminals?lineId=' + encodeURIComponent(S.termLineId))
     .then((d) => { S.terms = d; renderTermTable(); })
     .catch(() => {});

@@ -276,6 +276,7 @@
                   <th style="width:138px" title="勾上哪几类，终端在这道工序就只放哪几类（PDF 指 PDF 拆出来的页）。三类全勾 = 都放">播放内容</th>
                   <th style="width:104px" title="一道工序 = 一个工位；填这一工位做一件要几秒，导出线体 Excel 时用来算瓶颈和线平衡">工时<i>秒/件</i></th>
                   <th style="width:76px">内容</th>
+                  <th style="width:104px" title="这道工序在这条线上是哪台屏。点开可以把某台客户端分配给这条线的这道工序；屏上把线号工序号改了的话，这里会标「已改配」">屏</th>
                   <th style="width:40px"></th>
                 </tr>
               </thead>
@@ -288,7 +289,8 @@
             <b>「做什么」</b>写作业要点，会显示在终端顶栏；往工序里放图片 / PDF / 视频请去<b>「媒体库」</b>。<br>
             <b>播放方式</b>和<b>播放内容</b>只在这里设（媒体库里不再重复设一遍）：
             前者管循环还是播一遍停，后者管这块屏放哪几类（图片 / PDF / 视频），至少要留一类。
-            <b>工时</b>填这一工位做一件要几秒（一道工序 = 一个工位），留空表示还没测。
+            <b>屏</b>这一列是「这道工序对应哪台客户端」：点开按线体挑一台，绑完就能看出它在线、
+            还是把线号工序号改了（标「已改配」）。<b>工时</b>填这一工位做一件要几秒（一道工序 = 一个工位），留空表示还没测。
             上面的<b>工时合计 / 瓶颈</b>由它算出来，导出线体 Excel 时用来算线平衡率；
             它和「标准产能（件/时）」是两回事 —— 效率那栏仍然按标准产能算，两个数并列对照。
           </div>
@@ -357,8 +359,8 @@
            不再选线体：内容挂机种，同一条机种在几条线上播的都是这一套。 -->
       <div class="view hide" id="view-media">
         <div class="card">
+          <!-- 页标题由顶栏 #viewTitle 统一给，卡片里再写一遍就是同一个词显示两次 -->
           <div class="card-head">
-            <h2>媒体库</h2>
             <span class="sub" id="mediaSub">选机种 → 选工序 → 上传文件</span>
             <div class="spacer"></div>
             <label class="inl">机种
@@ -397,7 +399,6 @@
       <div class="view hide" id="view-files">
         <div class="card">
           <div class="card-head">
-            <h2>文件查询</h2>
             <span class="sub" id="mediaTxt">—</span>
             <div class="spacer"></div>
             <button class="btn sm" id="uploadBtn">上传文件</button>
@@ -421,16 +422,18 @@
       <div class="view hide" id="view-terms">
         <div class="card">
           <div class="card-head">
-            <h2>终端监控</h2>
             <span class="sub" id="termSub">—</span>
             <div class="spacer"></div>
-            <label class="inl">
+            <!-- 两个视角：按工序 = 这道工序的屏在不在；按客户端 = 哪些机器连上来了、分配在哪 -->
+            <button class="btn sm primary" id="tmOp">按工序</button>
+            <button class="btn sm" id="tmClient">按客户端</button>
+            <label class="inl" id="termLineWrap">
               线体
               <select id="termLinePick"></select>
             </label>
             <button class="btn sm" id="termRefresh">刷新</button>
           </div>
-          <div class="table-wrap">
+          <div class="table-wrap" id="termOpWrap">
             <table class="data-table" id="termTable">
               <thead>
                 <tr>
@@ -447,6 +450,25 @@
               <tbody></tbody>
             </table>
           </div>
+
+          <!-- 按客户端：服务端登记过的每一台机器，不管它有没有被分配到工位 -->
+          <div class="table-wrap hide" id="termClientWrap">
+            <table class="data-table" id="clientTable">
+              <thead>
+                <tr>
+                  <th style="width:150px">IP 地址</th>
+                  <th style="width:140px">计算机名</th>
+                  <th style="width:160px">自报线体 / 工序</th>
+                  <th style="width:120px">最后心跳</th>
+                  <th>分配在</th>
+                  <th style="width:190px">状态</th>
+                  <th style="width:80px"></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
           <p class="foot-hint" id="termFoot">
             IP 由服务端从连接来源读取，不采信终端自报；终端每 5 秒上报一次参数。
             未上线的工序也会列出来，方便区分"没装机"和"装了没开机"。
@@ -515,6 +537,24 @@
       <button class="btn" id="dlgCancel">取消</button>
       <div class="spacer"></div>
       <button class="btn primary" id="dlgOk">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- 分配屏：独立弹窗。不复用 #dialog，是因为这里要在弹窗里连续点选、每点一次重画内容，
+     和"一问一答"的 dialog 不是一回事；共用一个反而会把底下那层内容冲掉 -->
+<div class="modal" id="bindModal">
+  <div class="modal-card bind-card">
+    <div class="modal-head">
+      <h3 id="bindTitle">分配屏</h3>
+      <div class="spacer"></div>
+      <button class="iconbtn" id="bindX" title="关闭">✕</button>
+    </div>
+    <div class="modal-body" id="bindBody"></div>
+    <div class="modal-foot">
+      <span class="bind-hint" id="bindHint"></span>
+      <div class="spacer"></div>
+      <button class="btn" id="bindClose">关闭</button>
     </div>
   </div>
 </div>
