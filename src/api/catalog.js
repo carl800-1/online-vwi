@@ -14,7 +14,7 @@ import {
 } from '../db.js';
 import { adoptMedia, moveDir, modelDirOf, moveProcessFolder } from '../media.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
-import { getState, resetLine } from '../switch.js';
+import { getState, resetLine, notifyContentChanged } from '../switch.js';
 import { now, uid, str, int } from '../util.js';
 
 function lineStats(l) {
@@ -358,9 +358,9 @@ export function register(router) {
       }
     }
 
-    // name/note/maxMb/playMode/cycleSec/reqs/items 全部交给 saveProcess，
+    // name/note/maxMb/playMode/cycleSec/playKinds/reqs/items 全部交给 saveProcess，
     // 兼容接口 /api/playlist 也走那条路，两处各写一遍迟早不一致。
-    const touched = ['name', 'maxMb', 'note', 'playMode', 'cycleSec', 'reqs', 'items']
+    const touched = ['name', 'maxMb', 'note', 'playMode', 'cycleSec', 'playKinds', 'reqs', 'items']
       .some((k) => body[k] !== undefined);
     if (touched) {
       saveProcessBody(p.model_id, p.id, body);
@@ -370,6 +370,13 @@ export function register(router) {
         try { adoptMedia(body.items.map((x) => x && x.mediaId), p.model_id, p.id); } catch (e) {
           console.warn('[media] 认领文件失败：', e.message);
         }
+      }
+      // 改了清单 / 允许类型 / 播放内容 / 播放方式 → 屏上该变样了，推一次 contentRev。
+      // 漏这一步的表现是"改完内容屏上还是旧的"，要等重启或换型才刷新（4.4.0 前一直这样）。
+      // 只改名称、工时不必惊动终端 —— 那两个数不上屏。
+      if (Array.isArray(body.items) || Array.isArray(body.reqs)
+        || body.playKinds !== undefined || body.playMode !== undefined) {
+        notifyContentChanged();
       }
     }
 
@@ -400,6 +407,7 @@ function saveProcessBody(modelId, processId, body) {
     note: body.note,
     playMode: body.playMode,
     cycleSec: body.cycleSec,
+    playKinds: Array.isArray(body.playKinds) ? body.playKinds : undefined,
     reqs: Array.isArray(body.reqs) ? body.reqs : undefined,
     items: Array.isArray(body.items) ? body.items : undefined
   });

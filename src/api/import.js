@@ -54,11 +54,14 @@ const ALIAS = {
   maxMb: ['单文件上限', '单文件上限mb', '文件大小上限', '大小上限', 'maxmb'],
   cycleSec: ['工序工时', '工时秒件', '工序工时秒件', '标准工时', '工时', 'cyclesecond', 'cycleseconds'],
   kinds: ['允许类型', '允许的文件类型', '允许的文件类型与数量', '文件类型', '允许', 'kinds'],
-  minSize: ['图片最小尺寸', '最小尺寸', '最小分辨率', '分辨率', 'minsize']
+  minSize: ['图片最小尺寸', '最小尺寸', '最小分辨率', '分辨率', 'minsize'],
+  // 4.5.0：播放内容（终端放哪几类）。和「允许」是两件事，
+  // 一个管能不能传、一个管放不放，表头也不能互相认。
+  playKinds: ['播放内容', '播放类型', '播放内容类型', '放哪几类', 'playkinds']
 };
 
 const FIELDS = ['model', 'line', 'code', 'name', 'note',
-  'play', 'maxMb', 'cycleSec', 'kinds', 'minSize'];
+  'play', 'maxMb', 'cycleSec', 'kinds', 'minSize', 'playKinds'];
 
 /** 导入时优先认这几页（按顺序），都找不到才退回第一页 */
 const SHEET_ORDER = ['工序参数', '工序清单', '工序表', 'Sheet1'];
@@ -160,6 +163,21 @@ const KIND_OF_CN = { 图片: 'image', 图像: 'image', image: 'image', img: 'ima
   pdf: 'pdf', PDF: 'pdf', 文档: 'pdf',
   视频: 'video', video: 'video', mp4: 'video' };
 
+const PLAY_CN = { image: '图片', pdf: 'PDF', video: '视频' };
+/** 三类数组 → 人话。全放（或空）写「全部」，和导出那一栏保持一致 */
+function playKindsCn(arr) {
+  const s = Array.isArray(arr) ? arr : [];
+  const hit = ['image', 'pdf', 'video'].filter((k) => s.includes(k));
+  if (!hit.length || hit.length === 3) return '全部';
+  return hit.map((k) => PLAY_CN[k]).join('；');
+}
+
+/** 三类数组 → 存库文本。没给 / 三类全给 → ''（= 全放），和 saveProcess 一个写法 */
+function playKindsText(arr) {
+  if (!Array.isArray(arr) || !arr.length || arr.length === 3) return '';
+  return arr.join(',');
+}
+
 /**
  * 「允许类型」解析成 [{kind, minCount}]。
  * 认这些写法：`图片≥1`、`图片1`、`图片`、`图片≥1；PDF≥1`、`图片,PDF`，
@@ -180,6 +198,29 @@ function parseKinds(v) {
     out.push({ kind, minCount: m && m[2] ? Number(m[2]) : 0 });
   }
   return out.length ? out : [];
+}
+
+/**
+ * 「播放内容」解析成 ['image','pdf','video'] 的子集（顺序按界面：图片 / PDF / 视频）。
+ * 认：`全部`、`不限`、`图片；PDF；视频`、`图片,视频`、`图片、PDF`。
+ * 认不出 → null（整行 bad，不猜）；空 → undefined（= 这格不改）。
+ *
+ * 与「允许类型」分开解析：那边带数量（`图片≥1`），这边只关心放不放。
+ */
+function parsePlayKinds(v) {
+  const t = String(v || '').trim();
+  if (!t) return undefined;
+  if (/^(全部|全放|不限|所有|all|-|—)$/i.test(t)) return ['image', 'pdf', 'video'];
+  const out = [];
+  for (const part of t.split(/[；;、,，\/|＋+]/)) {
+    const seg = part.trim();
+    if (!seg) continue;
+    const kind = KIND_OF_CN[seg] || KIND_OF_CN[seg.toLowerCase()];
+    if (!kind) return null;
+    if (!out.includes(kind)) out.push(kind);
+  }
+  if (!out.length) return null;
+  return ['image', 'pdf', 'video'].filter((k) => out.includes(k));
 }
 
 /** 「1280×720」「1280x720」「宽≥1280」「高≥720」→ {w,h}；空 → null */
@@ -325,6 +366,12 @@ export function register(router) {
           else extra.minSize = sz;
         }
       }
+      if (map.playKinds !== undefined) {
+        const raw = cellAt(r, map.playKinds);
+        const pk = parsePlayKinds(raw);
+        if (pk === null) extraBad.push(`播放内容「${raw}」认不出，写「全部」或「图片；视频」`);
+        else if (pk) extra.playKinds = pk;
+      }
 
       if (extraBad.length) {
         rec.status = 'bad';
@@ -364,6 +411,13 @@ export function register(router) {
           const ch = img ? Number(img.min_height) || 0 : 0;
           if (cw !== extra.minSize.w || ch !== extra.minSize.h) {
             bits.push(`图片最小尺寸 ${cw || ch ? `${cw}×${ch}` : '不限'} → ${extra.minSize.w}×${extra.minSize.h}`);
+          }
+        }
+        if (extra.playKinds !== undefined) {
+          // 空串 = 三类全放，比较前先归一，否则"全部"每次都被当成"改了"
+          const cur = String(old.play_kinds || '').split(',').filter(Boolean);
+          if (playKindsCn(cur) !== playKindsCn(extra.playKinds)) {
+            bits.push(`播放内容 ${playKindsCn(cur)} → ${playKindsCn(extra.playKinds)}`);
           }
         }
 
@@ -459,11 +513,12 @@ export function register(router) {
           const maxSort = q.get('SELECT COALESCE(MAX(sort),0) s FROM process WHERE model_id = ?', modelId).s;
           const id = uid('pr');
           q.run(
-            'INSERT INTO process(id,model_id,code,name,sort,max_mb,note,play_mode,cycle_sec,import_batch,created_at)'
-            + ' VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+            'INSERT INTO process(id,model_id,code,name,sort,max_mb,note,play_mode,cycle_sec,play_kinds,import_batch,created_at)'
+            + ' VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
             id, modelId, code, name || code, maxSort + 10,
             extra.maxMb === undefined ? 20 : extra.maxMb, note,
             extra.playMode || 'loop', extra.cycleSec === undefined ? 0 : extra.cycleSec,
+            playKindsText(extra.playKinds),
             batchId, ts
           );
           if (extra.kinds !== undefined || extra.minSize !== undefined) {
@@ -486,6 +541,9 @@ export function register(router) {
         const nextMb = extra.maxMb === undefined ? Number(old.max_mb || 0) : extra.maxMb;
         const nextPlay = extra.playMode === undefined ? (old.play_mode || 'loop') : extra.playMode;
         const nextSec = extra.cycleSec === undefined ? (Number(old.cycle_sec) || 0) : extra.cycleSec;
+        const nextPK = extra.playKinds === undefined
+          ? String(old.play_kinds || '')
+          : playKindsText(extra.playKinds);
 
         // 允许类型要不要动，先算出来再比 —— 全量导出每行都带「允许类型」，
         // 不先比一下的话，导一次「什么都没改」的表也会把 1.6 万行全标成更新
@@ -497,13 +555,14 @@ export function register(router) {
         // 四列老表走到这里时 extra 是空的，行为和 4.2.x 完全一样
         if ((old.name || '') === nextName && (old.note || '') === note
             && Number(old.max_mb || 0) === nextMb && (old.play_mode || 'loop') === nextPlay
-            && (Number(old.cycle_sec) || 0) === nextSec && reqSame) {
+            && (Number(old.cycle_sec) || 0) === nextSec && String(old.play_kinds || '') === nextPK
+            && reqSame) {
           stat.kept += 1; // 内容一模一样，不算更新，省得库里白改一遍
           return;
         }
         q.run(
-          'UPDATE process SET name = ?, note = ?, max_mb = ?, play_mode = ?, cycle_sec = ? WHERE id = ?',
-          nextName, note, nextMb, nextPlay, nextSec, old.id
+          'UPDATE process SET name = ?, note = ?, max_mb = ?, play_mode = ?, cycle_sec = ?, play_kinds = ? WHERE id = ?',
+          nextName, note, nextMb, nextPlay, nextSec, nextPK, old.id
         );
         if (needReqs && !reqSame) writeReqs(old.id, nextReqs);
         stat.updated += 1;

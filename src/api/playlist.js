@@ -4,7 +4,7 @@
 // 还要先展开成 (line_id, code) 才找得到工位。现在工序本身就是宿主，
 // processId 直接定位，stationId 也收（老脚本可能还在传）。
 // 新代码请直接用 PUT /api/processes/:id。
-import { q, processesOf, processById, saveProcess } from '../db.js';
+import { q, processesOf, processById, saveProcess, playKindsOf } from '../db.js';
 import { adoptMedia } from '../media.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
 import { notifyContentChanged } from '../switch.js';
@@ -59,7 +59,7 @@ export function register(router) {
     sendJson(res, 200, {
       model: { id: model.id, code: model.code, name: model.name },
       station: { id: p.id, code: p.code, name: p.name },
-      process: { id: p.id, code: p.code, name: p.name, playMode: p.play_mode },
+      process: { id: p.id, code: p.code, name: p.name, playMode: p.play_mode, playKinds: playKindsOf(p.play_kinds) },
       items,
       stats: {
         count: items.length,
@@ -81,6 +81,8 @@ export function register(router) {
 
     const list = body.items;
     if (!Array.isArray(list)) throw badRequest('items 必须是数组');
+    // 播放内容可以顺带改（老脚本不传就当没提，不动库里那个值）
+    const playKinds = Array.isArray(body.playKinds) ? body.playKinds : undefined;
 
     // 先全部校验完再写库：宁可整批失败，也不要写进去一半
     const seen = new Set();
@@ -99,7 +101,7 @@ export function register(router) {
       });
     });
 
-    saveProcess(modelId, p.id, { items: rows });
+    saveProcess(modelId, p.id, { items: rows, playKinds });
     // 池子里的文件搬到这道工序的目录（已有归属的不动）
     try { adoptMedia(rows.map((r) => r.mediaId), modelId, p.id); } catch (e) {
       console.warn('[media] 认领文件失败：', e.message);

@@ -435,6 +435,11 @@ function migrate() {
     if (!colsOf('process').has('cycle_sec')) {
       db.exec('ALTER TABLE process ADD COLUMN cycle_sec REAL NOT NULL DEFAULT 0');
     }
+    // 4.5.0：播放内容。空串 = 三类都放（默认，等于没限），和 process_req「整表为空=不锁」
+    // 是同一个套路：不写库 ≠ 全关掉，升级上来的老工序不会因为加了这个字段突然什么都不播。
+    if (!colsOf('process').has('play_kinds')) {
+      db.exec("ALTER TABLE process ADD COLUMN play_kinds TEXT NOT NULL DEFAULT ''");
+    }
 
     return;
   }
@@ -1000,6 +1005,8 @@ function migrateToModelProcess() {
       note          TEXT NOT NULL DEFAULT '',
       play_mode     TEXT NOT NULL DEFAULT 'loop',
       cycle_sec     REAL    NOT NULL DEFAULT 0,
+      -- 4.5.0：这道工序在终端上放哪几类（image,pdf,video 的逗号列表）；空串 = 三类全放
+      play_kinds    TEXT    NOT NULL DEFAULT '',
       import_batch  TEXT NOT NULL DEFAULT '',
       created_at    INTEGER NOT NULL,
       UNIQUE(model_id, code)
@@ -1274,6 +1281,37 @@ export function lineByCode(code) {
 
 // ---------- 工序（v4.0.0：工序归机种，一道工序 = 一块屏的内容槽位）----------
 const KINDS_ORDER = ['image', 'video', 'pdf'];
+
+/**
+ * 「播放内容」的三类，按界面上从左到右的顺序：图片 / PDF / 视频。
+ * 存库是逗号列表（`process.play_kinds`），空串 = 三类全放。
+ *
+ * 为什么不直接复用 process_req 的类型：那是**上传闸门**（允许传什么），
+ * 这是**播放闸门**（终端放什么）。现场会有"允许传 PDF 存档，但这一屏只放视频"
+ * 这种需求，两个闸门分开才不会互相绑架。
+ */
+export const PLAY_KINDS = ['image', 'pdf', 'video'];
+
+/**
+ * 一条内容属于哪一类「播放内容」。
+ *
+ * ⚠️ 不能只看 media.kind：PDF 上传时就被拆成了逐页 PNG（kind='image'），
+ * 所以要看 src_sha —— 带它的是从 PDF 拆出来的页，算 `pdf`；直接传的图片才算 `image`。
+ * 终端只认 <img>/<video>，这条路不变，这里只是给"放不放"分类。
+ */
+export function playKindOf(kind, srcSha) {
+  if (kind === 'video') return 'video';
+  if (kind === 'image') return srcSha ? 'pdf' : 'image';
+  return String(kind || '');
+}
+
+/** 存库文本 → 三类数组。空 = 全部；认不出的值直接忽略，全认不出时退回全部（不让人一存就黑屏）。 */
+export function playKindsOf(text) {
+  const set = String(text || '').split(',').map((s) => s.trim()).filter(Boolean);
+  if (!set.length) return [...PLAY_KINDS];
+  const hit = PLAY_KINDS.filter((k) => set.includes(k));
+  return hit.length ? hit : [...PLAY_KINDS];
+}
 //
 // 4.0.0 起不再有「工位」这一层。工序就是内容的宿主：
 //   机种 X200 有 OP1 装配 / OP2 调试 / OP3 检验，这三道就是三块屏。
@@ -1303,7 +1341,7 @@ export function processesOf(modelId) {
   }
 
   for (const i of q.all(
-    `SELECT i.*, m.name mname, m.bytes, m.width, m.height, m.duration_ms, m.ext, m.mime
+    `SELECT i.*, m.name mname, m.bytes, m.width, m.height, m.duration_ms, m.ext, m.mime, m.src_sha
        FROM item i
        JOIN media m ON m.id = i.media_id
        JOIN process p ON p.id = i.process_id
@@ -1323,6 +1361,9 @@ export function processesOf(modelId) {
       durationMs: i.duration_ms,
       ext: i.ext,
       mime: i.mime,
+      // 从 PDF 拆出来的页（带 src_sha）：界面据此标「PDF 页」，
+      // 播放内容也靠它区分"图片"和"PDF"——两者在库里 kind 都是 image。
+      srcSha: i.src_sha || '',
       dwellSec: i.dwell_sec,
       fit: i.fit || 'contain',
       zoom: i.zoom || 100,
@@ -1343,6 +1384,8 @@ export function processesOf(modelId) {
     // 工序工时（秒/件）：一道工序 = 一个工位，所以它同时是「工位工时分配」那一列的来源。
     // 0 = 还没量过，不是"零工时"—— 导出的平衡率、瓶颈产能会留空，不拿 0 去算。
     cycleSec: Math.max(0, Math.round((Number(p.cycle_sec) || 0) * 10) / 10),
+    // 播放内容：终端放哪几类。空串（老工序）= 三类全放，接口回满三项，界面三格都勾上。
+    playKinds: playKindsOf(p.play_kinds),
     reqs: byId.get(p.id).reqs.sort(
       (a, b) => KINDS_ORDER.indexOf(a.kind) - KINDS_ORDER.indexOf(b.kind)
     ),
@@ -1364,7 +1407,7 @@ export function processByCode(modelId, code) {
  * 整份替换一道工序的元信息、类型要求与内容清单。
  * 六块各判 `!== undefined`：界面分「改名字」「改要求」「改内容」三次发，互不覆盖。
  */
-export function saveProcess(modelId, processId, { name, maxMb, note, playMode, cycleSec, reqs, items }) {
+export function saveProcess(modelId, processId, { name, maxMb, note, playMode, cycleSec, playKinds, reqs, items }) {
   tx(() => {
     const p = q.get('SELECT * FROM process WHERE id = ? AND model_id = ?', processId, modelId);
     if (!p) throw Object.assign(new Error('工序不存在'), { status: 400 });
@@ -1381,6 +1424,14 @@ export function saveProcess(modelId, processId, { name, maxMb, note, playMode, c
     if (playMode !== undefined) {
       q.run('UPDATE process SET play_mode = ? WHERE id = ?',
         playMode === 'once' ? 'once' : 'loop', p.id);
+    }
+    if (playKinds !== undefined) {
+      // 三样全选 = 没限制，存空串（和"从来没配过"一个意思），导出与前后对比都按未配置算。
+      // 一样都不勾没有意义（这块屏就什么都不放了），直接拒，别让它变成"悄悄不播"。
+      const picked = PLAY_KINDS.filter((k) => Array.isArray(playKinds) && playKinds.includes(k));
+      if (!picked.length) throw Object.assign(new Error('播放内容至少要留一类'), { status: 400 });
+      q.run('UPDATE process SET play_kinds = ? WHERE id = ?',
+        picked.length === PLAY_KINDS.length ? '' : picked.join(','), p.id);
     }
 
     if (Array.isArray(reqs)) {
@@ -1405,8 +1456,11 @@ export function saveProcess(modelId, processId, { name, maxMb, note, playMode, c
         const mediaId = String(it.mediaId || '');
         const m = q.get('SELECT * FROM media WHERE id = ?', mediaId);
         if (!m) throw Object.assign(new Error(`内容里有不存在的文件（${mediaId}）`), { status: 400 });
-        if (allowed.length && !allowed.includes(m.kind)) {
-          const cn = m.kind === 'video' ? '视频' : m.kind === 'pdf' ? ' PDF' : '图片';
+        // 类型闸门按「内容是哪一类」比，不按 media.kind 比：
+        // PDF 页的 kind 是 image，只勾了「PDF」的工序以前会被自己的 PDF 页顶回去。
+        const cls = playKindOf(m.kind, m.src_sha);
+        if (allowed.length && !allowed.includes(cls)) {
+          const cn = cls === 'video' ? '视频' : cls === 'pdf' ? ' PDF' : '图片';
           throw Object.assign(new Error(`这道工序不允许放${cn}：${m.name}`), { status: 400 });
         }
         if (limit > 0 && m.bytes > limit * 1024 * 1024) {

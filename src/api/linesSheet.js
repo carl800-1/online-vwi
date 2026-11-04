@@ -43,6 +43,19 @@ const PLAY_TEXT = { loop: '循环播放', once: '播一遍停' };
 const KIND_CN = { image: '图片', video: '视频', pdf: 'PDF' };
 const KINDS = ['image', 'video', 'pdf'];
 
+/**
+ * 播放内容（`process.play_kinds`）→ 表格里的中文。
+ * 空串 = 三类全放（默认），写「全部」；只放两类就写「图片；视频」。
+ * 分隔符用全角分号，和「允许类型」那一栏一个风格；导回时两种分号都认。
+ */
+const PLAY_KINDS = ['image', 'pdf', 'video'];
+function playKindsText(text) {
+  const set = String(text || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const hit = PLAY_KINDS.filter((k) => set.includes(k));
+  if (!hit.length || hit.length === PLAY_KINDS.length) return '全部';
+  return hit.map((k) => KIND_CN[k]).join('；');
+}
+
 /** 终端/接口要求的编码形状，和 POST /api/lines 里的正则保持一致 */
 const CODE_RE = /^[A-Za-z0-9._-]{1,16}$/;
 
@@ -267,7 +280,7 @@ function sizeText(reqs) {
  * 工时占比用来一眼看出瓶颈在哪道工序（占比最高的那道就是）。
  */
 function sheetProcess(snap) {
-  const head = ['机种编号', '产品名称', '工序码', '名称', '做什么', '播放方式',
+  const head = ['机种编号', '产品名称', '工序码', '名称', '做什么', '播放方式', '播放内容',
     '单文件上限(MB)', '允许类型', '图片最小尺寸', '播放项数', '工序工时(秒/件)', '工时占比(%)'];
   const rows = [];
   for (const m of snap.models) {
@@ -280,6 +293,7 @@ function sheetProcess(snap) {
         m.code, m.name, p.code, p.name || '',
         p.note || '',
         PLAY_TEXT[p.play_mode] || PLAY_TEXT.loop,
+        playKindsText(p.play_kinds),
         Number(p.max_mb) || 0,
         reqText(reqs),
         sizeText(reqs),
@@ -291,7 +305,7 @@ function sheetProcess(snap) {
   }
   return {
     name: '工序参数',
-    widths: [14, 24, 10, 18, 46, 11, 14, 22, 13, 9, 15, 11],
+    widths: [14, 24, 10, 18, 46, 11, 14, 14, 22, 13, 9, 15, 11],
     rows: [head, ...rows]
   };
 }
@@ -333,6 +347,7 @@ function sheetFieldDoc() {
     ['工序参数', '名称', 'process.name', '工序名称，留空用工序码顶上', '是'],
     ['工序参数', '做什么', 'process.note', '作业要点，显示在终端顶栏', '是'],
     ['工序参数', '播放方式', 'process.play_mode', '循环播放(loop) / 播一遍停(once)', '是'],
+    ['工序参数', '播放内容', 'process.play_kinds', '终端只放这几类：图片 / PDF / 视频。写「全部」= 不限；空 = 全放', '是'],
     ['工序参数', '单文件上限(MB)', 'process.max_mb', '0 = 不限', '是'],
     ['工序参数', '允许类型', 'process_req(kind,min_count)', '写成「图片≥1；PDF≥1」。空表 = 不限类型', '是'],
     ['工序参数', '图片最小尺寸', 'process_req(min_width,min_height)', '写成「1280×720」，空 = 不限制分辨率', '是'],

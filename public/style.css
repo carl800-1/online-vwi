@@ -1567,8 +1567,45 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
   margin: 9px 0; font-size: 12.5px; color: var(--ink2);
 }
 .st-lbl { color: var(--ink3); font-size: 12px; }
+/* 标签和它的控件必须黏在一起：这一行在 1440 宽下会折行，
+   折在标签和控件之间就变成「播放内容」在上、按钮在下一行，读不出谁是谁 */
+.st-pair { display: inline-flex; align-items: center; gap: 6px; }
+/* 这一行的两个下拉（播放方式 / 播放内容）用同一套外框，不然一个原生一个自定义，看着像两套控件 */
+.st-reqs .minisel {
+  padding: 1px 6px; border: 1px solid var(--line); border-radius: 6px;
+  background: #fff; font-size: 12.5px; color: var(--ink2); cursor: pointer;
+}
 /* 播放方式属于另一类设置，用一条细竖线跟"允许/单文件≤"隔开，否则串成一长行读不清 */
 .st-div { width: 1px; height: 14px; background: var(--line); margin: 0 3px; }
+
+/* 「播放内容」多选下拉。外观要跟旁边那个原生 select 一个样，
+   否则同一行里一个带边框一个不带，看着像两套控件 */
+.kdd { position: relative; display: inline-flex; }
+.kdd-btn {
+  display: inline-flex; align-items: center; justify-content: space-between; gap: 5px;
+  min-width: 78px; padding: 1px 6px;
+  border: 1px solid var(--line); border-radius: 6px; background: #fff;
+  font-size: 12.5px; color: var(--ink2); cursor: pointer;
+}
+.kdd-btn:hover { border-color: #c8d3e2; }
+.kdd-btn .caret { font-style: normal; font-size: 10px; color: var(--ink3); }
+.kdd-pop {
+  position: absolute; top: calc(100% + 5px); left: 0; z-index: 60;
+  min-width: 136px; padding: 4px;
+  background: #fff; border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 8px 22px rgba(20, 32, 52, .15);
+}
+.kdd-opt {
+  display: flex; align-items: center; gap: 7px;
+  padding: 5px 7px; border-radius: 6px; cursor: pointer; color: var(--ink2);
+  white-space: nowrap;
+}
+.kdd-opt:hover { background: #f3f6fb; }
+.kdd-opt input { margin: 0; }
+/* 最后一个被取消时会给它打回勾，这里不再联动数字框，纯提示性 */
+.kdd-opt span { font-size: 12.5px; }
+/* 「播放内容」没勾这一类的内容：留在清单里但标注不放，否则用户以为屏坏了 */
+.offtag { font-style: normal; color: #a8562b; }
 .req {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 3px 8px; border: 1px solid var(--line); border-radius: 8px;

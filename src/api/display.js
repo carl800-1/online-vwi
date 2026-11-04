@@ -4,7 +4,7 @@
 //   ?line=L1 → 这条线的当前机种 → 该机种的同码工序 → 清单
 // 工序不再属于线体，所以"这条线上有没有 OP30"这种问题已经不存在了；
 // 存在的是"这条线现在做的机种有没有 OP30"。后者才是现场真正会遇到的错配。
-import { q, processByCode } from '../db.js';
+import { q, processByCode, playKindOf, playKindsOf, PLAY_KINDS } from '../db.js';
 import { sendJson, badRequest } from '../router.js';
 import { touch, getState } from '../switch.js';
 import { termMeta } from '../util.js';
@@ -14,16 +14,26 @@ export function processOf(modelId, code) {
   return processByCode(modelId, code);
 }
 
-function itemsOf(processId) {
-  if (!processId) return [];
-  return q.all(
+/**
+ * 这道工序在终端上真正要放的清单。
+ *
+ * 「播放内容」（`process.play_kinds`）在这儿生效：勾了哪几类就下发哪几类，
+ * 三类全勾（或从来没配过）就是全下发。**只过滤下发，不动 item 表** ——
+ * 取消勾选再勾回来，内容还在原来的顺序上，不用重传。
+ */
+function itemsOf(proc) {
+  if (!proc) return [];
+  const rows = q.all(
     `SELECT i.ord, i.kind, i.dwell_sec, i.fit, i.zoom, i.media_id,
-            m.sha256, m.ext, m.mime, m.bytes, m.name
+            m.sha256, m.ext, m.mime, m.bytes, m.name, m.src_sha
        FROM item i JOIN media m ON m.id = i.media_id
       WHERE i.process_id = ?
       ORDER BY i.ord`,
-    processId
+    proc.id
   );
+  const want = playKindsOf(proc.play_kinds);
+  if (want.length >= PLAY_KINDS.length) return rows;
+  return rows.filter((r) => want.includes(playKindOf(r.kind, r.src_sha)));
 }
 
 export function register(router) {
@@ -56,7 +66,10 @@ export function register(router) {
     }
 
     const proc = processOf(model.id, op);
-    const rows = itemsOf(proc?.id);
+    const rows = itemsOf(proc);
+    // 有内容但被「播放内容」全挡在外面，和"压根没传过"是两件事：前者要提示去改勾选，
+    // 后者才提示去传文件。现场看屏只会觉得"怎么什么都没有"，得让他知道去哪儿找。
+    const total = proc ? q.get('SELECT COUNT(*) n FROM item WHERE process_id = ?', proc.id).n : 0;
 
     sendJson(res, 200, {
       lineCode: line.code,
@@ -73,6 +86,8 @@ export function register(router) {
       // 运营方式：loop = 播完从头再来；once = 播完停在最后一屏。
       // 老终端不认识这个字段，会按自己的默认（循环）走，行为和升级前一致。
       playMode: proc?.play_mode === 'once' ? 'once' : 'loop',
+      // 实际生效的播放内容（image/pdf/video）。只给界面与排障看，终端不依赖它。
+      playKinds: playKindsOf(proc?.play_kinds),
       items: rows.map((r) => ({
         mediaId: r.media_id,
         kind: r.kind,
@@ -96,11 +111,16 @@ export function register(router) {
       // 区分"机种没排这道工序"和"排了但没传内容"：前者要调终端工序号或去加工序
       noStation: !proc,
       count: rows.length,
+      // 被「播放内容」挡掉的项数：排障时一眼看出"内容在、只是不放"
+      hiddenCount: Math.max(0, total - rows.length),
       // 终端算下载进度用（准备中 3/11）
       totalBytes: rows.reduce((s, r) => s + r.bytes, 0),
       message: !proc
         ? `「${model.code}」没有工序 ${op}，请核对终端上配的工序号`
-        : (rows.length === 0 ? `「${model.code}」的工序 ${op} 还没有内容` : '')
+        : (rows.length ? ''
+          : (total > 0
+            ? `「${model.code}」工序 ${op} 有 ${total} 项内容，但「播放内容」里没勾它们所属的类型`
+            : `「${model.code}」的工序 ${op} 还没有内容`))
     });
   }, { op: true });
 
@@ -112,7 +132,8 @@ export function register(router) {
     const st = getState(line.id);
     const cur = st.currentModelId ? q.get('SELECT * FROM model WHERE id = ?', st.currentModelId) : null;
     const proc = cur ? processOf(cur.id, op) : null;
-    const have = proc ? q.get('SELECT COUNT(*) n FROM item WHERE process_id = ?', proc.id).n : 0;
+    // 只数真正会下发的：勾掉的那几类不该让终端显示"还有 3 项没下完"
+    const have = itemsOf(proc).length;
     sendJson(res, 200, {
       lineId: line.id,
       lineCode: line.code,
