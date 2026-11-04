@@ -16,8 +16,8 @@ const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
 const BASE = process.env.VWI_UI_BASE || 'http://127.0.0.1:8108';
-const PNG = path.join(ROOT, 'docs', 'ui-4.6.0-play-kinds.png');
-const PNG_MEDIA = path.join(ROOT, 'docs', 'ui-4.6.0-media-noplay.png');
+const PNG = path.join(ROOT, 'docs', 'ui-4.3.1-play-kinds.png');
+const PNG_MEDIA = path.join(ROOT, 'docs', 'ui-4.3.1-media-noplay.png');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const apiJson = async (p, opt) => {

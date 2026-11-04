@@ -13,7 +13,7 @@ const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
 const BASE = process.env.VWI_UI_BASE || 'http://127.0.0.1:8103';
-const PNG = path.join(ROOT, 'docs', 'ui-4.4.0-media-paths.png');
+const PNG = path.join(ROOT, 'docs', 'ui-4.3.1-media-paths.png');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
