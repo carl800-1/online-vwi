@@ -2054,6 +2054,18 @@ const PLAY_MODES = [
   ['once', '播一遍停', '顺序播完停在最后一屏，不再重头开始'],
 ];
 
+// 「播放内容」按界面顺序：图片 / PDF / 视频（存库顺序也按这个，导出时照这个排）
+const PLAY_KINDS = ['image', 'pdf', 'video'];
+const PLAY_CN = { image: '图片', pdf: 'PDF', video: '视频' };
+
+/** 勾选状态：接口回满三项时就是"全放"，等于没限 */
+function playKindsOfSt(st) {
+  const set = (st && Array.isArray(st.playKinds) && st.playKinds.length)
+    ? st.playKinds
+    : PLAY_KINDS;
+  return PLAY_KINDS.filter((k) => set.includes(k));
+}
+
 /**
  * 工序清单表格。
  * 25 道工序用表格而不是卡片：一行 34px，表头固定、表内滚动，
@@ -2083,11 +2095,11 @@ function renderStTable() {
   const total = S.mdStations.length;
 
   if (!S.mdModelId) {
-    tb.innerHTML = '<tr><td colspan="7" class="st-empty">上面选一个机种，这里显示它的工序。</td></tr>';
+    tb.innerHTML = '<tr><td colspan="8" class="st-empty">上面选一个机种，这里显示它的工序。</td></tr>';
     return;
   }
   if (!total) {
-    tb.innerHTML = `<tr><td colspan="7" class="st-empty">
+    tb.innerHTML = `<tr><td colspan="8" class="st-empty">
       这个机种还没有工序。点右上「+ 批量加工序」一次贴多行（一行 <b>OP1 装配</b>）。</td></tr>`;
     return;
   }
@@ -2097,12 +2109,13 @@ function renderStTable() {
     !kw || (st.code || '').toLowerCase().includes(kw) || (st.name || '').toLowerCase().includes(kw));
 
   if (!shown.length) {
-    tb.innerHTML = '<tr><td colspan="7" class="st-empty">没有匹配的工序</td></tr>';
+    tb.innerHTML = '<tr><td colspan="8" class="st-empty">没有匹配的工序</td></tr>';
     return;
   }
 
   tb.innerHTML = shown.map((st) => {
     const n = st.items.length;
+    const on = playKindsOfSt(st);
     return `<tr data-row="${H(st.id)}">
       <td><span class="cell-code" title="工序码就是终端上的 op 参数">${H(st.code)}</span></td>
       <td><input class="cell-in" data-f="name" maxlength="40"
@@ -2115,6 +2128,10 @@ function renderStTable() {
             (st.playMode || 'loop') === v ? ' selected' : ''}>${t}</option>`).join('')}
         </select>
       </td>
+      <td class="cell-pkwrap">${PLAY_KINDS.map((k) => `
+        <label class="cell-pk${on.includes(k) ? ' on' : ''}"${on.length === 1 && on.includes(k)
+          ? ' title="只剩这一类时不能去掉，至少留一类"' : ''}><input type="checkbox"
+          data-pk="${H(st.id)}" data-kind="${k}"${on.includes(k) ? ' checked' : ''}><span>${PLAY_CN[k]}</span></label>`).join('')}</td>
       <td><input class="cell-in cell-num" data-f="cycleSec" data-num="1" inputmode="decimal"
                  maxlength="7" value="${st.cycleSec ? H(st.cycleSec) : ''}"
                  placeholder="—" title="这一工位做一件要几秒；留空 = 未测"></td>
@@ -2195,6 +2212,34 @@ $('stTbody').addEventListener('change', async (e) => {
   } catch (err) { toast(err.message, 'err'); renderStTable(); }
 });
 
+// 播放内容：勾/去勾立刻存。至少留一类 —— 全都不勾等于这块屏什么都不放
+$('stTbody').addEventListener('change', async (e) => {
+  const cb = e.target.closest('[data-pk]');
+  if (!cb) return;
+  const st = S.mdStations.find((x) => x.id === cb.dataset.pk);
+  if (!st) return;
+  const set = new Set(playKindsOfSt(st));
+  if (cb.checked) set.add(cb.dataset.kind); else set.delete(cb.dataset.kind);
+  if (!set.size) {
+    cb.checked = true;
+    toast('播放内容至少要留一类，不然这块屏什么都不放', 'err');
+    return;
+  }
+  const playKinds = PLAY_KINDS.filter((k) => set.has(k));
+  try {
+    const out = await putJson('/api/processes/' + encodeURIComponent(st.id), { playKinds });
+    Object.assign(st, out.process || {});
+    // 只改这一格的勾选样式，不重绘表体（重绘会丢焦点，也会把滚动位置弹回去）
+    const td = cb.closest('td');
+    for (const lab of td.querySelectorAll('.cell-pk')) {
+      lab.classList.toggle('on', set.has(lab.querySelector('input').dataset.kind));
+    }
+  } catch (err) {
+    cb.checked = !cb.checked;
+    toast(err.message, 'err');
+  }
+});
+
 $('stTbody').addEventListener('click', async (e) => {
   // 点「内容」列 → 切到媒体库并直接把那道工序选中
   const jump = e.target.closest('[data-jump]');
@@ -2226,26 +2271,6 @@ async function openInMedia(processId) {
 
 const KIND_CN = { image: '图片', video: '视频', pdf: 'PDF' };
 const KINDS = ['image', 'video', 'pdf'];
-
-// 「播放内容」按界面顺序：图片 / PDF / 视频（存库顺序也按这个，导出时照这个排）
-const PLAY_KINDS = ['image', 'pdf', 'video'];
-const PLAY_CN = { image: '图片', pdf: 'PDF', video: '视频' };
-
-/** 勾选状态：接口回满三项时就是"全放"，等于没限 */
-function playKindsOfSt(st) {
-  const set = (st && Array.isArray(st.playKinds) && st.playKinds.length)
-    ? st.playKinds
-    : PLAY_KINDS;
-  return PLAY_KINDS.filter((k) => set.includes(k));
-}
-
-/** 按钮上那行字：三类全勾写「全部」，否则「图片 / PDF」这样列出来 */
-function playKindsText(st) {
-  const on = playKindsOfSt(st);
-  if (on.length === PLAY_KINDS.length) return '全部';
-  if (!on.length) return '未选';           // 正常走不到，兜个底
-  return on.map((k) => PLAY_CN[k]).join(' / ');
-}
 
 function stationReq(st, kind) {
   return (st.reqs || []).find((r) => r.kind === kind) || null;
@@ -2459,23 +2484,6 @@ function stationHtml(st) {
         <input class="knum" type="number" min="0" max="9999" data-sid="${H(st.id)}" data-f="maxMb"
                value="${st.maxMb || 0}" title="0 = 不限"> MB</span>
       <i class="st-div"></i>
-      <span class="st-pair"><span class="st-lbl">播放</span>
-        <select class="minisel" data-sid="${H(st.id)}" data-f="playMode"
-                title="循环播放：放到最后一项再回到第一项；播一遍停：放到最后一项就停在那一屏">
-          <option value="loop"${(st.playMode || 'loop') === 'loop' ? ' selected' : ''}>循环播放</option>
-          <option value="once"${st.playMode === 'once' ? ' selected' : ''}>播一遍停</option>
-        </select></span>
-      <span class="st-pair"><span class="st-lbl">播放内容</span>
-        <span class="kdd" data-kdd="${H(st.id)}">
-          <button type="button" class="minisel kdd-btn" data-kddbtn="${H(st.id)}"
-                  title="勾上哪几类，这块屏就只放哪几类（PDF 指 PDF 拆出来的页）。三类全勾 = 都放"><span
-            class="kdd-txt">${playKindsText(st)}</span><i class="caret">▾</i></button>
-          <span class="kdd-pop hide">${PLAY_KINDS.map((k) => `
-            <label class="kdd-opt"><input type="checkbox" data-sid="${H(st.id)}" data-pk="${k}"
-                   ${playKindsOfSt(st).includes(k) ? 'checked' : ''}><span>${PLAY_CN[k]}</span></label>`).join('')}
-          </span>
-        </span></span>
-      <i class="st-div"></i>
       <span class="st-pair"><span class="st-lbl">工时</span>
         <input class="knum" type="number" min="0" max="86400" step="0.1"
                style="width:64px" data-sid="${H(st.id)}" data-f="cycleSec"
@@ -2534,30 +2542,9 @@ function refreshMediaSub() {
 }
 
 // ---- 工序交互 ----
-/** 收起所有「播放内容」下拉。点别处就关，和系统里的 select 行为一致 */
-function closeKdd() {
-  for (const p of document.querySelectorAll('.kdd-pop')) p.classList.add('hide');
-}
-document.addEventListener('click', (e) => {
-  if (!e.target.closest('.kdd')) closeKdd();
-});
-
 $('stations').addEventListener('click', async (e) => {
   const t = e.target;
   const sid = t.dataset.sid;
-
-  // 「播放内容」下拉：点按钮开/关。点面板里的复选框不算关闭，
-  // 否则连勾两类要重新点开一次。
-  const kbtn = t.closest('[data-kddbtn]');
-  if (kbtn) {
-    const box = kbtn.closest('.kdd');
-    const pop = box && box.querySelector('.kdd-pop');
-    const wasOpen = pop && !pop.classList.contains('hide');
-    closeKdd();
-    if (pop && !wasOpen) pop.classList.remove('hide');
-    return;
-  }
-  if (t.closest('.kdd-pop')) return;
 
   if (t.matches('[data-pick]')) {
     S.uploadStation = sid;
@@ -2613,27 +2600,6 @@ $('stations').addEventListener('change', async (e) => {
   const sid = t.dataset.sid;
   if (!sid) return;
 
-  // 播放内容：勾/去勾立刻存。至少留一类 —— 全都不勾等于这块屏什么都不放
-  if (t.dataset.pk) {
-    const st = S.stations.find((x) => x.id === sid);
-    if (!st) return;
-    const set = new Set(playKindsOfSt(st));
-    if (t.checked) set.add(t.dataset.pk); else set.delete(t.dataset.pk);
-    if (!set.size) {
-      t.checked = true;
-      toast('播放内容至少要留一类，不然这块屏什么都不放', 'err');
-      return;
-    }
-    const playKinds = PLAY_KINDS.filter((k) => set.has(k));
-    try {
-      await saveStation(sid, { playKinds });
-      // 只换按钮上那行字，不重绘整张卡 —— 重绘会把刚打开的下拉关掉
-      const txt = t.closest('.kdd') && t.closest('.kdd').querySelector('.kdd-txt');
-      if (txt) txt.textContent = playKindsText(st);
-    } catch (err) { toast(err.message, 'err'); }
-    return;
-  }
-
   // 允许的类型：勾/去勾要联动数字框能不能填，只能重画这一块
   if (t.dataset.kind) {
     const st = S.stations.find((x) => x.id === sid);
@@ -2663,7 +2629,6 @@ $('stations').addEventListener('change', async (e) => {
     const payload = {};
     if (numField) payload.maxMb = Math.max(0, Number(t.value) || 0);
     else if (t.dataset.f === 'name') payload.name = t.value.trim() || st.code;
-    else if (t.dataset.f === 'playMode') payload.playMode = t.value === 'once' ? 'once' : 'loop';
     else if (t.dataset.f === 'cycleSec') {
       // 留空就是「还没测」，存 0；上限一天，别让人误填成几十万
       payload.cycleSec = Math.min(86400, Math.max(0, round1(t.value)));
@@ -2860,7 +2825,7 @@ async function showImportPreview(d) {
       <div>来源 <b>${H(d.filename)}</b>${d.sheet ? ` · 页签 <b>${H(d.sheet)}</b>` : ''} ｜ ${d.header ? `第 ${d.headerRow} 行是表头` : '没有表头，按前三列读'} ｜ 认到 <b>${H(cols)}</b></div>
       <div>${scope}</div>
       ${d.sheet === '工序参数' ? `<div class="imp-dim">这是线体设置导出的全量表里的「工序参数」页：除名称和做什么，还会把
-        播放方式、单文件上限、允许类型、图片最小尺寸、工序工时一起写回去。内容项（播放项数）不动。</div>` : ''}
+        播放方式、播放内容、单文件上限、允许类型、图片最小尺寸、工序工时一起写回去。内容项（播放项数）不动。</div>` : ''}
     </div>
     <div class="imp-sum">
       <span class="imp-k ok"><b>${c.new}</b> 道新增</span>
