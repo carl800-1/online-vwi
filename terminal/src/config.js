@@ -72,7 +72,10 @@ const DEFAULTS = {
   kiosk: true,
   autoStart: true,               // 开机自启
   pollFallbackMs: 30000,         // 长轮询断线后的兜底间隔
-  allowDevTools: false
+  allowDevTools: false,
+  // 1.8.0：这份配置被管理端改写过（指派下发）。true 时**优先于 exe 同级的部署包 json** ——
+  // 否则运维那份 json 会在下次重启时把管理端改的号顶回去，屏又播回错误内容。
+  managed: false
 };
 
 function ensureDirs() {
@@ -97,6 +100,7 @@ function normalize(raw) {
   if (c.server && !/^https?:\/\//i.test(c.server)) c.server = 'http://' + c.server;
   c.kiosk = c.kiosk !== false;
   c.autoStart = c.autoStart !== false;
+  c.managed = c.managed === true;
   return c;
 }
 
@@ -116,12 +120,23 @@ function exeDir() {
 
 /**
  * 读配置。优先级：
- *   1. exe 同级目录的 config.json —— 部署包自带，运维批量改这一份最方便
- *   2. %LOCALAPPDATA% 里的 config.json —— 装机向导写出来的
- * 1 存在时会覆盖 2，这样"改部署包里的 config.json 再重启"就能换配置。
+ *   1. %LOCALAPPDATA% 里被管理端改写过的那份（managed=true）—— **最高**
+ *   2. exe 同级目录的 config.json —— 部署包自带，运维批量改这一份最方便
+ *   3. %LOCALAPPDATA% 里的 config.json —— 装机向导写出来的
+ *
+ * 第 1 条是 1.8.0 加的。没有它会出现这种事：管理端把屏改派到 L1/OP30，
+ * 屏也照办了，可下次重启读回运维那份 json 的 L2/OP05，屏又去播 L2 的东西，
+ * 再等 5~25 秒才被指派纠正回来 —— 现场看到的是"改了又变回去"。
+ * 一旦管理端改过，就以本机这份为准；运维要改就改本机配置或重新部署。
  */
 function load() {
   ensureDirs();
+  const local = readJson(PATHS.config, null);
+  const fromLocal = local ? normalize(local) : null;
+  if (fromLocal && fromLocal.managed && isValid(fromLocal)) {
+    return { ...fromLocal, from: 'local-managed' };
+  }
+
   const portable = path.join(exeDir(), 'config.json');
   const fromPortable = readJson(portable, null);
   if (fromPortable) {
@@ -131,8 +146,7 @@ function load() {
       return { ...c, from: 'portable' };
     }
   }
-  const local = readJson(PATHS.config, null);
-  if (local) return { ...normalize(local), from: 'local' };
+  if (fromLocal) return { ...fromLocal, from: 'local' };
   return { ...normalize({}), from: 'none' };
 }
 

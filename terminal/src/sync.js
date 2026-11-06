@@ -62,6 +62,9 @@ class Syncer extends EventEmitter {
     this.startedAt = Date.now();
     this._statusKey = '';
     this._wakeRetry = null;
+    // 1.8.0：已经发出过的那次改派（'L1/OP30'）。同一个值只发一次 ——
+    // 主进程收到就会重启同步，重启完成前还会再收到几轮相同下发，重复发会把配置写好几遍。
+    this.assignKey = '';
   }
 
   snapshot() {
@@ -154,6 +157,9 @@ class Syncer extends EventEmitter {
         if (this.meta.res) body.res = this.meta.res;
         if (this.meta.ver) body.ver = this.meta.ver;
         if (this.meta.free) body.free = Math.round(this.meta.free / 1048576);
+        // 1.8.0：计算机名。管理端的客户端列表里「192.168.1.31」变成「3F-XB-01」，
+        // 现场说"3楼西北角那台"才找得到是哪一行。老服务端会忽略这个字段。
+        if (this.meta.name) body.name = this.meta.name;
         const m = this.pendingCode || this.appliedCode;
         if (m) body.model = m;
         await net.postJson(this.cfg.server, '/api/telemetry', body, { timeoutMs: 6000 });
@@ -234,6 +240,10 @@ class Syncer extends EventEmitter {
   // ───────────── 状态处理 ─────────────
 
   async apply(st) {
+    // ⓪ 管理端改派优先看：它决定"这台屏应该在哪"，比下面任何内容判断都靠前。
+    //    这里只上报事件、不动 cfg —— 换线体要连带换内容目录和缓存，那是主进程的事。
+    this.checkAssign(st);
+
     const curId = st.currentModelId || '';
     const curCode = st.modelCode || '';
     this.serverCurrentId = curId;
@@ -294,6 +304,38 @@ class Syncer extends EventEmitter {
       console.warn(`[sync] 掉队：本地无 ${curCode} 内容，开始补下载`);
     }
     this.startPrepare(curId, curCode);
+  }
+
+  /**
+   * 管理端改派的下发。
+   *
+   * 服务端从 4.5.0 起，`/api/state` 会带一个 assign（只有被指派过才有）：
+   * `{ line:'L1', op:'OP30', src:'admin'|'self' }`。它代表"管理端认为这台屏该在哪"——
+   * 与屏上填的不一致时，屏要跟着改，双端才能收敛到同一个值。
+   *
+   * 三个刻意的边界：
+   *   ① **只发事件，不在这里改 cfg**。换线体要连带换内容目录、清掉旧线的缓存索引，
+   *      那是主进程重启同步的事；在这里改一半会让下一次请求用新号、盘上还是旧线的内容。
+   *   ② **同一个值只发一次**。主进程重启同步需要几百毫秒，这期间还会收到几轮相同下发，
+   *      重复发等于反复重启。
+   *   ③ **一致时把 assignKey 清空**。管理端改回去再改回来，还要能再纠正一次。
+   */
+  checkAssign(st) {
+    const a = st && st.assign;
+    if (!a || !a.op) return;
+    const line = String(a.line || '').toUpperCase();
+    const op = String(a.op || '').toUpperCase();
+    const curLine = String(this.cfg.line || '').toUpperCase();
+    const curOp = String(this.cfg.op || '').toUpperCase();
+    if (line === curLine && op === curOp) { this.assignKey = ''; return; }
+    const key = line + '/' + op;
+    if (key === this.assignKey) return;
+    this.assignKey = key;
+    console.log(`[sync] 管理端改派：${curLine || '(跟随)'} / ${curOp} → ${line} / ${op}`);
+    this.emit('assign', {
+      line, op, src: a.src || '',
+      fromLine: curLine, fromOp: curOp
+    });
   }
 
   /**

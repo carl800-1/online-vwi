@@ -218,6 +218,26 @@ body.stale .model .op { border-left-color: rgba(255, 255, 255, .4); }
 #hint.warn { color: #ffce85; border-color: #5c4520; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* 管理端改派提示：只在角上挂 4 秒，不遮画面中心 */
+#assignNotice {
+  position: absolute;
+  left: 50%;
+  top: 92px;
+  transform: translateX(-50%);
+  padding: 14px 26px;
+  border-radius: 12px;
+  background: rgba(28, 92, 176, .95);
+  border: 1px solid #3b6ea8;
+  color: #eaf3ff;
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: .5px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .45);
+  z-index: 30;
+  white-space: nowrap;
+}
+#assignNotice[hidden] { display: none; }
+
 /* ───────── 底栏 120px ───────── */
 footer {
   flex: 0 0 120px;

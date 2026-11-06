@@ -1,6 +1,6 @@
 {
   "name": "online-vwi-terminal",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "productName": "ESOP-Client",
   "description": "在线 VWI 发布系统 · 工作台接收端（kiosk 全屏播放）",
   "main": "main.js",

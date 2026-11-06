@@ -405,6 +405,22 @@ function log(level, msg) {
   else console[level === 'error' ? 'error' : 'log']('[player]', msg);
 }
 
+/**
+ * 管理端改派时角上挂一条 4 秒提示。
+ *
+ * 为什么必须有：画面会自己换成另一道工序的内容，工人正看着指导书忽然变了，
+ * 不给一句解释会以为是系统坏了。同时顶栏的线体/工序也会跟着变（renderStatus 里改）。
+ */
+function showAssign(a) {
+  const el = $('assignNotice');
+  if (!el) return;
+  el.textContent = `配置已由管理端更新为 ${a.line || ''} / ${a.op || ''}`;
+  el.hidden = false;
+  clearTimeout(showAssign._timer);
+  showAssign._timer = setTimeout(() => { el.hidden = true; }, 4000);
+  log('info', `管理端改派：${a.fromLine || '(跟随)'}/${a.fromOp} → ${a.line}/${a.op}`);
+}
+
 // ───────────────────────── 启动 ─────────────────────────
 
 async function boot() {
@@ -422,6 +438,7 @@ async function boot() {
 
   window.vwi.onView(applyView);
   window.vwi.onStatus(renderStatus);
+  if (window.vwi.onAssign) window.vwi.onAssign(showAssign);
 
   try {
     const snap = await window.vwi.snapshot();

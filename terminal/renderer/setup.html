@@ -7,28 +7,29 @@
 <title>ESOP 客户端 · 设置</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
   body {
     font-family: "Microsoft YaHei", "微软雅黑", system-ui, sans-serif;
     background: #f6f8fb;
     color: #1e2733;
-    padding: 34px 40px;
     font-size: 14px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;              /* 只有中间那段滚，页头页脚固定 */
   }
+  .head { padding: 26px 36px 16px; flex: none; }
   h1 { font-size: 20px; font-weight: 700; margin-bottom: 6px; }
-  .sub { color: #6b7a8d; font-size: 13px; margin-bottom: 26px; line-height: 1.6; }
-  .field { margin-bottom: 20px; }
+  .sub { color: #6b7a8d; font-size: 13px; line-height: 1.65; }
+  .scroll { flex: 1; overflow-y: auto; padding: 4px 36px 22px; }
+
+  .field { margin-bottom: 16px; }
   label { display: block; font-weight: 600; margin-bottom: 8px; font-size: 13px; }
   label small { font-weight: 400; color: #8494a8; margin-left: 6px; }
   input[type=text] {
-    width: 100%;
-    height: 44px;
-    padding: 0 14px;
-    border: 1px solid #d5deea;
-    border-radius: 8px;
-    font-size: 15px;
-    font-family: "Consolas", monospace;
-    background: #fff;
-    outline: none;
+    width: 100%; height: 44px; padding: 0 14px;
+    border: 1px solid #d5deea; border-radius: 8px;
+    font-size: 15px; font-family: "Consolas", monospace;
+    background: #fff; outline: none;
     transition: border-color .15s, box-shadow .15s;
   }
   input[type=text]:focus { border-color: #2f7fe0; box-shadow: 0 0 0 3px rgba(47,127,224,.13); }
@@ -37,56 +38,73 @@
   .row input { flex: 1; }
 
   button {
-    height: 44px;
-    padding: 0 20px;
-    border: 0;
-    border-radius: 8px;
-    background: #2f7fe0;
-    color: #fff;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    font-family: inherit;
-    transition: background .15s, opacity .15s;
-    white-space: nowrap;
+    height: 44px; padding: 0 20px; border: 0; border-radius: 8px;
+    background: #2f7fe0; color: #fff; font-size: 14px; font-weight: 600;
+    cursor: pointer; font-family: inherit;
+    transition: background .15s, opacity .15s; white-space: nowrap;
   }
   button:hover { background: #276fc9; }
   button:disabled { opacity: .5; cursor: default; }
   button.ghost { background: #fff; color: #33445c; border: 1px solid #d5deea; }
   button.ghost:hover { background: #eef3fa; }
 
-  .msg { margin-top: 12px; font-size: 13px; min-height: 20px; line-height: 1.6; }
+  .msg { margin-top: 10px; font-size: 13px; min-height: 19px; line-height: 1.65; }
   .msg.ok { color: #1a8f4c; }
   .msg.err { color: #c62d24; }
+  .msg.warn { color: #a86a10; }
 
-  .procs { display: none; margin-top: 22px; }
+  /* 检测之前的占位：以前这两块是 display:none，打开页面只看得到第一项，
+     没人知道"下面还有东西"，第一次装机基本都会愣在这里 */
+  .empty {
+    border: 1px dashed #c8d5e6; border-radius: 10px;
+    padding: 22px 20px; text-align: center; color: #8494a8;
+    font-size: 13px; line-height: 1.9; background: #fbfdff;
+  }
+  .empty b { color: #2f7fe0; font-weight: 600; }
+
+  .procs { display: none; margin-top: 20px; }
   .procs.show { display: block; }
-  .procgrid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-top: 12px; }
+  /* 4 列：15 道工序从 5 行压到 4 行；窗口拉宽会自动多列 */
+  .procgrid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
+    gap: 10px; margin-top: 12px;
+  }
+  /* 工序卡片只有"代码 + 名字"两个短词，可以排得更密：15 道工序从 4 行压到 3 行，
+     装机时少滚一屏。线体卡片要显示名称（"外贸配件"这种长词），保持宽一点。 */
+  #procgrid { grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); }
   .proc {
-    border: 1px solid #d5deea;
-    border-radius: 9px;
-    background: #fff;
-    padding: 12px 14px;
-    cursor: pointer;
-    text-align: left;
-    height: auto;
-    color: #1e2733;
-    font-weight: 400;
+    position: relative;
+    border: 1px solid #d5deea; border-radius: 9px; background: #fff;
+    padding: 11px 13px; cursor: pointer; text-align: left; height: auto;
+    color: #1e2733; font-weight: 400;
     transition: border-color .12s, background .12s;
   }
   .proc:hover { border-color: #2f7fe0; background: #f4f9ff; }
   .proc.sel { border-color: #2f7fe0; background: #e8f2ff; box-shadow: inset 0 0 0 1px #2f7fe0; }
   .proc b { display: block; font-size: 15px; font-weight: 700; font-family: Consolas, monospace; }
   .proc span { display: block; font-size: 12px; color: #6b7a8d; margin-top: 3px; }
+  .proc .tag {
+    position: absolute; top: 7px; right: 8px;
+    font-size: 10px; line-height: 1; padding: 3px 6px;
+    border-radius: 6px; background: #eef3fa; color: #5b7ba6;
+  }
+
+  /* 自报结果条：固定在页脚上方。
+     不能放在滚动区里 —— 装机时页面已经滚到工序那一屏，结果写在下面等于没写。 */
+  .resultbar {
+    flex: none; display: none;
+    padding: 12px 36px; font-size: 13px; line-height: 1.7;
+    border-top: 1px solid #e2e9f2;
+  }
+  .resultbar.show { display: block; }
+  .resultbar.ok { background: #eefaf1; border-top-color: #bfe7cd; color: #166b3a; }
+  .resultbar.warn { background: #fff8e8; border-top-color: #f0d9a8; color: #8a5b06; }
+  .resultbar b { font-weight: 700; }
 
   footer {
-    margin-top: 30px;
-    padding-top: 20px;
-    border-top: 1px solid #e2e9f2;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
+    flex: none; display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; padding: 13px 36px;
+    border-top: 1px solid #e2e9f2; background: #fff;
   }
   .note { font-size: 12px; color: #8494a8; line-height: 1.6; }
   .ver { font-size: 12px; color: #8494a8; }
@@ -94,30 +112,41 @@
 </head>
 <body>
 
-<h1>终端设置</h1>
-<p class="sub">
-  每台屏要填三项：接哪台服务器、属于哪条线体、是哪道工序。<br>
-  填错会导致屏上显示别的产线或工序的指导书 —— 装机时核对一次。
-</p>
+<div class="head">
+  <h1>终端设置</h1>
+  <p class="sub">
+    每台屏要填三项：接哪台服务器、属于哪条线体、是哪道工序。<br>
+    填错会导致屏上显示别的产线或工序的指导书 —— 装机时核对一次。
+  </p>
+</div>
 
-<div class="field">
-  <label>服务器地址<small>形如 http://192.168.1.100:8092</small></label>
-  <div class="row">
-    <input type="text" id="server" placeholder="http://192.168.1.100:8092" spellcheck="false">
-    <button id="probe" class="ghost">检测</button>
+<div class="scroll">
+  <div class="field">
+    <label>服务器地址<small>形如 http://192.168.1.100:8092</small></label>
+    <div class="row">
+      <input type="text" id="server" placeholder="http://192.168.1.100:8092" spellcheck="false">
+      <button id="probe" class="ghost">检测</button>
+    </div>
+    <div class="msg" id="probeMsg"></div>
   </div>
-  <div class="msg" id="probeMsg"></div>
+
+  <div class="empty" id="hintEmpty">
+    填好服务器地址后点右边「<b>检测</b>」<br>
+    连上了这里才会出现<b>线体</b>和<b>工序</b>可选
+  </div>
+
+  <div class="procs" id="lines">
+    <label>这台屏属于哪条线体？<small>每天的活不一定在同一条线上，选错就会播出另一条线的指导书</small></label>
+    <div class="procgrid" id="linegrid"></div>
+  </div>
+
+  <div class="procs" id="procs">
+    <label>这台屏是哪道工序？</label>
+    <div class="procgrid" id="procgrid"></div>
+  </div>
 </div>
 
-<div class="procs" id="lines">
-  <label>这台屏属于哪条线体？<small>每天的活不一定在同一条线上，选错就会播出另一条线的指导书</small></label>
-  <div class="procgrid" id="linegrid"></div>
-</div>
-
-<div class="procs" id="procs">
-  <label>这台屏是哪道工序？</label>
-  <div class="procgrid" id="procgrid"></div>
-</div>
+<div class="resultbar" id="helloMsg"></div>
 
 <footer>
   <div>
@@ -134,10 +163,12 @@
 'use strict';
 const $ = (id) => document.getElementById(id);
 let picked = '';          // 选中的工序 code
-let pickedLine = '';      // 选中的线体 code（空 = 跟随服务端当前启用的线体）
+let pickedLine = '';      // 选中的线体 code
 let pickedLineId = '';
 let probed = false;
 let serverUrl = '';
+let initial = { line: '', op: '', server: '' };   // 本机已有配置（从托盘打开时用来回选）
+let saving = false;
 
 $('probe').addEventListener('click', doProbe);
 $('server').addEventListener('keydown', (e) => { if (e.key === 'Enter') doProbe(); });
@@ -155,6 +186,7 @@ async function doProbe() {
     if (!r.ok) {
       setMsg('err', '连不上：' + r.error + '<br>检查服务器是否开机、防火墙是否放行 8092 端口');
       probed = false;
+      $('hintEmpty').style.display = '';
       $('lines').classList.remove('show');
       $('procs').classList.remove('show');
       $('save').disabled = true;
@@ -165,16 +197,22 @@ async function doProbe() {
     probed = true;
     setMsg('ok', `已连接　服务器版本 ${r.version || '—'}　当前生产型号 <b>${r.modelCode || '未指定'}</b>`);
 
-    renderLines(r.lines || [], r.activeLineCode || '');
-    // 只有一条线体时不必让运维多点一次，直接按它带出工序
-    if ((r.lines || []).length === 1) {
-      pickedLine = r.lines[0].code;
-      pickedLineId = r.lines[0].id;
-      renderProcs(r.processes || []);
+    const lines = sortLines(r.lines || []);
+    renderLines(lines, r.activeLineCode || '');
+    $('hintEmpty').style.display = 'none';
+
+    // 已有配置优先回选（从托盘「更改设置…」进来的情况）：
+    // 以前打开是一张空白页，运维得凭记忆重选一遍，容易选错。
+    const want = lines.find((l) => l.code === initial.line);
+    if (want) {
+      await pickLine(want);
+    } else if (lines.length === 1) {
+      // 只有一条线体时不必让运维多点一次，直接按它带出工序
+      await pickLine(lines[0]);
     } else {
       $('procs').classList.remove('show');
     }
-    $('save').disabled = !pickedLine || !picked;
+    $('save').disabled = !(pickedLine && picked);
   } catch (e) {
     setMsg('err', '检测失败：' + e.message);
   } finally {
@@ -182,40 +220,73 @@ async function doProbe() {
   }
 }
 
+/** 启用的排前面：现场 11 条线，真正在跑的就一两条，不该埋在中间 */
+function sortLines(list) {
+  return list.slice().sort((a, b) => (b.enabled ? 1 : 0) - (a.enabled ? 1 : 0));
+}
+
 function renderLines(lines, activeCode) {
   const grid = $('linegrid');
   grid.textContent = '';
   if (!lines.length) {
     $('lines').classList.remove('show');
+    $('hintEmpty').style.display = '';
     setMsg('err', '服务器上还没有任何线体，请先在管理端「+ 新建线体」');
     return;
   }
   for (const l of lines) {
     const b = document.createElement('button');
-    b.className = 'proc' + (l.code === activeCode ? ' sel' : '');
+    // 注意：这里**不能**按 activeCode 预置 .sel ——
+    // 1.7.x 就是这么写的，结果"看起来选中了"但 pickedLine 是空的，
+    // 保存按钮一直是灰的，现场以为点了没反应。真要选中就走 pickLine()。
+    b.className = 'proc';
     b.dataset.code = l.code;
     const t = document.createElement('b');
-    t.textContent = l.name + (l.enabled ? ' · 启用中' : '');
+    t.textContent = l.name;
     const s = document.createElement('span');
     s.textContent = l.code + ' · ' + l.processes + ' 道工序';
     b.appendChild(t);
     b.appendChild(s);
-    b.addEventListener('click', async () => {
-      pickedLine = l.code;
-      pickedLineId = l.id;
-      picked = '';
-      $('save').disabled = true;
-      for (const el of grid.querySelectorAll('.proc')) el.classList.toggle('sel', el === b);
-      $('procs').classList.remove('show');
-      setMsg('', '正在读取「' + l.name + '」的工序…');
-      const r = await window.vwi.lineProcesses(serverUrl, l.id);
-      if (!r.ok) { setMsg('err', '读取工序失败：' + r.error); return; }
-      renderProcs(r.processes || []);
-      setMsg('ok', `已选「${l.name}」　共 ${(r.processes || []).length} 道工序，请选本机所在的那道`);
-    });
+    if (l.code === activeCode) {
+      const tag = document.createElement('i');
+      tag.className = 'tag';
+      tag.textContent = '生产中';
+      b.appendChild(tag);
+    }
+    b.addEventListener('click', () => pickLine(l));
     grid.appendChild(b);
   }
   $('lines').classList.add('show');
+}
+
+/** 选中一条线体：**这个函数才是真正的"选中"**，pickedLine 与高亮一起变 */
+async function pickLine(l) {
+  pickedLine = l.code;
+  pickedLineId = l.id;
+  picked = '';
+  $('save').disabled = true;
+  for (const el of $('linegrid').querySelectorAll('.proc')) {
+    el.classList.toggle('sel', el.dataset.code === l.code);
+  }
+  $('procs').classList.remove('show');
+  setMsg('', '正在读取「' + l.name + '」的工序…');
+  const r = await window.vwi.lineProcesses(serverUrl, l.id);
+  if (!r.ok) { setMsg('err', '读取工序失败：' + r.error); return; }
+  const list = r.processes || [];
+  renderProcs(list);
+
+  // 工序也按已有配置回选（回选到的工序才算"已选中"）
+  const wantOp = list.find((p) => p.code === initial.op);
+  if (wantOp) {
+    for (const el of $('procgrid').querySelectorAll('.proc')) {
+      el.classList.toggle('sel', el.dataset.code === wantOp.code);
+    }
+    picked = wantOp.code;
+    $('save').disabled = false;
+    setMsg('ok', `已选「${l.name}」/ ${wantOp.code}　共 ${list.length} 道工序`);
+  } else {
+    setMsg('ok', `已选「${l.name}」　共 ${list.length} 道工序，请选本机所在的那道`);
+  }
 }
 
 function renderProcs(list) {
@@ -243,18 +314,75 @@ function renderProcs(list) {
 }
 
 async function doSave() {
+  if (saving) return;
   if (!pickedLine) { setMsg('err', '请选择线体'); return; }
   if (!picked) { setMsg('err', '请选择工序'); return; }
   if (!probed) { setMsg('err', '请先点"检测"确认服务器可达'); return; }
+
+  saving = true;
   $('save').disabled = true;
-  setMsg('', '正在保存…');
-  const r = await window.vwi.saveConfig({
-    line: pickedLine, op: picked, server: $('server').value.trim()
-  });
-  if (!r.ok) {
-    setMsg('err', r.error || '保存失败');
-    $('save').disabled = false;
+  $('save').textContent = '正在保存…';
+  setMsg('', '');
+
+  let r;
+  try {
+    r = await window.vwi.saveConfig({ line: pickedLine, op: picked, server: $('server').value.trim() });
+  } catch (e) {
+    r = { ok: false, error: e.message };
   }
+  if (!r.ok) {
+    saving = false;
+    $('save').textContent = '保存并开始';
+    $('save').disabled = false;
+    setMsg('err', r.error || '保存失败');
+    return;
+  }
+
+  // 把自报结果显示出来，再自己收尾（1.8.0：不再"点完就关"，装了看不看得见全靠猜）
+  const hold = renderHello(r.hello, r);
+  $('save').textContent = '已保存';
+  setTimeout(() => { window.vwi.finishSetup(); }, hold);
+}
+
+/**
+ * @returns {number} 停留多久再关窗口（毫秒）。出错类多留一会儿，让人看清。
+ */
+function renderHello(h, r) {
+  const el = $('helloMsg');
+  const tail = '　正在启动播放…';
+  const show = (cls, html) => { el.className = 'resultbar show ' + cls; el.innerHTML = html; };
+
+  if (!h || h.ok === false) {
+    if (h && h.oldServer) {
+      show('warn', `设置已保存：<b>${r.line || ''} / ${r.op || ''}</b>　` +
+        '服务端版本较旧，不支持自报（不影响播放）' + tail);
+      return 2600;
+    }
+    show('warn', `设置已保存：<b>${r.line || ''} / ${r.op || ''}</b>　` +
+      `自报没成功：${h ? h.error : '未知原因'}${tail}`);
+    return 3000;
+  }
+
+  const where = `${h.lineCode || r.line || ''} / ${h.processCode || r.op || ''}`;
+  if (h.state === 'confirmed') {
+    show('ok', `设置已保存：<b>${where}</b>　服务端已确认，与本机设置一致${tail}`);
+    return 1800;
+  }
+  if (h.state === 'assigned') {
+    // 管理端说了算：这里改了号也会在几秒内被改回去，必须说清楚，否则现场反复改、反复"变回去"
+    const a = h.assign || {};
+    show('warn', `设置已保存：<b>${where}</b>　但这台屏已被管理端指派到 ` +
+      `<b>${a.lineCode || '—'} / ${a.processCode || '—'}</b>，本机将按管理端执行。<br>` +
+      `要调岗请在管理端「机种设置 → 工序设定 → 屏」里改。${tail}`);
+    return 4200;
+  }
+  if (h.state === 'conflict') {
+    show('warn', `设置已保存：<b>${where}</b>　这道工序已被另一台屏（${h.conflictWith || '未知'}）占用，` +
+      `本机不会被自动绑定。<br>请到管理端确认该由哪一台负责。${tail}`);
+    return 4200;
+  }
+  show('ok', `设置已保存：<b>${where}</b>　服务端已收到，等管理端确认（不影响播放）${tail}`);
+  return 2600;
 }
 
 function setMsg(cls, html) {
@@ -266,7 +394,9 @@ function setMsg(cls, html) {
 (async function init() {
   try {
     const snap = await window.vwi.snapshot();
-    if (snap.op || snap.line) $('server').value = (snap.status && snap.status.server) || '';
+    initial = { line: snap.line || '', op: snap.op || '', server: (snap.status && snap.status.server) || '' };
+    // 有配置就把服务器填上（以前只在 line/op 都存在时才填，第一次装机是空的）
+    if (initial.server) $('server').value = initial.server;
   } catch { /* ignore */ }
   try {
     const c = await window.vwi.cacheStats();

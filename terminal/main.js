@@ -7,9 +7,11 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, screen, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
 const config = require('./src/config');
 const cache = require('./src/cache');
 const net = require('./src/net');
+const { hello } = require('./src/hello');
 const { Syncer } = require('./src/sync');
 
 const DEV = process.argv.includes('--dev') || process.argv.includes('-d');
@@ -54,6 +56,7 @@ let tray = null;
 let syncer = null;
 let cfg = null;
 let allowQuit = false;
+let finishingSetup = false;        // 正在从设置页收尾：closed 回调不要再自作主张
 let flipSeq = 0;
 const pendingFlips = new Map();     // flipId -> resolve
 let watchdogTimer = null;
@@ -183,10 +186,16 @@ function createPlayerWindow() {
 }
 
 function createSetupWindow() {
+  const display = screen.getPrimaryDisplay();
+  const b = display.workAreaSize || { width: 1280, height: 800 };
   setupWin = new BrowserWindow({
-    width: 760,
-    height: 620,
-    resizable: false,
+    // 内容会随线体/工序数量变高：11 条线体 + 15 道工序在旧窗口（620 高、不可拉大）里
+    // 要往下滚 545px 才够得着「保存并开始」，第一次装机的人基本都会卡在这里。
+    width: Math.min(820, b.width - 80),
+    height: Math.min(760, b.height - 60),
+    minWidth: 640,
+    minHeight: 520,
+    resizable: true,
     frame: true,
     backgroundColor: '#f6f8fb',
     title: 'ESOP 客户端 · 设置',
@@ -196,6 +205,7 @@ function createSetupWindow() {
   setupWin.loadFile(path.join(__dirname, 'renderer', 'setup.html'));
   setupWin.on('closed', () => {
     setupWin = null;
+    if (finishingSetup) { finishingSetup = false; return; }
     // 配置还是不全就说明装机没完成，进程留着没有意义（也不会有人看到托盘）
     if (!config.isValid(cfg)) {
       console.log('[boot] 装机向导被关闭且配置不完整，退出');
@@ -229,7 +239,12 @@ function collectMeta() {
     free = Number(st.bavail) * Number(st.bsize);
   } catch { /* ignore */ }
 
-  return { res, ver: app.getVersion(), free };
+  return { res, ver: app.getVersion(), free, name: hostName() };
+}
+
+/** 计算机名：管理端用它替代裸 IP（"3F-XB-01" 比 "192.168.1.31" 好找）。取不到就留空。 */
+function hostName() {
+  try { return os.hostname() || ''; } catch { return ''; }
 }
 
 function startSync() {
@@ -277,8 +292,45 @@ function startSync() {
     if (tray) refreshTrayMenu(snap);
   });
 
+  // 管理端改派：屏要跟着改，双端收敛到同一个值（4.5.0 服务端下发 → 1.8.0 终端执行）
+  syncer.on('assign', applyAssign);
+
   syncer.start();
   startWatchdog();
+}
+
+/**
+ * 执行一次管理端改派：改写本地配置、屏上提示、重启同步。
+ *
+ * 为什么必须重启同步而不是改 cfg 了事：内容目录是按线体分的（cache.setLine），
+ * 只改 cfg 会变成"按新线体请求内容、盘上还是旧线体的索引"，冷启动会先播错内容。
+ * restart 之后 start() 会重新 setLine + 清盘，等于这台屏刚换了个岗位。
+ */
+function applyAssign(a) {
+  const next = config.save({ ...cfg, line: a.line, op: a.op, managed: true });
+  if (!config.isValid(next)) {
+    console.warn('[assign] 改派后的配置不完整，忽略：', JSON.stringify(a));
+    return;
+  }
+  cfg = next;
+  console.log(`[assign] 已按管理端改写本地配置：${a.fromLine || '(跟随)'}/${a.fromOp} → ${a.line}/${a.op}` +
+    (a.src === 'self' ? '（采纳自报）' : ''));
+
+  if (tray) {
+    tray.setToolTip(`ESOP 客户端 · ${cfg.line} / ${cfg.op}`);
+  }
+  // 屏上留一条 4 秒的提示：工人会看到画面自己换了内容，得知道是管理端干的
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('vwi:assign', {
+      line: a.line, op: a.op, fromLine: a.fromLine, fromOp: a.fromOp
+    });
+  }
+
+  // 重启同步（不销毁窗口，画面继续留着，直到新内容备好才翻）
+  stopSync();
+  setTimeout(() => {
+    if (!syncer) startSync();
+  }, 400);
 }
 
 function startWatchdog() {
@@ -370,6 +422,19 @@ function openSetupFromTray() {
   if (win && !win.isDestroyed()) win.hide();
 }
 
+/** 设置收尾：关设置窗 → 重建播放窗（配置变了，窗口标题、内容目录都要跟着换） */
+function finishSetup() {
+  stopSync();
+  // 只有真的有关闭动作才置位，否则这个标记会一直挂着，把下一次正常的关闭也吃掉
+  finishingSetup = Boolean(setupWin && !setupWin.isDestroyed());
+  if (finishingSetup) setupWin.destroy();
+  setupWin = null;
+  if (win && !win.isDestroyed()) { win.destroy(); win = null; }
+  createPlayerWindow();
+  if (!tray) createTray();
+  else refreshTrayMenu(null);
+}
+
 // ───────────────────────── IPC ─────────────────────────
 
 function registerIpc() {
@@ -443,18 +508,33 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('vwi:save-config', (_e, input) => {
-    const next = config.save(input);
+  /**
+   * 保存设置。
+   *
+   * 1.8.0 起**保存之后不立刻关窗口**：先向服务端自报一次（hello），把结果拿回来给设置页显示 ——
+   * 「服务端已收到 / 待管理端确认 / 已被指派到别处 / 这道工序已被 192.168.1.32 占用」。
+   * 装机的人站在屏前面就能知道对不对，不用跑回管理端按 IP 反查。
+   * 真正的收尾（关窗口、开播放窗）由渲染层在看完提示后调 vwi:finish-setup 触发。
+   */
+  ipcMain.handle('vwi:save-config', async (_e, input) => {
+    const next = config.save({ ...(input || {}), managed: cfg ? cfg.managed : false });
     if (!config.isValid(next)) return { ok: false, error: '工序或服务器地址不完整' };
     cfg = next;
     applyAutoStart();
     console.log(`[config] 已保存 line=${cfg.line || '(跟随服务端)'} op=${cfg.op} server=${cfg.server}`);
 
-    // 配置变了就重开播放窗口
-    stopSync();
-    if (setupWin) { setupWin.close(); setupWin = null; }
-    if (win && !win.isDestroyed()) { win.destroy(); win = null; }
-    createPlayerWindow();
+    // 自报失败不阻塞装机：网络抖一下就装不完的话，现场只能重来。
+    const h = await hello(cfg.server, {
+      line: cfg.line, op: cfg.op, ver: app.getVersion(),
+      res: collectMeta().res, name: hostName()
+    });
+    console.log(`[config] 自报结果 ${h.ok ? h.state : '失败：' + h.error}`);
+    return { ok: true, line: cfg.line, op: cfg.op, hello: h };
+  });
+
+  /** 设置页看完自报结果后收尾：关掉设置窗，开（或重启）播放窗。 */
+  ipcMain.handle('vwi:finish-setup', () => {
+    finishSetup();
     return { ok: true };
   });
 

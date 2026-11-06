@@ -68,7 +68,20 @@ contextBridge.exposeInMainWorld('vwi', {
     }
   },
 
-  saveConfig: async () => ({ ok: true }),
+  saveConfig: async (input) => ({
+    ok: true,
+    line: (input && input.line) || '',
+    op: (input && input.op) || '',
+    hello: {
+      ok: true,
+      state: process.env.SETUP_SHOT_STATE || 'pending',
+      lineCode: (input && input.line) || '',
+      processCode: (input && input.op) || '',
+      conflictWith: '192.168.1.32',
+      assign: { lineCode: 'L2', processCode: 'OP05' }
+    }
+  }),
+  finishSetup: () => {},
   openContentDir: () => {},
   openLog: () => {},
   quit: () => {},

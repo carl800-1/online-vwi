@@ -1,11 +1,16 @@
-// 给「终端设置页」截图：证明线体/工序两块藏在「检测」之后，并量出内容总高度。
-// 只读，不改任何配置（mock preload 的 saveConfig 是空的）。
+// 给「终端设置页」截图（1.8.0：固定页脚 + 未检测占位 + 4 列工序 + 自报结果）。
+// 只读，不改任何配置（mock preload 的 saveConfig 不落盘）。
+//
+// 用法：
+//   SETUP_SHOT_SERVER=http://127.0.0.1:8116 node_modules/electron/dist/electron.exe test/_shot-setup.cjs
+//   SETUP_SHOT_STATE=assigned ...   # 截图里的自报结果（pending / confirmed / assigned / conflict）
 const { app, BrowserWindow } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 
 const OUT = path.join(__dirname, '..', 'docs');
 const BASE = process.env.SETUP_SHOT_SERVER || 'http://127.0.0.1:8114';
+const STATE = process.env.SETUP_SHOT_STATE || 'pending';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function shot(win, name) {
@@ -19,7 +24,9 @@ async function shot(win, name) {
 
 app.whenReady().then(async () => {
   const win = new BrowserWindow({
-    width: 760, height: 620, show: false, frame: true, resizable: false,
+    // 和 main.js 里 createSetupWindow() 的参数一致
+    width: 820, height: 760, show: false, frame: true, resizable: true,
+    minWidth: 640, minHeight: 520,
     backgroundColor: '#f6f8fb',
     webPreferences: {
       preload: path.join(__dirname, '_shot-setup-preload.cjs'),
@@ -33,17 +40,22 @@ app.whenReady().then(async () => {
   await win.loadFile(path.join(__dirname, '..', 'terminal', 'renderer', 'setup.html'));
   await sleep(700);
 
-  // ① 初始状态：圈出「检测」按钮
-  const btn = await js(`(() => {
+  // ① 初始状态：占位提示必须在
+  const init = await js(`(() => {
     const b = document.getElementById('probe');
     b.style.outline = '3px solid #e24b4a';
     b.style.outlineOffset = '2px';
     const r = b.getBoundingClientRect();
-    return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+    return {
+      hint: getComputedStyle(document.getElementById('hintEmpty')).display !== 'none',
+      linesShown: document.getElementById('lines').classList.contains('show'),
+      footerVisible: document.getElementById('save').getBoundingClientRect().bottom <= window.innerHeight + 1,
+      btn: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }
+    };
   })()`);
-  console.log('  检测按钮位置', JSON.stringify(btn));
+  console.log('  初始', JSON.stringify(init));
   await sleep(300);
-  await shot(win, 'setup-0-detect-btn.png');
+  await shot(win, 'setup-1.8.0-a-empty.png');
 
   // ② 填地址 + 点检测
   await js(`(() => {
@@ -53,45 +65,60 @@ app.whenReady().then(async () => {
     b.click();
     return 'clicked';
   })()`);
-  await sleep(2000);
+  await sleep(2500);
   const after = await js(`(() => ({
     msg: (document.getElementById('probeMsg') || {}).innerText || '',
-    linesShown: document.getElementById('lines').classList.contains('show'),
+    hint: getComputedStyle(document.getElementById('hintEmpty')).display !== 'none',
     lineCards: document.querySelectorAll('#linegrid .proc').length,
     procsShown: document.getElementById('procs').classList.contains('show'),
-    saveDisabled: document.getElementById('save').disabled
+    saveDisabled: document.getElementById('save').disabled,
+    footerVisible: document.getElementById('save').getBoundingClientRect().bottom <= window.innerHeight + 1
   }))()`);
   console.log('  检测后', JSON.stringify(after));
-  await shot(win, 'setup-1-probed.png');
+  await shot(win, 'setup-1.8.0-b-probed.png');
 
-  // ③ 选第一条线体 → 工序出来
+  // ③ 选第一条线体 → 工序出现
   await js(`(() => {
     const b = document.querySelector('#linegrid .proc');
     if (b) b.click();
     return b ? b.dataset.code : 'none';
   })()`);
-  await sleep(2000);
+  await sleep(2500);
   const after2 = await js(`(() => ({
-    procsShown: document.getElementById('procs').classList.contains('show'),
     procCards: document.querySelectorAll('#procgrid .proc').length,
     saveDisabled: document.getElementById('save').disabled,
     msg: (document.getElementById('probeMsg') || {}).innerText || ''
   }))()`);
   console.log('  选线体后', JSON.stringify(after2));
-  await shot(win, 'setup-2-line-picked.png');
+  await shot(win, 'setup-1.8.0-c-line.png');
 
-  // ④ 量高度：窗口内高 vs 内容总高
-  const box = await js(`(() => ({
-    inner: window.innerHeight,
-    scroll: document.documentElement.scrollHeight,
-    body: document.body.scrollHeight
+  // ④ 选一道工序 + 保存 → 自报结果（不落盘，mock）
+  await js(`(() => {
+    const b = document.querySelectorAll('#procgrid .proc')[2];
+    if (b) b.click();
+    return true;
+  })()`);
+  await sleep(600);
+  const box = await js(`(() => {
+    const s = document.querySelector('.scroll');
+    return {
+      inner: window.innerHeight,
+      scrollRegion: s.scrollHeight,
+      regionHeight: s.clientHeight,
+      overflow: s.scrollHeight - s.clientHeight,
+      footerVisible: document.getElementById('save').getBoundingClientRect().bottom <= window.innerHeight + 1
+    };
+  })()`);
+  console.log('  高度', JSON.stringify(box), '→ 中间区需滚动', box.overflow, 'px');
+
+  await js(`document.getElementById('save').click()`);
+  await sleep(1500);
+  const after3 = await js(`(() => ({
+    hello: (document.getElementById('helloMsg') || {}).innerText || '',
+    saveText: document.getElementById('save').textContent
   }))()`);
-  console.log('  高度', JSON.stringify(box), '→ 需要滚动', box.scroll - box.inner, 'px');
-
-  // ⑤ 拉高窗口截一张完整图（看清全貌 + 保存按钮的位置）
-  win.setContentSize(760, Math.max(620, box.scroll + 40));
-  await sleep(700);
-  await shot(win, 'setup-3-full.png');
+  console.log('  保存后', JSON.stringify(after3), 'state=' + STATE);
+  await shot(win, 'setup-1.8.0-d-saved.png');
 
   console.log('完成');
   win.destroy();
