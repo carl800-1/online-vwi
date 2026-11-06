@@ -1,5 +1,5 @@
 // 极简路由：路径参数匹配 + 终端身份校验 + 错误兜底
-import { q } from './db.js';
+import { q, bindOfClient } from './db.js';
 
 /**
  * 鉴权说明（一期）：
@@ -43,6 +43,45 @@ export function resolveTerminal(req, ctx) {
   }
   ctx.process = { code: op, name: '' };
   return null;
+}
+
+/**
+ * 4.5.0：**管理端指派优先于终端自报**。
+ *
+ * 4.4.0 里绑定只是台账，屏上填什么就播什么。于是"屏上填错了"只能在屏前面改，
+ * 管理端在工序页点了半天指派，画面一点没变 —— 那套只能算"看得见"，不算"管得住"。
+ * 现在改成：谁被指派到 (线, 工序)，就播 (线, 工序) 的内容。
+ *
+ * 三个刻意的边界：
+ *   ① **没指派就按自报**。新屏装完到管理端确认之间有个空窗期，纯绑定会让它黑屏；
+ *      老现场那批没绑过的屏也不能因为升级服务端就停播。
+ *   ② **只在"决定播什么"的接口上调用**（/api/state、/display/playlist）。
+ *      心跳 /api/telemetry 绝不调 —— 那里要留终端自报的**原值**，
+ *      否则它把号改了你还是读到自己写回去的值，"已改配"永远检测不出来。
+ *   ③ 线体被删了（绑定悬空）就回落到自报，不做任何"猜"。
+ *
+ * 覆盖时把原值留在 ctx.selfLine / ctx.selfProcess，接口要把它一起回给终端 ——
+ * 屏上要能显示"你填的是 L2/OP05，但管理端让你放 L1/OP30"。
+ */
+export function applyAssignment(req, ctx) {
+  const ip = String(ctx.ip || '').replace(/^::ffff:/, '');
+  if (!ip) return null;
+  const bind = bindOfClient(ip);
+  if (!bind) return null;
+  const line = q.get('SELECT * FROM line WHERE id = ?', bind.line_id);
+  if (!line) return null;
+
+  ctx.selfLine = ctx.line || null;
+  ctx.selfProcess = ctx.process || null;
+  ctx.assigned = true;
+
+  // 指派与自报一致时也没必要替换对象，但 assign 信息仍要给终端（它据此知道"已被确认"）
+  if (ctx.line && ctx.line.id === line.id && ctx.process && ctx.process.code === bind.process_code) {
+    return bind;
+  }
+  ctx.line = line;
+  ctx.process = { code: bind.process_code, name: '' };
+  return bind;
 }
 
 export function createRouter() {

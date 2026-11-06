@@ -300,6 +300,7 @@ export function openDb(dir) {
   migrate();
   migrateProd();     // 4.2.1 的增量：不放在 migrate() 里，因为它对新库和老库都要跑
   migrateMedia();    // 4.4.0 的增量：media 换成「按机种/工序实存」，同样两头都要跑
+  migrateClients();  // 4.5.0 的增量：绑定记指派来源，同样两头都要跑
   ensureSettings();
   return db;
 }
@@ -361,6 +362,22 @@ function migrateMedia() {
     db.exec('PRAGMA foreign_keys = ON');
   }
   console.log('[db] media 表已升级：按机种/工序实存（新增 model_id / process_id / rel_path）');
+}
+
+/**
+ * 4.5.0 的增量：绑定要记「这个指派是谁定的」。
+ *
+ * 4.4.0 里绑定只是台账，所以谁绑的无关紧要。4.5.0 起指派会**改写客户的本地配置**，
+ * 现场出现"我没让它去 OP30"时必须能查出是「采纳了屏的自报」还是「管理端改派」。
+ *
+ * 老库没有这列，加一列空的即可 —— 空串当"4.4.0 时代的老绑定"，界面上不显示来源。
+ */
+function migrateClients() {
+  const cols = new Set(q.all('PRAGMA table_info(client_bind)').map((r) => r.name));
+  if (!cols.size) return;                        // 表不存在（不该发生），别往下走
+  if (cols.has('src')) return;
+  q.run("ALTER TABLE client_bind ADD COLUMN src TEXT NOT NULL DEFAULT ''");
+  console.log('[db] client_bind 已加列 src（指派来源：self 采纳自报 / admin 管理端改派）');
 }
 
 function backupBeforeV4(dbPath) {
@@ -1323,10 +1340,14 @@ export function binds(lineId = '') {
  *   ① 一道工序只一台屏 —— 先解掉这道工序原来的
  *   ② 一台屏只占一个工位 —— 先解掉这台屏原来的
  *
- * **绑定不动播放**：屏上仍旧按它自己填的线号 / 工序号拉清单。绑定只是台账，
- * 以及用来发现"这台屏被改成别的工位了"。所以这里既不推 contentRev，也不碰 item。
+ * **4.5.0 起绑定参与播放**：`/display/playlist` 与 `/api/state` 会先查这台屏有没有
+ * 被指派，有就按指派回答（见 router.js 的 applyAssignment）。所以这里不再"只写台账"，
+ * 调用方**必须**跟着推一次 contentRev，否则屏还在播旧内容。
+ * 4.4.0 那句"绑定不动播放"是当时的取舍，已经被推翻，别再照那句改回去。
+ *
+ * @param src 'self' = 采纳屏的自报，'admin' = 管理端改派。只用于排障，不影响行为。
  */
-export function bindClient(clientId, lineId, processCode) {
+export function bindClient(clientId, lineId, processCode, src = '') {
   const cid = String(clientId || '').trim();
   const lid = String(lineId || '').trim();
   const pc = String(processCode || '').trim();
@@ -1334,8 +1355,8 @@ export function bindClient(clientId, lineId, processCode) {
   tx(() => {
     q.run('DELETE FROM client_bind WHERE client_id = ?', cid);
     q.run('DELETE FROM client_bind WHERE line_id = ? AND process_code = ?', lid, pc);
-    q.run('INSERT INTO client_bind(line_id, process_code, client_id, bound_at) VALUES(?,?,?,?)',
-      lid, pc, cid, now());
+    q.run('INSERT INTO client_bind(line_id, process_code, client_id, bound_at, src) VALUES(?,?,?,?,?)',
+      lid, pc, cid, now(), String(src || ''));
   });
   return bindOfProcess(lid, pc);
 }

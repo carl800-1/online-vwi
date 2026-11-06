@@ -2160,7 +2160,7 @@ function renderStTable() {
 /* ================= 工序 ↔ 屏（客户端）绑定 =================
    为什么绑在"线体 × 工序"上：工序属于机种（换型时工位上的屏不该变），
    而一块屏物理上装在一条线的某个工位上。所以键是 (线体, 工序码)，不是 process_id。
-   绑定不参与播放 —— 屏上仍按自己填的线号 / 工序号拉内容，这里只是台账 + 校验。 */
+   **4.5.0 起指派决定播放**：绑了就以这里为准，屏上填的号只在没绑时生效。 */
 
 /** 服务端回来的绑定按工序码归组：工序表一行一个码，格子里要一次看全它绑了几条线 */
 function indexBinds(list) {
@@ -2192,13 +2192,17 @@ const shortIp = (ip) => String(ip || '').split('.').pop() || String(ip || '—')
  */
 function bindCell(code) {
   const list = S.bindsByCode[code] || [];
-  if (!list.length) return `<button class="cell-bind" data-bindop="${H(code)}">未绑</button>`;
+  if (!list.length) {
+    return `<button class="cell-bind" data-bindop="${H(code)}"
+      title="还没指派屏 —— 在指派之前，屏按它自己设置里的线号和工序号播放">未绑</button>`;
+  }
   const first = list[0];
   const extra = list.length > 1 ? ` +${list.length - 1}` : '';
   const bad = list.some((b) => b.state === 'moved' || b.state === 'offline');
   const tip = list.map((b) =>
     `${b.lineCode} / ${b.processCode} → ${b.ip}　${bindStateText(b.state)}` +
-    (b.state === 'moved' ? `（它现在报 ${b.seenLineCode}/${b.seenOpCode}）` : '')).join('\n');
+    (b.state === 'moved'
+      ? `（它现在报 ${b.seenLineCode}/${b.seenOpCode}，仍按这里的指派播放）` : '')).join('\n');
   return `<button class="cell-bind has${bad ? ' bad' : ''}" data-bindop="${H(code)}" title="${H(tip)}"><i class="bd ${bindStateCls(first.state)}"></i>${H(first.lineCode)} · ${H(shortIp(first.ip))}${extra}</button>`;
 }
 
@@ -2281,7 +2285,7 @@ function bindLineHtml(l, code) {
        <span class="bstate ${bindStateCls(bind.state)}">${H(bindStateText(bind.state))}</span>
        <span class="muted">${H(bindAge(bind))}</span>
        ${bind.state === 'moved'
-         ? `<span class="bind-warn">它现在报 ${H(bind.seenLineCode || '—')}/${H(bind.seenOpCode || '—')}</span>`
+         ? `<span class="bind-warn">它现在报 ${H(bind.seenLineCode || '—')}/${H(bind.seenOpCode || '—')}，仍按这里的指派播放</span>`
          : ''}
        <button class="btn xs ghost" data-unbind="${H(bind.ip)}">解除</button>`;
 
@@ -2294,7 +2298,7 @@ function bindLineHtml(l, code) {
 
   const candHtml = cands.length
     ? cands.map((c) => `<button class="bind-cand${c.rank === 0 ? ' match' : ''}"
-         data-assign="${H(c.ip)}" data-line="${H(l.id)}">
+         data-assign="${H(c.ip)}" data-line="${H(l.id)}" data-linecode="${H(l.code)}">
         <i class="bd ${c.online ? 'on' : 'off'}"></i>
         <b class="mono">${H(c.ip)}</b>
         <span class="mono muted">自报 ${H(c.lineCode || '—')} / ${H(c.opCode || '—')}</span>
@@ -2317,13 +2321,30 @@ $('bindBody').addEventListener('click', async (e) => {
     const ip = asg.dataset.assign;
     const lineId = asg.dataset.line;
     if (asg.disabled) return;
+
+    // 4.5.0：指派现在会**改写这块屏的本地配置**，所以自报与目标对不上时要问一句。
+    // 自报完全一致的那一台（现场正常情况，标着「就是这台」）直接绑，不打断流程。
+    // 线体编码直接从按钮上取：S.lines 只在打开过「线体设置」页时才填，
+    // 从机种页直接过来时它是空的 —— 那会让每一台都误判成"不一致"。
+    const c = (S.bindClients.clients || []).find((x) => x.ip === ip);
+    const lineCode = asg.dataset.linecode ||
+      ((S.lines || []).find((l) => l.id === lineId) || {}).code || '';
+    const same = Boolean(c) && c.lineCode === lineCode && c.opCode === S.bindCode;
+    if (!same) {
+      const seen = c ? `${c.lineCode || '—'} / ${c.opCode || '—'}` : '未知';
+      const yes = await ask('改写这块屏的配置？',
+        `${ip} 现在报的是 ${seen}。指派之后它按「${lineCode} / ${S.bindCode}」播放，` +
+        '屏上的线号和工序号也会被改成这个 —— 屏那边不用再有人去动。');
+      if (!yes) return;
+    }
+
     asg.disabled = true;
     try {
       const r = await postJson(`/api/clients/${encodeURIComponent(ip)}/bind`,
         { lineId, processCode: S.bindCode });
       if (r.warning) toast(r.warning, 'warn');
       else if (r.replacedClientId) toast(`「${S.bindCode}」改由 ${ip} 负责，原来那台换下了`, 'ok');
-      else toast(`已把 ${ip} 分配给「${S.bindCode}」`, 'ok');
+      else toast(`已把 ${ip} 分配给「${S.bindCode}」，屏会在几秒内跟上`, 'ok');
       await refreshBindClients();
       renderStTable();
     } catch (err) {
@@ -2337,7 +2358,8 @@ $('bindBody').addEventListener('click', async (e) => {
   if (un) {
     const ip = un.dataset.unbind;
     const ok = await ask('解除分配？',
-      `${ip} 不再对应「${S.bindCode}」。屏上的内容和播放都不受影响，只是这里不再记录它。`);
+      `${ip} 不再对应「${S.bindCode}」。解除后它按自己设置里的线号和工序号播放 —— ` +
+      '如果它填的是别处，画面会跟着变。');
     if (!ok) return;
     try {
       await postJson(`/api/clients/${encodeURIComponent(ip)}/unbind`, {});
@@ -3598,7 +3620,7 @@ function renderClientTable() {
     } else if (!b) {
       state = '<span class="badge muted">在线 · 未分配</span>';
     } else if (b.state === 'moved') {
-      state = `<span class="badge warn">已改配 · 现在报 ${H(c.lineCode || '—')}/${H(c.opCode || '—')}</span>`;
+      state = `<span class="badge warn">已改配 · 现在报 ${H(c.lineCode || '—')}/${H(c.opCode || '—')}，按分配执行</span>`;
     } else {
       state = '<span class="badge ok">在线 · 与分配一致</span>';
     }
@@ -3622,7 +3644,7 @@ $('clientTable').addEventListener('click', async (e) => {
   const btn = e.target.closest('[data-cunbind]');
   if (!btn) return;
   const ip = btn.dataset.cunbind;
-  const ok = await ask('解除分配？', `${ip} 不再对应任何工序。屏上的内容和播放都不受影响，只是这里不再记录它。`);
+  const ok = await ask('解除分配？', `${ip} 不再对应任何工序。解除后它按自己设置里的线号和工序号播放。`);
   if (!ok) return;
   try {
     await postJson('/api/clients/' + encodeURIComponent(ip) + '/unbind', {});

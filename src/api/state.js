@@ -5,7 +5,7 @@ import {
   getState, switchTo, markReady, waitForChange, cancelSwitch, touch,
   setProgress, terminalsOf, SWITCH_TIMEOUT_MS
 } from '../switch.js';
-import { resolveTerminal } from '../router.js';
+import { resolveTerminal, applyAssignment } from '../router.js';
 import { VERSION } from '../version.js';
 import { termMeta, now } from '../util.js';
 
@@ -93,6 +93,7 @@ export function register(router) {
   // 终端带 ?line=L1&op=OP30&since=<rev>；管理端带 ?lineId=<id>&since=<rev>（不带 op）
   router.get('/api/state', async (req, res, ctx) => {
     let line;
+    let bind = null;
     if (ctx.query.op) {
       // 终端身份要校验（线体存不存在、工序在不在），配错立刻报，不要静默
       const err = resolveTerminal(req, ctx);
@@ -101,6 +102,10 @@ export function register(router) {
         res.end(JSON.stringify({ error: err.message }));
         return;
       }
+      // 4.5.0：管理端指派优先。**必须放在 resolveTerminal 之后、touch 之前** ——
+      // 后面的 touch / getState 用的都是 ctx.line 与 ctx.process.code，
+      // 覆盖晚了就成了"播的内容是新的、在线表记的还是旧的"。
+      bind = applyAssignment(req, ctx);
       line = ctx.line;
       touch(line.id, ctx.process.code, termMeta(ctx));
     } else {
@@ -111,7 +116,14 @@ export function register(router) {
     await waitForChange(since, res);
 
     if (res.writableEnded || res.destroyed) return;
-    sendJson(res, 200, decorate(getState(line.id)));
+    const out = decorate(getState(line.id));
+    // 终端靠这个字段决定"要不要把本地配置改成管理端指派的值"。
+    // 没指派就不给这个键：老终端不认识它（多一个也不会看），少一个更干净。
+    if (bind) {
+      const bl = q.get('SELECT code FROM line WHERE id = ?', bind.line_id);
+      out.assign = { line: bl ? bl.code : '', op: bind.process_code, src: bind.src || '' };
+    }
+    sendJson(res, 200, out);
   });
 
   // ---------- 终端心跳：参数 + 下载进度 ----------

@@ -186,6 +186,34 @@ app.whenReady().then(async () => {
     await sleep(400);
     fs.writeFileSync(PNG_MODAL, (await win.webContents.capturePage()).toPNG());
 
+    // 4.5.0：自报与这一格不一致的候选，要先确认才绑（指派会改写那块屏的配置）。
+    // 自报一致的「就是这台」不打断流程，直接绑 —— 所以下面要点两个不同的候选。
+    const nonMatch = await js(`(() => {
+      const b = [...document.querySelectorAll('.bind-line .bind-cand')]
+        .find((x) => !x.classList.contains('match'));
+      if (!b) return null;
+      b.click();
+      return b.dataset.assign;
+    })()`);
+    if (nonMatch) {
+      await sleep(600);
+      result.confirmFor = await js(`(() => ({
+        ip: ${JSON.stringify(nonMatch)},
+        open: document.getElementById('dialog').classList.contains('show'),
+        title: (document.getElementById('dlgTitle') || {}).textContent || '',
+        modalStillOpen: document.getElementById('bindModal').classList.contains('show')
+      }))()`);
+      // 取消 → 不能落库
+      await win.webContents.capturePage();
+      await sleep(350);
+      fs.writeFileSync(path.join(ROOT, 'docs', 'ui-4.5.0-bind-confirm.png'),
+        (await win.webContents.capturePage()).toPNG());
+      await js(`document.getElementById('dlgCancel').click()`);
+      await sleep(500);
+      const afterCancel = await apiJson('/api/binds?lineId=' + encodeURIComponent(lineId));
+      result.cancelKept = afterCancel.binds.some((b) => b.processCode === code) ? '取消后竟然绑上了' : '取消后没绑（正确）';
+    }
+
     // 点第一块线体里的第一个候选 → 应落库
     await js(`(() => {
       const b = document.querySelector('.bind-line .bind-cand');

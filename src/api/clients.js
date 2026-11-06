@@ -8,15 +8,16 @@
 //   client      谁连上来了（ip / 计算机名 / 自报的线号工序号 / 最后心跳）
 //   client_bind 某条线的某道工序 ↔ 某台屏
 //
-// **绑定不参与播放**：屏上仍旧按自己填的线号 / 工序号拉清单。绑定的两个用处是
-//   ① 知道这道工序该是哪台屏（现场对齐一次，之后看得见）
-//   ② 它把号改了就立刻看得出来（moved），给一个「重新分配」的按钮
+// **4.4.0 时绑定只是台账**（屏上填什么就播什么）。**4.5.0 起绑定决定播放**：
+// /api/state 与 /display/playlist 会先查这台屏被指派到哪，按指派回答，
+// 并把指派一起下发，终端据此改写自己的 config.json —— 双端收敛到同一个值。
+// 没指派的屏仍旧按自报值播放（新屏装完到确认之间不能黑屏）。
 import {
   q, clients as allClients, clientOf, bindOfProcess, bindOfClient, binds as allBinds,
-  bindClient, unbindClient, unbindProcess, processesOf, lineByCode
+  bindClient, unbindClient, unbindProcess, processesOf, lineByCode, upsertClient
 } from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
-import { getState } from '../switch.js';
+import { getState, notifyContentChanged } from '../switch.js';
 
 // 多久没心跳算离线。和 switch.js 的 ONLINE_TTL_MS 保持一致：
 // 两处口径不同的话，会出现"上面说在线、下面说离线"的怪事。
@@ -26,6 +27,15 @@ const ONLINE_MS = Number(process.env.ESOP_CLIENT_TTL_MS) > 0
   : 60_000;
 
 const OP_RE = /^[A-Za-z0-9._-]{1,16}$/;
+
+// hello 的四种结果对应的现场话术。屏上要原样显示，所以放服务端统一维护 ——
+// 终端换一版文案就跟着变，不用重新打包 exe。
+const HELLO_TEXT = {
+  pending: '服务端已收到，等管理端确认',
+  confirmed: '管理端已确认，与本机设置一致',
+  assigned: '管理端已指派到别的位置，本机将按管理端执行',
+  conflict: '这道工序已被另一台屏占用，请到管理端处理'
+};
 
 /**
  * 一台屏当前算什么状态。
@@ -65,6 +75,8 @@ function shapeBind(bind, clientById, lineById) {
     seenOpCode: c ? c.op_code : '',
     lastSeen: c ? Number(c.last_seen) || 0 : 0,
     ageMs: c ? Math.max(0, Date.now() - (Number(c.last_seen) || 0)) : 0,
+    // 'self' = 4.5.0 采纳屏的自报后建的；'admin' = 管理端改派；'' = 4.4.0 时代的老绑定
+    src: bind.src || '',
     state: stateOf(c, bind, line)
   };
 }
@@ -99,6 +111,72 @@ function processWarning(line, processCode) {
 }
 
 export function register(router) {
+  /**
+   * 屏装好之后第一件事：告诉服务端「我是 L1 / OP30」。
+   *
+   * 4.4.0 里这件事藏在心跳里（每 5 秒一次 POST /api/telemetry），效果是"上报了"，
+   * 但屏上不知道服务端收没收到、分到哪 —— 运维站在屏前面什么反馈都看不到。
+   * 这里给一个明确的、有返回值的动作：保存设置后立刻调一次，界面直接把结果显示出来。
+   *
+   * 四种返回（终端按它决定要不要改本地配置）：
+   *   pending    已收到，管理端还没确认（新屏，或者屏上改了号）
+   *   confirmed  管理端确认过，且与自报一致 —— 本机不用动
+   *   assigned   管理端指派的是**别的位置** —— 本机要按 assign 改写配置
+   *   conflict   这道工序已被另一台屏占着 —— 不自动确认，去管理端处理
+   */
+  router.post('/api/clients/hello', async (req, res, ctx) => {
+    const body = await readJsonBody(req);
+    // IP 一律取连接来源，不信 body 自报的那份。
+    // body.ip 只给自动化测试用：本机同时跑几个"屏"时 socket 都是 127.0.0.1。
+    const ip = String(body.ip || ctx.ip || '').replace(/^::ffff:/, '');
+    if (!ip) throw badRequest('无法确定客户端 IP');
+
+    const wantLine = String(body.line || '').trim().toUpperCase();
+    let line = wantLine ? lineByCode(wantLine) : null;
+    // 线号查不到就明确报错：屏上填错线号时，"报了什么"必须能看出来
+    if (wantLine && !line) throw badRequest(`线体 ${wantLine} 不存在，请检查屏上填的线号`);
+    // 不填线号 = 跟随当前启用线体（老屏的 config.json 里没有 line 字段）
+    if (!line) line = q.get('SELECT * FROM line WHERE enabled = 1 ORDER BY sort, code LIMIT 1');
+    if (!line) throw badRequest('服务端还没有启用任何线体');
+
+    const op = String(body.op || '').trim().toUpperCase();
+    if (!op) throw badRequest('缺少工序号 op');
+    if (!OP_RE.test(op)) throw badRequest(`工序码 ${op} 不合法（字母、数字、点、下划线、横线，16 字以内）`);
+
+    upsertClient({
+      ip, name: body.name, lineCode: line.code, opCode: op, ver: body.ver, res: body.res
+    });
+
+    const bind = bindOfClient(ip);
+    const bindLine = bind ? q.get('SELECT * FROM line WHERE id = ?', bind.line_id) : null;
+    const occupied = bindOfProcess(line.id, op);
+
+    let state = 'pending';
+    let assign = null;
+    let conflictWith = '';
+    if (bind && bindLine) {
+      assign = { lineCode: bindLine.code, processCode: bind.process_code };
+      state = (bindLine.id === line.id && bind.process_code === op) ? 'confirmed' : 'assigned';
+    } else if (occupied && occupied.client_id !== ip) {
+      // 这道工序已经指定了别的屏。不抢、不自动确认 —— 一台屏一个工位是纪律，
+      // 现场要自己决定"是换掉它，还是这台填错了"。
+      state = 'conflict';
+      conflictWith = occupied.client_id;
+    }
+
+    sendJson(res, 200, {
+      ok: true,
+      ip,
+      lineCode: line.code, lineName: line.name,
+      processCode: op,
+      state,
+      assign,
+      conflictWith,
+      src: bind ? (bind.src || '') : '',
+      message: HELLO_TEXT[state] || ''
+    });
+  });
+
   /**
    * 全部客户端（屏）。
    *
@@ -181,7 +259,16 @@ export function register(router) {
     const prevOnProcess = bindOfProcess(line.id, op);
     const prevOfClient = bindOfClient(c.id);
 
-    bindClient(c.id, line.id, op);
+    // 指派来源：'self' = 采纳这台屏自己报的号（管理端点了「确认」），
+    // 'admin' = 管理端改派到别处。只影响界面文案和事后排查，不改变播放行为。
+    const src = String(body.src || 'admin').trim() === 'self' ? 'self' : 'admin';
+
+    bindClient(c.id, line.id, op, src);
+
+    // 4.5.0：指派现在决定播放，**必须推一次**。
+    // 4.4.0 那句"绑定不推 contentRev"已经不成立了 —— 不推的话屏会继续播旧内容，
+    // 最长要等到 25 秒长轮询超时才刷新，现场会以为没生效。
+    notifyContentChanged();
 
     const bind = bindOfProcess(line.id, op);
     const shaped = shapeBind(bind, clientMap(), lineMap());
@@ -197,11 +284,13 @@ export function register(router) {
     });
   });
 
-  /** 解绑某一台屏（它变回"没分配到工位"） */
+  /** 解绑某一台屏（它变回"没分配到工位"，播放回落到它自报的值） */
   router.post('/api/clients/:id/unbind', (req, res) => {
     const c = clientOf(req.params.id);
     if (!c) throw badRequest('客户端不存在：' + req.params.id);
     const n = unbindClient(c.id);
+    // 解绑会改变"播什么"（从指派值回落到自报值），同样要推
+    if (n) notifyContentChanged();
     sendJson(res, 200, { ok: true, removed: n });
   });
 
@@ -212,6 +301,7 @@ export function register(router) {
     const op = String(body.processCode || '').trim().toUpperCase();
     if (!op) throw badRequest('缺少 processCode');
     const n = unbindProcess(line.id, op);
+    if (n) notifyContentChanged();
     sendJson(res, 200, { ok: true, removed: n });
   });
 

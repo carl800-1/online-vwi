@@ -1033,6 +1033,10 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
 }
 /* 通用对话框（网页版和桌面版都要） */
 .modal.show { display: flex; }
+/* 通用确认框永远压在其他弹窗上面 —— 4.5.0 起「指派」会改写屏的配置，
+   在绑定弹窗里点候选时要再确认一次；两者同为 z-index:60 时，
+   DOM 里靠后的 #bindModal 会把 #dialog 盖住，用户看到的是"点了没反应"。 */
+#dialog { z-index: 80; }
 
 .modal-card {
   width: 560px; max-width: calc(100vw - 48px);

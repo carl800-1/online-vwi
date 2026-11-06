@@ -5,7 +5,7 @@
 // 工序不再属于线体，所以"这条线上有没有 OP30"这种问题已经不存在了；
 // 存在的是"这条线现在做的机种有没有 OP30"。后者才是现场真正会遇到的错配。
 import { q, processByCode, playKindOf, playKindsOf, PLAY_KINDS } from '../db.js';
-import { sendJson, badRequest } from '../router.js';
+import { sendJson, badRequest, applyAssignment } from '../router.js';
 import { touch, getState } from '../switch.js';
 import { termMeta } from '../util.js';
 
@@ -43,6 +43,9 @@ export function register(router) {
    * 终端用这个接口既做"切换下载"，也做"首次装机补内容"——同一套代码，两条路径。
    */
   router.get('/display/playlist', (req, res, ctx) => {
+    // 4.5.0：先看管理端把这块屏指派到哪，再决定按谁的号取内容。
+    // 没指派时 applyAssignment 返回 null，下面用的还是终端自报的 line / op。
+    const bind = applyAssignment(req, ctx);
     const { line } = ctx;
     const op = ctx.process.code;
     touch(line.id, op, termMeta(ctx));
@@ -88,6 +91,12 @@ export function register(router) {
       playMode: proc?.play_mode === 'once' ? 'once' : 'loop',
       // 实际生效的播放内容（image/pdf/video）。只给界面与排障看，终端不依赖它。
       playKinds: playKindsOf(proc?.play_kinds),
+      // 4.5.0：lineCode / processCode 现在可能**不是屏上填的那个**。
+      // assigned=true 表示管理端指派生效了；selfLineCode / selfProcessCode 才是屏自报的原值，
+      // 两个不一样就是"屏上号填错了，管理端已经替它纠正"。终端用它在角标上标"由管理端指派"。
+      assigned: Boolean(bind),
+      selfLineCode: ctx.selfLine ? ctx.selfLine.code : line.code,
+      selfProcessCode: ctx.selfProcess ? ctx.selfProcess.code : op,
       items: rows.map((r) => ({
         mediaId: r.media_id,
         kind: r.kind,

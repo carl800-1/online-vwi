@@ -9,9 +9,10 @@
 //   4) 同工序换一台：原来的被换下，接口告诉你换的是谁
 //   5) 屏上把工序号改了 → 立刻判 moved，并报出它现在报的是什么（这是整个功能的重点）
 //   6) 心跳超时 → offline
-//   7) 绑定不碰播放：item 一条不少，contentRev 不动
+//   7) 绑定会推 contentRev（4.5.0 起指派决定播放，和 4.4.0 相反）
 //   8) 参数校验：缺工序 / 工序码非法 / 线体不存在 / 客户端不存在 都 400
 //   9) 解除：按客户端解、按工序解，都真的从库里消失
+//  10) hello 四态（pending/confirmed/assigned/conflict）与「指派优先于自报」
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -160,11 +161,12 @@ async function waitReady(ms = 20000) {
     ok((await clientOf('10.0.0.31')).bind.state === 'online', '心跳回来就自动恢复');
 
     // ── 8. 绑定不碰播放 ───────────────────────────────────
-    console.log('\n8) 绑定不影响播放');
+    console.log('\n8) 绑定推内容变更（4.5.0 起，和 4.4.0 相反）');
     const stBefore = (await json('/api/status')).d;
     await post('/api/clients/10.0.0.32/bind', { lineId, processCode: p2 });
     const stAfter = (await json('/api/status')).d;
-    ok(stBefore.contentRev === stAfter.contentRev, 'contentRev 没动（绑定不推内容变更）');
+    ok(stAfter.contentRev > stBefore.contentRev, 'contentRev 前进了（否则屏还在播旧内容）',
+      `${stBefore.contentRev} → ${stAfter.contentRev}`);
     ok(stBefore.seq === stAfter.seq, 'seq 没动（不是换型）');
 
     // ── 9. 参数校验 ───────────────────────────────────────
@@ -185,7 +187,61 @@ async function waitReady(ms = 20000) {
       '绑一个当前机种没有的工序：允许，但给一句提示', warn.d.warning);
 
     // ── 10. 解除 ──────────────────────────────────────────
-    console.log('\n10) 解除');
+    // ── 10. hello 与「指派优先于自报」（4.5.0）──────────────
+    //
+    // 这一节用 127.0.0.1 当"那台屏"：指派是从**连接来源 IP** 认的，
+    // 而测试进程所有请求的 socket 都是 127.0.0.1 —— 正好就是一台真机器，
+    // 不需要给生产代码开后门去伪造来源。hello 的 body.ip 只用来造"另一台"。
+    console.log('\n10) hello 自报与指派优先');
+    const SELF = '127.0.0.1';
+    const hello = (body) => post('/api/clients/hello', { ip: SELF, line, ...body });
+
+    if (await clientOf(SELF)) await post('/api/clients/' + SELF + '/unbind', {});
+
+    const h1 = await hello({ op: p1 });
+    ok(h1.status === 200 && h1.d.state === 'pending', '第一次自报 → pending（等管理端确认）', h1.d.state);
+    ok(h1.d.lineCode === line && h1.d.processCode === p1, '回显服务端解析后的线体与工序');
+    ok((await clientOf(SELF)) !== undefined, 'hello 也把机器登记进列表（不用等 5 秒心跳）');
+
+    const bSelf = await post('/api/clients/' + SELF + '/bind', { lineId, processCode: p1, src: 'self' });
+    ok(bSelf.status === 200 && bSelf.d.bind.src === 'self', '管理端确认指派，来源记成 self', bSelf.d.bind.src);
+
+    const h2 = await hello({ op: p1 });
+    ok(h2.d.state === 'confirmed', '再自报 → confirmed', h2.d.state);
+    ok(h2.d.assign && h2.d.assign.processCode === p1, 'assign 回的是被指派的工序');
+
+    // 有人在屏上把工序号改成 p2 —— 管理端说了算，按 p1 执行
+    const h3 = await hello({ op: p2 });
+    ok(h3.d.state === 'assigned', '改了号 → assigned（不跟着它走）', h3.d.state);
+    ok(h3.d.assign.processCode === p1, 'assign 仍是管理端指派的 p1', JSON.stringify(h3.d.assign));
+
+    // 关键一条：自报 p2，拉回来的必须是指派给它的 p1
+    const pl = await json(`/display/playlist?line=${encodeURIComponent(line)}&op=${encodeURIComponent(p2)}`);
+    ok(pl.status === 200 && pl.d.processCode === p1,
+      `屏自报 ${p2}，拿到的还是指派的 ${p1}`, `${p2} → ${pl.d.processCode}`);
+    ok(pl.d.assigned === true && pl.d.selfProcessCode === p2,
+      'assigned=true，且把自报值一起回给终端（屏上要能说清"你填的是 p2"）',
+      `assigned=${pl.d.assigned} self=${pl.d.selfProcessCode}`);
+
+    // /api/state 带 assign，终端据此改写自己的 config.json
+    const s1 = await json(`/api/state?line=${encodeURIComponent(line)}&op=${encodeURIComponent(p2)}&since=0`);
+    ok(s1.status === 200 && s1.d.assign && s1.d.assign.op === p1,
+      '/api/state 带回 assign，终端据此改写本地配置', JSON.stringify(s1.d.assign));
+
+    // 另一台没被指派的屏，报一个已经被占用的工序 → conflict，不抢
+    await beat('10.0.0.41', line, p2);                        // 先让它上线（绑定要先有这台机器）
+    await post('/api/clients/10.0.0.41/bind', { lineId, processCode: p2 });
+    const h4 = await post('/api/clients/hello', { ip: '10.0.0.51', line, op: p2 });
+    ok(h4.d.state === 'conflict', '没被指派又撞上别人占着的工序 → conflict', h4.d.state);
+    ok(h4.d.conflictWith === '10.0.0.41', '报出占着那道工序的是哪台', h4.d.conflictWith);
+
+    // 解绑后回落到"按自报"：不能让没指派的屏没内容可播
+    await post('/api/clients/' + SELF + '/unbind', {});
+    const pl2 = await json(`/display/playlist?line=${encodeURIComponent(line)}&op=${encodeURIComponent(p2)}`);
+    ok(pl2.d.processCode === p2 && pl2.d.assigned === false,
+      '解绑后按屏自报的号回答', `${pl2.d.processCode}/assigned=${pl2.d.assigned}`);
+
+    console.log('\n11) 解除');
     const un1 = await post('/api/clients/10.0.0.31/unbind', {});
     ok(un1.status === 200 && un1.d.removed === 1, '按客户端解除');
     ok((await clientOf('10.0.0.31')).bind === null, '这台变回未分配');
