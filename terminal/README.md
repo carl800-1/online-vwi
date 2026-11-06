@@ -130,6 +130,8 @@ npm install          # 装 Electron 31（首次）
 npm run dev          # 开发模式：非 kiosk、可开 DevTools
 npm start            # 生产模式：kiosk 全屏置顶
 
+npm test             # 三套连跑：migrate 18 + sync 19 + assign 35 = 72 项
+
 node test/assign-test.cjs    # 指派下发与自报：35 项（自带假服务器，不连网）
 node test/sync-test.cjs      # 数据层集成测试（不需要 Electron，连真实服务器跑）
 node test/migrate-test.cjs   # 配置目录迁移：18 项（老目录不许把屏变成"未装机"）
@@ -140,6 +142,26 @@ npm run dist                 # 打 portable exe（需先装 electron-builder）
 `test/sync-test.cjs` 覆盖的是真机上最容易翻车的几件事：内容是否真的落盘、sha 是否校验过、
 切换后旧文件是否删掉、断网/重启能否不看网络就出画面、连切三次磁盘是否增长。
 它跑在临时目录里，不会碰真机数据。
+
+⚠️ **`sync-test` 要求服务端是「种子库」，不是现场真实库。** 它写死了 X200 / X210 两个机种码，
+S2（换型后旧文件必须删掉）就要在这两个机种之间来回切。拿现场库（1107 机种、工序码 OP1/OP2…）
+去跑，S1 能过、S2 会直接中断在 `Cannot read properties of undefined` —— **不是代码坏了**，
+是那套数据里没有 X200/X210。
+
+跑通整套的正确姿势（空数据目录起服务端会自动灌「10 机种 × 5 工序」种子）：
+
+```bash
+# 1) 空目录起服务端，首次建库自动生成种子（含 X200 / X210）
+ESOP_DATA=$(mktemp -d) node server.js 8092
+
+# 2) 造内容：e2e 会往 X200/OP3、X210/OP3 写清单，顺带回归 196 项
+BASE=http://127.0.0.1:8092 node test/e2e.mjs
+
+# 3) 跑终端三套（OP 必须指到种子里真有的工序，默认 OP30 不在种子里）
+cd terminal && OP=OP3 npm test
+```
+
+只改指派 / 配置逻辑时，直接跑 `test/assign-test.cjs` 就够 —— 它自带假服务器，不连网也不碰库。
 
 `test/preview.html` 用假数据源驱动真正的播放器代码，`?s=1..7` 分别对应正常播放、自动翻页、
 整屏切换、掉队告警、空内容、准备中、离线七种状态，用来核对画面。
