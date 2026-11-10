@@ -190,6 +190,34 @@ npm start          # kiosk 全屏；npm run dev 为调试模式
 界面顶栏的「系统」按钮里能看到：版本、服务端口、终端要填的服务端地址、数据目录、日志文件。
 数据在 exe 同级的 `data\`，备份就备份它；日志在 `data\server.log`，出问题先看它。
 
+#### 防火墙：只有服务端要放行，终端一个端口都不用开
+
+终端 `ESOP-Client.exe` **不监听任何端口**（主进程里没有 `listen` / `createServer`），
+它只是作为客户端去连服务端的 8092。所以：
+
+| 哪台机器 | 要做什么 |
+|---|---|
+| 服务端 | 放行**入站** TCP 8092，域 / 专用 / 公用三种网络都放 |
+| 每台屏 | **什么都不用做**（出站默认允许） |
+
+`ESOP-Server.exe` 第一次监听 8092 时，Windows 会弹「是否允许访问网络」。
+**点"允许访问"并勾上"专用网络"**。点了取消就麻烦了：系统把它记成"阻止"，
+以后不再弹窗，屏永远连不上，现象和"网络不通"一模一样。
+
+补救办法：双击交付包里的 `放行端口.bat`（源码 `tools/放行端口.bat`，由
+`tools/make-firewall-bat.py` 生成，**GBK + CRLF**，cmd 才能正确显示中文），
+UAC 点"是"即可写入：
+
+```
+netsh advfirewall firewall add rule name="ESOP Server - TCP 8092" ^
+  dir=in action=allow protocol=TCP localport=8092 profile=any enable=yes
+```
+
+撤销：`放行端口.bat /remove`。脚本只碰这一条规则。
+
+> 规则名**不能带 ASCII 括号**：cmd 在 `if (...)` 块里遇到 `)` 会当成块结束，
+> 名字会被截断成半截（这条踩过）。所以叫 `ESOP Server - TCP 8092`。
+
 <details>
 <summary>另附：无图形界面的机器用绿色免安装包</summary>
 
