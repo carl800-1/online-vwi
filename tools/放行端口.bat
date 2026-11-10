@@ -1,60 +1,79 @@
 @echo off
 chcp 936 >nul
-setlocal
-title ESOP 服务端 - 放行 8092 端口
+setlocal enabledelayedexpansion
+title ESOP 服务端 - 端口体检 / 放行
 set RULE=ESOP Server - TCP 8092
+set PORT=8092
 
 if /i "%~1"=="/check"  goto :check
 if /i "%~1"=="check"   goto :check
 if /i "%~1"=="/remove" goto :remove
 if /i "%~1"=="remove"  goto :remove
+if /i "%~1"=="/add"    goto :add
+if /i "%~1"=="add"     goto :add
 
-rem ================= 提权 =================
-rem 走到这里就是「双击、不带参数」的正常用法。带了 /check /remove 的
-rem 已在上面分派走，各自管自己的提权，这里不要再传 %~1（传空会多出一个空参数）。
+rem ============================================================
+rem  双击：先体检，缺规则再提权补
+rem ============================================================
+call :probe
+if "!BAD!"=="0" goto :allgood
+echo.
+echo ------------------------------------------------------------
+echo 上面有问题项。现在请求管理员权限来补规则，弹窗请点"是"。
+echo ------------------------------------------------------------
 net session >nul 2>&1
 if errorlevel 1 (
-  echo 需要管理员权限，正在弹窗请求，请点"是"...
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -ArgumentList '/add' -Verb RunAs"
+  echo.
+  echo 已弹出权限窗口。点"取消"则规则不会添加。
+  pause
+  exit /b 1
+)
+goto :add_do
+
+rem ============================================================
+:check
+call :probe
+echo.
+if "!BAD!"=="0" (
+  echo [体检通过] 本机侧没发现问题。
+  echo             但"本机能连"不等于"屏能连"，请按上面的办法换台机器确认。
+  exit /b 0
+)
+echo [体检未通过] 见上面的问题项。
+exit /b 2
+
+rem ============================================================
+:add
+net session >nul 2>&1
+if errorlevel 1 (
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -ArgumentList '/add' -Verb RunAs"
   exit /b
 )
 
+:add_do
 echo ============================================================
-echo   ESOP 服务端 - 放行 TCP 8092 入站
+echo   添加防火墙规则：%RULE%
 echo ============================================================
 echo.
-echo 这条规则让局域网里的屏能连上本机服务端。
-echo 同时覆盖「域 / 专用 / 公用」三种网络位置，插到别的网段也不会失效。
-echo.
-
 rem 先删同名旧规则，避免重复叠加（不存在时报错忽略）
 netsh advfirewall firewall delete rule name="%RULE%" >nul 2>&1
-
-netsh advfirewall firewall add rule name="%RULE%" dir=in action=allow protocol=TCP localport=8092 profile=any enable=yes description="ESOP 发布系统服务端，局域网终端连 8092"
+netsh advfirewall firewall add rule name="%RULE%" dir=in action=allow protocol=TCP localport=%PORT% profile=any enable=yes description="ESOP 发布系统服务端，局域网终端连 8092"
 if errorlevel 1 goto :fail
-
-echo [完成] 规则已添加：%RULE%
+echo [完成] 规则已添加，覆盖 域 / 专用 / 公用 三种网络位置。
 echo.
-echo 下一步：
-echo   1. 回到服务端窗口，看「局域网访问」那几行，里面就是终端要填的地址
-echo   2. 在另一台机器上打开 http://服务端IP:8092/ 能出页面，就说明通了
-echo   3. 屏上填的地址就是那行，不要填 127.0.0.1
+call :probe
 echo.
-echo 以后想撤掉这条规则：右键本文件 - 以管理员身份运行，参数加 /remove
+echo ------------------------------------------------------------
+echo 接下来必须换一台机器验证，别在本机测：
+echo   1. 在屏上打开设置页点"检测"  -- 最真实，和播片同一条路
+echo   2. 或在另一台电脑浏览器打开 http://上面列出的地址:8092/
+echo ------------------------------------------------------------
 echo.
 pause
 exit /b 0
 
-:check
-netsh advfirewall firewall show rule name="%RULE%" >nul 2>&1
-if errorlevel 1 (
-  echo [未放行] 没找到规则：%RULE%
-  echo          屏会连不上服务端（表现为一直"连接中"或提示检查防火墙）
-  exit /b 2
-)
-echo [已放行] 规则存在：%RULE%
-exit /b 0
-
+rem ============================================================
 :remove
 net session >nul 2>&1
 if errorlevel 1 (
@@ -63,6 +82,144 @@ if errorlevel 1 (
 )
 netsh advfirewall firewall delete rule name="%RULE%"
 echo [已删除] %RULE%
+echo 注意：删掉之后屏就连不上服务端了，除非本来就没开防火墙。
+pause
+exit /b 0
+
+rem ============================================================
+rem  体检子过程
+rem ============================================================
+:probe
+set "BAD=0"
+set "LADDR="
+set "LPID="
+set "PNAME="
+set "ANYIP="
+echo ============================================================
+echo   ESOP 服务端 - 端口体检（本机侧）
+echo   %date% %time%
+echo ============================================================
+echo.
+
+echo [1] 谁在监听 %PORT%
+for /f "tokens=2,5" %%a in ('netstat -ano ^| findstr ":%PORT%" ^| findstr "LISTENING"') do (
+  if not defined LADDR (
+    set "LADDR=%%a"
+    set "LPID=%%b"
+  )
+)
+if not defined LADDR (
+  echo     没人在监听。
+  echo     服务端 ESOP-Server.exe 还没启动，先把服务端开起来再跑一次。
+  set "BAD=1"
+) else (
+  for /f "tokens=1 delims=," %%n in ('tasklist /FI "PID eq !LPID!" /FO CSV /NH 2^>nul ^| findstr /i ".exe"') do set "PNAME=%%~n"
+  if not defined PNAME set "PNAME=查不到进程名"
+  rem 进程名若带括号，同样会在 for/if 块里截断输出，先剔掉
+  set "PNAME=!PNAME:)=!"
+  set "PNAME=!PNAME:(=!"
+  echo     监听地址：!LADDR!
+  echo     监听进程：!PNAME!   PID !LPID!
+  if "!LADDR:~0,10!"=="127.0.0.1:" (
+    echo     [问题] 只绑定了回环地址，别的机器永远连不上。
+    echo            这跟防火墙无关，是服务端监听配置的问题。
+    set "BAD=1"
+  ) else (
+    echo     绑定在全部网卡上，正常。
+  )
+)
+echo.
+
+echo [2] 防火墙规则
+rem 规则详情用 PowerShell 取：Action / Profile / Enabled 是英文常量，
+rem 不受系统语言和代码页影响。netsh 的中文输出在不同环境下编码不一致，
+rem 按中文过滤会时灵时不灵。
+powershell -NoProfile -Command "$r = Get-NetFirewallRule -DisplayName '%RULE%' -ErrorAction SilentlyContinue | Select-Object -First 1; if ($r) { 'Enabled=' + $r.Enabled + '   Action=' + $r.Action + '   Profile=' + $r.Profile }" > "%TEMP%\esop_r.txt" 2>nul
+call :ruleexists
+if errorlevel 1 (
+  echo     规则不存在 —— 局域网访问会被拦。
+  set "BAD=1"
+) else (
+  echo     规则存在：
+  for /f "usebackq delims=" %%a in ("%TEMP%\esop_r.txt") do echo          %%a
+)
+echo.
+
+echo [3] 防火墙总开关（三个网络位置）
+powershell -NoProfile -Command "Get-NetFirewallProfile | ForEach-Object { '{0}|{1}' -f $_.Name, $_.Enabled }" > "%TEMP%\esop_fw.txt" 2>nul
+set "FWSEEN="
+for /f "tokens=1,2 delims=|" %%a in ('type "%TEMP%\esop_fw.txt" 2^>nul') do (
+  set "PN=%%a"
+  set "PV=%%b"
+  if /i "%%a"=="Domain"  set "PN=域网络"
+  if /i "%%a"=="Private" set "PN=专用网络"
+  if /i "%%a"=="Public"  set "PN=公用网络"
+  if /i "%%b"=="True"    set "PV=启用，会拦"
+  if /i "%%b"=="False"   set "PV=关闭，不拦"
+  echo      !PN!：!PV!
+  set "FWSEEN=1"
+)
+if not defined FWSEEN echo      没取到状态，命令行执行 netsh advfirewall show allprofiles state 看。
+echo.
+
+echo [4] 本机地址 —— 在别的机器 / 屏上填这个
+echo     要和屏在同一网段的那个；名字带「虚拟」的不要用。
+rem 网卡名里的圆括号必须在这里就去掉：bat 的 for 块内 echo 展开出的
+rem ASCII 右括号会被 cmd 当成块结束符，输出直接截断。
+powershell -NoProfile -Command "$l = Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | ForEach-Object { $a = Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue; $n = '未知网卡'; if ($a) { $n = $a.Name -replace '[()]', '' }; $b = 0; if ($n -match 'VMware|VirtualBox|vEthernet|Hyper-V|WSL|Loopback|Tailscale|ZeroTier|Bluetooth|Npcap') { $b = 1 }; '{0}|{1}|{2}' -f $_.IPAddress, $n, $b }; $l | Where-Object { $_ -like '*|0' } | ForEach-Object { $_ }; $l | Where-Object { $_ -like '*|1' } | ForEach-Object { $_ }" > "%TEMP%\esop_ip.txt" 2>nul
+set "SEEN="
+for /f "tokens=1,2,3 delims=|" %%a in ('type "%TEMP%\esop_ip.txt" 2^>nul') do (
+  if "%%c"=="0" (
+    if not defined ANYIP set "ANYIP=%%a"
+    echo      http://%%a:8092/      %%b
+  ) else (
+    echo      http://%%a:8092/      %%b   【虚拟网卡，别用】
+  )
+  set "SEEN=1"
+)
+if not defined SEEN (
+  echo      没取到地址，手工看：命令行执行 ipconfig，找 IPv4 地址那一行。
+  set "BAD=1"
+)
+echo.
+
+echo ============================================================
+echo   注意：上面查的全是本机。本机怎么测都是通的！
+echo ============================================================
+echo   即使防火墙一条规则都没有，在服务端这台机器上：
+echo       浏览器开 http://127.0.0.1:8092/       一定成功
+echo       浏览器开 http://本机局域网 IP:8092/    也一定成功
+echo   因为本机发起的连接走机器内部回环，防火墙根本不检查。
+echo   所以"本机能打开"完全不能证明屏能连上。
+echo.
+echo   真正确认只有一个办法：换一台机器发起连接。
+if defined ANYIP (
+  echo     屏上：打开设置页点"检测"    最真实，和播片走同一条路
+  echo     电脑：浏览器开 http://!ANYIP!:8092/
+  echo     电脑：powershell Test-NetConnection !ANYIP! -Port 8092
+  echo           看 TcpTestSucceeded : True 就是通了
+) else (
+  echo     先在另一台机器用浏览器开 http://服务端IP:8092/
+)
+echo.
+goto :eof
+
+:ruleexists
+netsh advfirewall firewall show rule name="%RULE%" >nul 2>&1
+exit /b %errorlevel%
+
+:allgood
+echo.
+echo ------------------------------------------------------------
+echo 本机侧看着都正常，不用改什么。
+echo 要确认屏真的能连，还是得换一台机器验证：
+if defined ANYIP (
+  echo     屏上设置页点"检测"，或在另一台电脑开 http://!ANYIP!:8092/
+) else (
+  echo     屏上设置页点"检测"
+)
+echo ------------------------------------------------------------
+echo.
 pause
 exit /b 0
 
