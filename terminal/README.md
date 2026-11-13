@@ -146,6 +146,7 @@ npm test             # 三套连跑：migrate 18 + sync 19 + assign 35 = 72 项
 node test/assign-test.cjs    # 指派下发与自报：35 项（自带假服务器，不连网）
 node test/sync-test.cjs      # 数据层集成测试（不需要 Electron，连真实服务器跑）
 node test/migrate-test.cjs   # 配置目录迁移：18 项（老目录不许把屏变成"未装机"）
+node test/link-test.cjs      # 联通自检：11 项（连真实服务端，空库也能跑）
 node test/serve.cjs          # 起预览页 http://127.0.0.1:8099/test/preview.html?s=1
 npm run dist                 # 打 portable exe（需先装 electron-builder）
 ```
@@ -153,6 +154,19 @@ npm run dist                 # 打 portable exe（需先装 electron-builder）
 `test/sync-test.cjs` 覆盖的是真机上最容易翻车的几件事：内容是否真的落盘、sha 是否校验过、
 切换后旧文件是否删掉、断网/重启能否不看网络就出画面、连切三次磁盘是否增长。
 它跑在临时目录里，不会碰真机数据。
+
+`test/link-test.cjs` 只回答一个问题：**这台屏能不能连上服务端**。它不查内容对不对，
+空库也能跑。走的是终端自己的 `src/net.js` + `src/hello.js`，所以"脚本通过"和"屏能播"
+用的是同一条链路，依次验：TCP → 自报 → 长轮询 → 清单 → 下载并校验 sha → 心跳 → 管理端可见。
+失败时会直接打印排查顺序（先看服务端的 `放行端口.bat /check`）。
+
+```bash
+node test/link-test.cjs
+SERVER=http://192.168.1.4:8092 LINE=L1 OP=OP3 node test/link-test.cjs
+```
+
+⚠️ 填 `127.0.0.1` 只能证明服务端活着，**不能证明屏连得上** —— 本机连接走回环、不过防火墙，
+脚本会额外打一行警告。要验现场可达，`SERVER` 必须填服务端的局域网 IP，而且最好在别的机器上跑。
 
 ⚠️ **`sync-test` 要求服务端是「种子库」，不是现场真实库。** 它写死了 X200 / X210 两个机种码，
 S2（换型后旧文件必须删掉）就要在这两个机种之间来回切。拿现场库（1107 机种、工序码 OP1/OP2…）
