@@ -27,7 +27,7 @@
    | `server` | 服务器地址，带端口 |
    | `line` | **这台屏属于哪条线体**：填**线体编码**（`L1` / `L2` / `L08` / `WM` / `XB`），不是"一线"。留空 = 跟随服务端当前启用的线体 |
    | `op` | **这台屏是哪道工序**：填**工序码**（`OP10` / `OP30`）。填错会显示别的工序的指导书 |
-   | `kiosk` | `true` = 全屏无边框置顶；调试时改 `false` |
+   | `kiosk` | `false` = 1024×640 普通窗口，有标题栏、可最小化、点 × 直接退出（**默认，1.8.2 起**）；`true` = 全屏无边框、置顶、关不掉（现场屏）。**现场屏不用手改这里** —— 托盘右键勾一次「全屏显示（现场屏）」会自己写回本字段 |
    | `autoStart` | `true` = 开机自启 |
 
 3. 双击 exe。第一次启动会在 `%LOCALAPPDATA%\esop-client\` 建工作目录并开始下载内容。
@@ -138,8 +138,8 @@
 
 ```bash
 npm install          # 装 Electron 31（首次）
-npm run dev          # 开发模式：非 kiosk、可开 DevTools
-npm start            # 生产模式：kiosk 全屏置顶
+npm run dev          # 开发模式：窗口 + 可开 DevTools
+npm start            # 按配置启动（默认窗口；托盘勾「全屏显示」后变 kiosk）
 
 npm test             # 三套连跑：migrate 18 + sync 19 + assign 35 = 72 项
 

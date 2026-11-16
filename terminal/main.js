@@ -134,25 +134,73 @@ function harden(w) {
     if (block) e.preventDefault();
   });
   w.on('close', (e) => {
-    if (!allowQuit) {
-      e.preventDefault();        // 关不掉，只能从托盘退出
-      console.log('[win] 拦截关闭请求（Alt+F4 / 系统关闭）');
+    if (allowQuit) return;
+    // 窗口模式（kiosk:false）是调试/办公机用的，点 × 就该退出，不该像现场屏那样关不掉
+    if (!kioskOn()) {
+      allowQuit = true;
+      console.log('[win] 窗口模式下收到关闭请求，退出');
+      quit();
+      return;
     }
+    e.preventDefault();          // kiosk 下关不掉，只能从托盘退出
+    console.log('[win] 拦截关闭请求（Alt+F4 / 系统关闭）');
   });
+}
+
+/** 是否按现场 kiosk 方式运行：无边框铺满 + 置顶 + 关不掉。 */
+function kioskOn() {
+  return !DEV && cfg && cfg.kiosk !== false;
+}
+
+/**
+ * 把 kiosk 形态套到当前播放窗上（不写配置）。
+ * 窗口始终以普通窗创建，全屏靠 setKiosk 叠加，所以这里可以随时来回切。
+ */
+function applyKiosk(on, why) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    win.setKiosk(Boolean(on));
+    win.setAlwaysOnTop(Boolean(on), 'screen-saver');
+    win.setSkipTaskbar(Boolean(on));
+  } catch (e) {
+    console.warn(`[win] 切换全屏失败（${why}）：${e.message}`);
+    return;
+  }
+  const [w, h] = win.getSize();
+  console.log(`[win] 形态=${on ? 'kiosk 全屏（现场屏）' : '窗口（调试/办公机）'} `
+    + `来源=${why} 尺寸=${w}x${h} 全屏=${win.isKiosk()} 可最小化=${win.isMinimizable()} 可缩放=${win.isResizable()}`);
+}
+
+/** 托盘里勾/取消「全屏显示」：套用并**写回配置**，下次启动保持。 */
+function toggleKiosk(on) {
+  if (!cfg) return;
+  const next = config.save({ ...cfg, kiosk: Boolean(on) });
+  if (config.isValid(next)) cfg = next;
+  applyKiosk(Boolean(on), '托盘');
+  // 菜单正在展开时重建有概率崩，推到下一轮事件循环
+  setImmediate(() => refreshTrayMenu(syncer ? syncer.snapshot() : null));
 }
 
 function createPlayerWindow() {
   const display = screen.getPrimaryDisplay();
-  const b = display.bounds;
+  const wa = display.workAreaSize || { width: 1280, height: 800 };
+
+  // 两种形态：
+  //   kiosk（现场屏）—— 无边框铺满主屏、置顶、关不掉；
+  //   窗口（默认，办公机/调试）—— 有标题栏、可移动可最小化，点 × 直接退出。
+  // 1.8.2：窗口**一律按普通窗口创建**（frame + 可缩放），kiosk 在 ready-to-show 里用
+  // setKiosk(true) 叠上去。这样托盘里就能来回切，不必为了切形态重建窗口。
+  const kiosk = kioskOn();
   win = new BrowserWindow({
-    x: b.x,
-    y: b.y,
-    width: b.width,
-    height: b.height,
+    width: Math.min(1024, Math.max(640, wa.width - 160)),
+    height: Math.min(640, Math.max(400, wa.height - 160)),
+    minWidth: 480,
+    minHeight: 320,
     show: false,
-    frame: false,
-    kiosk: !DEV && cfg.kiosk !== false,
-    fullscreen: !DEV && cfg.kiosk !== false,
+    frame: true,
+    resizable: true,
+    minimizable: true,
+    maximizable: true,
     autoHideMenuBar: true,
     backgroundColor: '#0f1319',
     title: `ESOP 客户端 · ${cfg.line ? cfg.line + ' / ' : ''}${cfg.op}`,
@@ -160,13 +208,18 @@ function createPlayerWindow() {
   });
 
   harden(win);
-  // 置顶只在正式 kiosk 下开：开发调试时它会盖住 IDE 和任务栏
-  if (!DEV && cfg.kiosk !== false) win.setAlwaysOnTop(true, 'screen-saver');
   win.loadFile(path.join(__dirname, 'renderer', 'player.html'));
 
   win.once('ready-to-show', () => {
     win.show();
-    if (!DEV && cfg.kiosk !== false) win.setKiosk(true);
+    applyKiosk(kiosk, '启动');
+    // 自动化验收用：ESOP_TEST_TOGGLE_KIOSK=1 时启动 4 秒后模拟一次托盘勾选/取消
+    if (process.env.ESOP_TEST_TOGGLE_KIOSK === '1') {
+      setTimeout(() => {
+        toggleKiosk(!kioskOn());
+        setTimeout(() => { toggleKiosk(kiosk); }, 2500);
+      }, 4000);
+    }
   });
 
   win.webContents.on('did-finish-load', () => {
@@ -384,6 +437,13 @@ function refreshTrayMenu(snap) {
     { label: '打开内容目录', click: () => shell.openPath(cache.PATHS.current) },
     { label: '打开日志', click: () => shell.openPath(cache.PATHS.log) },
     { label: '更改设置…', click: openSetupFromTray },
+    {
+      // 现场屏勾上就是老行为（铺满置顶关不掉）；办公机默认不勾，窗口调试。
+      label: '全屏显示（现场屏）',
+      type: 'checkbox',
+      checked: kioskOn(),
+      click: (item) => toggleKiosk(item.checked)
+    },
     { type: 'separator' },
     { label: '退出', click: () => quit() }
   ]));
@@ -517,11 +577,16 @@ function registerIpc() {
    * 真正的收尾（关窗口、开播放窗）由渲染层在看完提示后调 vwi:finish-setup 触发。
    */
   ipcMain.handle('vwi:save-config', async (_e, input) => {
-    const next = config.save({ ...(input || {}), managed: cfg ? cfg.managed : false });
+    // 设置页只提交它管得到的字段（server / line / op）。其余字段必须**沿用现值**：
+    // config.save() 内部是 {...DEFAULTS, ...raw}，缺字段会退回默认值，
+    // 结果是"在设置页改个工序号，顺手把 kiosk 全屏、开机自启、DevTools 一起重置了"
+    // —— 一台本来窗口模式调试的机器，保存一次就变回全屏盖住屏幕。
+    const next = config.save({ ...(cfg || {}), ...(input || {}), managed: cfg ? cfg.managed : false });
     if (!config.isValid(next)) return { ok: false, error: '工序或服务器地址不完整' };
     cfg = next;
     applyAutoStart();
-    console.log(`[config] 已保存 line=${cfg.line || '(跟随服务端)'} op=${cfg.op} server=${cfg.server}`);
+    console.log(`[config] 已保存 line=${cfg.line || '(跟随服务端)'} op=${cfg.op} server=${cfg.server} `
+      + `kiosk=${cfg.kiosk} autoStart=${cfg.autoStart} devTools=${cfg.allowDevTools}`);
 
     // 自报失败不阻塞装机：网络抖一下就装不完的话，现场只能重来。
     const h = await hello(cfg.server, {

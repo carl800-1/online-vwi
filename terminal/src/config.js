@@ -69,7 +69,9 @@ const DEFAULTS = {
   line: '',                      // 线体编码（L1…）。留空 = 跟随服务端当前启用的线体
   op: '',                        // 必填：OP10..OP50
   server: '',                    // 必填：http://192.168.x.x:8092
-  kiosk: true,
+  // 1.8.2 起默认**窗口**：装完就能一边看服务端一边调，不用先想办法把屏缩下来。
+  // 现场屏要全屏，在托盘右键勾一次「全屏显示」—— 会写回本文件，之后每次启动都全屏。
+  kiosk: false,
   autoStart: true,               // 开机自启
   pollFallbackMs: 30000,         // 长轮询断线后的兜底间隔
   allowDevTools: false,
