@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>ESOP · 两机联调沙盒</title>
+<style>
+  :root { --bg:#f5f7fa; --card:#fff; --line:#e3e8ef; --txt:#1f2937; --sub:#6b7280;
+          --ok:#0f9d58; --bad:#d93025; --warn:#b26a00; --blue:#2563eb; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:18px 20px 40px; background:var(--bg); color:var(--txt);
+         font:14px/1.6 "Microsoft YaHei","PingFang SC",system-ui,sans-serif; }
+  h1 { font-size:19px; margin:0 8px 0 0; display:inline; }
+  h2 { font-size:14px; margin:0 0 10px; color:var(--sub); font-weight:600; }
+  header { margin-bottom:14px; }
+  .badge { display:inline-block; padding:2px 9px; border-radius:10px; font-size:12px;
+           background:#e8f0fe; color:var(--blue); margin-left:6px; }
+  .badge.real { background:#fdecea; color:var(--bad); }
+  .tip { color:var(--sub); font-size:12px; margin-top:6px; }
+  .bar, .card { background:var(--card); border:1px solid var(--line); border-radius:8px;
+                padding:12px 14px; margin-bottom:12px; }
+  .bar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .bar label { font-size:12px; color:var(--sub); }
+  input { border:1px solid var(--line); border-radius:5px; padding:5px 8px; font-size:13px;
+          width:230px; color:var(--txt); background:#fff; }
+  input.sm { width:66px; }
+  button { border:1px solid var(--line); background:#fff; color:var(--txt); border-radius:5px;
+           padding:6px 12px; font-size:13px; cursor:pointer; }
+  button:hover { border-color:var(--blue); color:var(--blue); }
+  button.primary { background:var(--blue); border-color:var(--blue); color:#fff; }
+  button.primary:hover { background:#1d4ed8; color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .kv { display:grid; grid-template-columns:110px 1fr; gap:4px 10px; font-size:13px; }
+  .kv span:nth-child(odd) { color:var(--sub); }
+  .mono { font-family:Consolas,Menlo,monospace; }
+  .pill { padding:1px 7px; border-radius:9px; font-size:12px; background:#eef2f7; }
+  .pill.ok { background:#e6f4ea; color:var(--ok); }
+  .pill.bad { background:#fdecea; color:var(--bad); }
+  .pill.warn { background:#fef7e0; color:var(--warn); }
+  pre { margin:0; max-height:190px; overflow:auto; font:12px/1.7 Consolas,Menlo,monospace;
+        white-space:pre-wrap; color:#374151; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--sub); font-weight:600; background:#fafbfc; }
+  td.r { font-family:Consolas,Menlo,monospace; }
+  .yes { color:var(--ok); font-weight:600; } .no { color:var(--bad); font-weight:600; }
+  .warnbox { background:#fff8e1; border:1px solid #fde293; border-radius:6px;
+             padding:8px 12px; font-size:12.5px; margin-bottom:12px; color:#7a5200; }
+  .foot { color:var(--sub); font-size:12px; margin-top:10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ESOP · 两机联调沙盒</h1><span id="mode" class="badge">连接中…</span>
+  <div class="tip" id="tip">A = 服务端（本机/局域网），B = 另一台电脑的屏。这个面板只读观测 + 触发断言，不替代真机防火墙与网口测试。</div>
+</header>
+
+<div class="warnbox" id="warn">
+  <b>沙盒模式</b>：服务端跑在隔离数据目录，虚拟 B 屏是本机伪造的，随便点不会污染交付库。
+  切到 A 的局域网 IP 即为<b>真机模式</b>，此时「跑完整闭环」会真实改派那台屏，结束后自动恢复绑定。
+</div>
+
+<div class="bar">
+  <label>服务端 <input id="base" class="mono" spellcheck="false"></label>
+  <label>线体 <input id="line" class="sm"></label>
+  <label>自报工序 <input id="op" class="sm"></label>
+  <label>改派到 <input id="altOp" class="sm"></label>
+  <label>B 的 IP <input id="bip" class="mono" placeholder="留空自动找" style="width:130px"></label>
+  <button id="apply">应用</button>
+  <button id="virtual">启动虚拟 B 屏</button>
+  <button id="suite" class="primary">跑完整闭环</button>
+  <button id="reset">恢复现场</button>
+</div>
+
+<div class="grid">
+  <div class="card"><h2>A · 服务端 <span id="aState" class="pill"></span></h2><div id="a" class="kv"></div></div>
+  <div class="card"><h2>B · 屏 <span id="bState" class="pill"></span></h2><div id="b" class="kv"></div></div>
+</div>
+
+<div class="card"><h2>时间线 <span id="phase" style="color:var(--blue)"></span></h2><pre id="log">等待操作…</pre></div>
+
+<div class="card">
+  <h2>验收表 <span id="score" class="pill"></span></h2>
+  <table><thead><tr><th style="width:26px"></th><th style="width:210px">检查项</th><th style="width:170px">预期</th><th>实测</th></tr></thead>
+  <tbody id="rows"><tr><td colspan="4" style="color:var(--sub)">还没跑，点「跑完整闭环」开始。</td></tr></tbody></table>
+  <div class="foot" id="note"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let st = {}, dirtyCfg = false;
+
+async function refresh() {
+  try { st = await (await fetch('/api/console/state', {cache:'no-store'})).json(); }
+  catch (e) { $('a').innerHTML = '<span>状态</span><span class="no">控制台服务没响应</span>'; return; }
+  render();
+}
+function kv(pairs) { return pairs.map(([k,v]) => `<span>${esc(k)}</span><span>${v}</span>`).join(''); }
+function pill(txt, cls='') { return `<span class="pill ${cls}">${esc(txt)}</span>`; }
+
+function render() {
+  const sandbox = st.sandbox;
+  $('mode').textContent = sandbox ? '隔离沙盒' : '真机模式';
+  $('mode').className = 'badge' + (sandbox ? '' : ' real');
+  $('warn').style.display = sandbox ? '' : 'none';
+  if (!dirtyCfg) {
+    $('base').value = st.cfg?.base || ''; $('line').value = st.cfg?.line || '';
+    $('op').value = st.cfg?.op || ''; $('altOp').value = st.cfg?.altOp || '';
+    $('bip').value = st.cfg?.bip || '';
+  }
+  $('virtual').textContent = st.virtual ? '关闭虚拟 B 屏' : '启动虚拟 B 屏';
+  $('suite').disabled = !!st.running;
+  $('suite').textContent = st.running ? '跑着呢…' : '跑完整闭环';
+  $('phase').textContent = st.phase ? '· ' + st.phase : '';
+
+  const a = st.a || {};
+  $('aState').textContent = a.ok ? '在线' : '连不上';
+  $('aState').className = 'pill ' + (a.ok ? 'ok' : 'bad');
+  $('a').innerHTML = a.ok ? kv([
+    ['版本', pill('v' + a.version)],
+    ['默认线体', `<b class="mono">${esc(a.lineCode)}</b>　当前机种 ${esc(a.modelCode || '未指定')}`],
+    ['内容版本', `contentRev = ${a.contentRev}　rev = ${a.rev}`],
+    ['规模', `${a.models} 机种 / ${a.processes} 工序 / ${a.items} 清单项`],
+    ['客户端', `共 ${a.total} 台 · 在线 ${a.online} · 已分配 ${a.bound} · 有问题 ${a.problem}`],
+    ['地址', `<span class="mono">${esc(st.cfg?.base)}</span>`]
+  ]) : kv([['错误', `<span class="no">${esc(a.error || '服务端没起')}</span>`],
+           ['排查', '先启动隔离服务端：ESOP_PORT=8093 + ESOP_DATA=临时目录']]);
+
+  const b = st.b;
+  $('bState').textContent = b ? (b.online ? '在线' : '离线') : '未找到';
+  $('bState').className = 'pill ' + (b ? (b.online ? 'ok' : 'warn') : '');
+  $('b').innerHTML = b ? kv([
+    ['IP / 计算机名', `<span class="mono">${esc(b.ip)}</span>　${esc(b.name || '—')}`],
+    ['自报', `<b class="mono">${esc(b.lineCode)} / ${esc(b.opCode)}</b>`],
+    ['指派', b.bind ? `<b class="mono">${esc(b.bind.lineCode)} / ${esc(b.bind.processCode)}</b>　src=${esc(b.bind.src || '—')}` : pill('未分配')],
+    ['状态', b.bind ? pill(b.bind.state === 'moved' ? '已改配 · 按分配执行' : b.bind.state, b.bind.state === 'moved' ? 'warn' : 'ok') : pill('按自报播放')],
+    ['版本 / 分辨率', `${esc(b.ver || '—')}　${esc(b.res || '—')}`],
+    ['最后心跳', `${b.ageMs} ms 前`]
+  ]) : kv([['说明', '<span style="color:var(--sub)">沙盒：点「启动虚拟 B 屏」；真机：在 B 上双击 ESOP-Client.exe 并填好设置</span>']]);
+
+  $('log').textContent = (st.log || []).map((x) => x.msg).join('\n') || '等待操作…';
+  $('log').scrollTop = $('log').scrollHeight;
+  const rows = st.rows || [];
+  $('score').textContent = `${st.pass || 0} 通过 / ${st.fail || 0} 失败`;
+  $('score').className = 'pill ' + (st.fail ? 'bad' : (rows.length ? 'ok' : ''));
+  $('rows').innerHTML = rows.length ? rows.map((r) =>
+    `<tr><td class="${r.pass ? 'yes' : 'no'}">${r.pass ? '✓' : '✗'}</td><td>${esc(r.item)}</td>` +
+    `<td class="r">${esc(r.expect)}</td><td class="r">${esc(r.actual)}` +
+    `${r.hint ? `<div style="color:var(--sub)">${esc(r.hint)}</div>` : ''}</td></tr>`).join('')
+    : '<tr><td colspan="4" style="color:var(--sub)">还没跑，点「跑完整闭环」开始。</td></tr>';
+  $('note').textContent = st.last?.note || '';
+}
+
+async function action(type, extra = {}) {
+  try {
+    const r = await fetch('/api/console/action', {
+      method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({type, ...extra})
+    });
+    const d = await r.json();
+    if (d.error) alert(d.error);
+  } catch (e) { alert('请求失败：' + e.message); }
+  dirtyCfg = false;
+  refresh();
+}
+
+$('apply').onclick = () => action('config', {
+  base:$('base').value.trim(), line:$('line').value.trim(), op:$('op').value.trim(),
+  altOp:$('altOp').value.trim(), bip:$('bip').value.trim()
+});
+$('virtual').onclick = () => action('virtual');
+$('suite').onclick = () => action('suite');
+$('reset').onclick = () => action('reset');
+['base','line','op','altOp','bip'].forEach((id) => $(id).addEventListener('input', () => { dirtyCfg = true; }));
+setInterval(refresh, 1000);
+refresh();
+</script>
+</body>
+</html>
