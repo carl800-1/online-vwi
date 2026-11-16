@@ -165,6 +165,17 @@
             <div class="spacer"></div>
             <button class="btn sm" id="runRefresh">刷新</button>
           </div>
+          <div class="push-panel">
+            <div class="push-field">
+              <label class="push-label" for="pushLine">运行产线</label>
+              <select id="pushLine" class="push-sel"></select>
+            </div>
+            <div class="push-field">
+              <label class="push-label" for="pushModels">该产线下的机种（可多选）</label>
+              <select id="pushModels" class="push-sel" multiple size="6"></select>
+            </div>
+          </div>
+          <div class="push-list" id="pushList" hidden></div>
           <div class="run-list" id="board"></div>
         </div>
 

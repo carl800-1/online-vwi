@@ -2661,3 +2661,44 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
 }
 /* 「按机种」是左列的第二段，上边框由 .p-sec 自己带，这里只补间距 */
 .pg-mdl-sec { margin-top: 12px; }
+
+/* ================= 运行产线「推送」面板 ================= */
+.push-panel { display: flex; gap: 16px; padding: 0 16px 12px; flex-wrap: wrap; align-items: flex-start; }
+.push-field { display: flex; flex-direction: column; gap: 5px; }
+.push-label { font-size: 11.5px; color: var(--ink3); }
+.push-sel {
+  min-width: 200px; padding: 6px 8px; font-size: 13px; color: var(--ink);
+  border: 1px solid var(--line); border-radius: 6px; background: #fff;
+}
+.push-field:last-child .push-sel { min-width: 240px; }
+.push-sel:focus { outline: none; border-color: var(--brand); }
+.push-list { padding: 0 16px 14px; display: flex; flex-wrap: wrap; gap: 8px; }
+.push-row {
+  display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 12px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--line2);
+}
+.push-mc { font-size: 13px; font-weight: 600; color: var(--ink); }
+.push-cur { font-style: normal; font-size: 11px; color: var(--ok); margin-left: 3px; }
+
+/* ================= 生产概况柱状图 ================= */
+.pchart {
+  display: flex; align-items: flex-end; gap: 18px; height: 200px; padding: 10px 8px 4px;
+}
+.pbar-col {
+  flex: 1; min-width: 40px; max-width: 92px; height: 100%;
+  display: flex; flex-direction: column; align-items: center; gap: 5px;
+}
+.pbar-v { font-size: 12px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.pbar-track {
+  flex: 1; width: 60%; max-width: 46px; display: flex; align-items: flex-end;
+  background: var(--line2); border-radius: 5px 5px 0 0; overflow: hidden;
+}
+.pbar-track i {
+  display: block; width: 100%;
+  background: linear-gradient(180deg, var(--brand), var(--brand-ink));
+  border-radius: 5px 5px 0 0; transition: height .3s;
+}
+.pbar-k {
+  font-size: 11px; color: var(--ink2); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}

@@ -25,6 +25,10 @@ const S = {
   board: [],
   boardTimer: null,
 
+  // 运行产线「推送」面板：选一条运行中的线 + 该线下要推的机种
+  focusLineId: '',       // 下拉选中的运行产线（同时驱动生产概况柱状图）
+  pushModelCodes: [],    // 该线下多选出的机种 code 列表
+
   // 生产概况：空字符串 = 今天，翻页时改成 YYYY-MM-DD
   prod: null,
   prodDay: '',
@@ -291,6 +295,7 @@ async function loadBoard() {
   S.overview = d.overview || null;
   renderBsum();
   renderBoard();
+  renderPushPanel();
   renderTopStats();
   renderSideFoot();
 }
@@ -407,6 +412,107 @@ function renderBoard() {
   }).join('');
 }
 
+/* ================= 运行产线「推送」面板 =================
+   选一条运行中的线 → 选它下面要推的机种（多选）→ 逐个点「推送」。
+   「推送」= 把该机种设为这条线「正在生产」的机种，屏立即切到它各工序内容
+   （走 /api/board/current，直切、不等屏举手）。同一时间一条线只有一个"正在生产"，
+   所以多选只是候选池，点哪个就切哪个。 */
+
+function runningLines() {
+  return S.board.filter((l) => l.status === 'running');
+}
+
+function renderPushPanel() {
+  const run = runningLines();
+  const sel = $('pushLine');
+  if (!run.length) {
+    sel.innerHTML = '<option value="">没有运行中的产线</option>';
+    $('pushModels').innerHTML = '';
+    $('pushList').hidden = true;
+    $('pushList').innerHTML = '';
+    S.focusLineId = '';
+    renderProd();
+    return;
+  }
+
+  const prev = S.focusLineId && run.some((l) => l.id === S.focusLineId) ? S.focusLineId : run[0].id;
+  S.focusLineId = prev;
+  sel.innerHTML = run.map((l) =>
+    `<option value="${H(l.id)}"${l.id === prev ? ' selected' : ''}>${H(l.name)}（${H(l.code)}）</option>`
+  ).join('');
+  renderPushModels();
+}
+
+async function renderPushModels() {
+  const lineId = S.focusLineId;
+  const line = S.board.find((l) => l.id === lineId);
+  const sel = $('pushModels');
+  if (!line) { sel.innerHTML = ''; $('pushList').hidden = true; renderProd(); return; }
+
+  // 该线下可生产的机种：S.lines 带 modelCodes，懒加载一次（loadLines 只在进线体设置页时拉）
+  if (!S.lines.length) { try { S.lines = (await api('/api/lines')).lines || []; } catch { S.lines = []; } }
+  const lrow = S.lines.find((l) => l.id === lineId);
+  const codes = lrow ? (lrow.modelCodes || []) : [];
+
+  if (!codes.length) {
+    sel.innerHTML = '<option value="">这条线还没挂机种</option>';
+    S.pushModelCodes = [];
+    $('pushList').hidden = true;
+    $('pushList').innerHTML = '';
+    renderProd();
+    return;
+  }
+
+  S.pushModelCodes = S.pushModelCodes.filter((c) => codes.includes(c));
+  sel.innerHTML = codes.map((c) =>
+    `<option value="${H(c)}"${S.pushModelCodes.includes(c) ? ' selected' : ''}>${H(c)}</option>`
+  ).join('');
+  renderPushList();
+  renderProd();
+}
+
+function renderPushList() {
+  const box = $('pushList');
+  if (!S.pushModelCodes.length) { box.hidden = true; box.innerHTML = ''; return; }
+  box.hidden = false;
+  const line = S.board.find((l) => l.id === S.focusLineId);
+  const curCode = line ? line.currentModelCode : '';
+  box.innerHTML = S.pushModelCodes.map((c) => `
+    <div class="push-row">
+      <span class="push-mc">${H(c)}${c === curCode ? ' <em class="push-cur">正在生产</em>' : ''}</span>
+      <button class="btn sm primary" data-pushmodel="${H(c)}"
+        title="把 ${H(c)} 设为这条线「正在生产」的机种，屏立即切到它各工序内容">推送</button>
+    </div>`).join('');
+}
+
+async function pushModel(code) {
+  const lineId = S.focusLineId;
+  const line = S.board.find((l) => l.id === lineId);
+  if (!line) return toast('先选一条运行中的产线', 'err');
+  try {
+    await postJson('/api/board/current', { lineId, modelCode: code });
+    toast(`已推送：${line.name} → ${code}，屏正在切换`, 'ok');
+    await loadBoard();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+$('pushLine').addEventListener('change', () => {
+  S.focusLineId = $('pushLine').value;
+  S.pushModelCodes = [];
+  renderPushModels();
+});
+$('pushModels').addEventListener('change', () => {
+  S.pushModelCodes = [...$('pushModels').selectedOptions].map((o) => o.value);
+  renderPushList();
+});
+$('pushList').addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-pushmodel]');
+  if (!b) return;
+  b.disabled = true;
+  try { await pushModel(b.dataset.pushmodel); }
+  finally { b.disabled = false; }
+});
+
 /* ================= 生产概况（右侧栏） =================
    这一块只回答四句话：今天做了多少 / 这一小时多少 / 效率多少 / 停了多久。
    数据来自「登记产量」+ 线体状态流水，不接 MES、不读终端 —— 见 src/api/prod.js。
@@ -477,118 +583,52 @@ function renderProd() {
   $('pDayLabel').textContent = isToday ? '今天' : day.slice(5).replace('-', '/');
   $('pNext').disabled = day >= today;   // 明天还没发生，翻过去只有空表
 
+  // 选中的线：运行产线「推送」面板里的下拉；没选就退第一条运行中的线
+  const run = S.board.filter((l) => l.status === 'running');
+  if (!S.focusLineId || !run.some((l) => l.id === S.focusLineId)) {
+    S.focusLineId = run[0] ? run[0].id : '';
+  }
+  const focusLine = run.find((l) => l.id === S.focusLineId) || null;
+
   if (!d) { $('pBody').innerHTML = '<div class="p-empty">正在读取…</div>'; return; }
 
-  const t = d.totals || {};
-  const running = d.running || [];
-  const rows = d.rows || [];        // 台账：一条线一笔
-  const byModel = d.byModel || [];  // 同一个产品可能在两条线上做，合计层再并一次
+  // 这条线当天各机种产量：从台账段里筛这条线，按机种汇总 doneQty
+  const mm = new Map();
+  for (const r of (d.rows || [])) {
+    if (r.lineId !== S.focusLineId) continue;
+    const code = r.modelCode || '未选产品';
+    const g = mm.get(code) || { code, name: r.modelName || '', doneQty: 0, hourQty: 0 };
+    g.doneQty += Number(r.doneQty) || 0;
+    g.hourQty += Number(r.hourQty) || 0;
+    mm.set(code, g);
+  }
+  const bars = [...mm.values()].sort((a, b) => b.doneQty - a.doneQty);
 
-  // 说「在开」不说「在运行」：线体状态是物理的，生产输入里的开不开是排产的，
-  // 两条线状态都 running 但今天只开一条时，这里写「在运行 2 条」会让人以为数算错了
-  $('pSub').textContent = `${isToday ? '今天' : day} · ${running.length} 条线在开`
-    + (t.closedLines ? ` · ${t.closedLines} 条不开线` : '');
-  $('pMissing').textContent = t.missing
-    ? `${t.missing} 条线还没录生产输入` : '';
-  $('pMissing').hidden = !t.missing;
+  $('pSub').textContent = focusLine
+    ? `「${focusLine.name}」${isToday ? '今天' : day} · 各机种产量`
+    : '先选一条运行产线';
 
-  // 一条台账都没有：与其摆一排「—」，不如直接告诉人去哪录
-  if (!rows.length) {
+  if (!bars.length) {
     $('pBody').innerHTML = `<div class="p-empty">
-      <b>还没有生产输入</b>
-      <span>去左边「生产输入」给当天在生产的产线填上计划开机、产量和停机，
-      这里才有数可看。点右上角「去录入」直接过去。</span>
+      <b>${focusLine ? `${focusLine.name} 今天还没录产量` : '还没有数据'}</b>
+      <span>到「生产输入」给这条线填上计划开机与产量，这里就有柱状图了。</span>
     </div>`;
     return;
   }
 
-  const rate = t.rate;
-  const cls = rateCls(rate);
-  const pct = rate == null ? 0 : Math.max(0, Math.min(100, Math.round(rate * 100)));
-
-  // ---- 四格主指标：用户点名要的四个数 ----
-  const kpis = `
-    <div class="pkpi">
-      <span class="pk-k">当前每小时产能</span>
-      <span class="pk-v"><b>${fmtN(t.hourQty)}</b><i>件/时</i></span>
-      <span class="pk-s">各产线「实际每小时」之和</span>
-    </div>
-    <div class="pkpi">
-      <span class="pk-k">累计产能</span>
-      <span class="pk-v"><b>${fmtN(t.doneQty)}</b><i>件</i></span>
-      <span class="pk-s">计划 ${fmtN(t.planQty)} 件${
-        t.planQty > 0 ? ` · 完成 ${Math.round((t.doneQty / t.planQty) * 100)}%` : ''}</span>
-    </div>
-    <div class="pkpi">
-      <span class="pk-k">生产效率</span>
-      <span class="pk-v"><b class="${cls}">${rate == null ? '—' : pct + '%'}</b></span>
-      <span class="p-bar ${cls}"><i style="width:${pct}%"></i></span>
-      <span class="pk-s">${t.noTheory
-        ? `${t.noTheory} 条线缺标准产能或工时，合计算不出`
-        : `累计 ÷ 理论${t.theory ? `（理论 ${fmtN(t.theory)} 件）` : ''}`}</span>
-    </div>
-    <div class="pkpi">
-      <span class="pk-k">停机时间</span>
-      <span class="pk-v"><b>${fmtDown(t.downMin)}</b></span>
-      <span class="pk-s">有效工时 ${t.effHours || 0} h / 计划 ${t.shiftHours || 0} h</span>
-    </div>`;
-
-  // ---- 当前生产的机种：实时取，不是台账 ----
-  const liveHtml = running.length ? running.map((r) => `
-    <div class="pg-line">
-      <span class="pg-dot${r.hasInput ? '' : ' miss'}"></span>
-      <span class="pg-ln">${H(r.lineName)}</span>
-      ${r.modelCode
-        ? `<b class="pg-mc">${H(r.modelCode)}</b><span class="pg-mn">${H(r.modelName)}</span>`
-        : '<span class="pg-none-mc">未指定机种</span>'}
-      ${r.hasInput
-        ? `<span class="pg-qty">${fmtN(r.hourQty)} 件/时</span>`
-          + (r.rate == null ? '' : `<em class="pg-rate ${rateCls(r.rate)}">${Math.round(r.rate * 100)}%</em>`)
-        : '<span class="pg-tag">未录入</span>'}
-    </div>`).join('')
-    : '<div class="pg-empty-line">没有在运行的产线</div>';
-
-  // ---- 效率明细：分子分母全部摊开，别让人只能看一个百分比 ----
-  const detail = [
-    ['录入产线', `${t.inputLines || 0} 条${t.closedLines ? `（${t.closedLines} 条不开线）` : ''}`],
-    ['生产段数', `${t.segCount || 0} 段`],
-    ['计划产量', `${fmtN(t.planQty)} 件`],
-    ['理论产量', `${fmtN(t.theory)} 件`],
-    ['产量缺口', t.gap == null ? '—' : `${fmtN(t.gap)} 件`, t.gap > 0 ? 'warn' : ''],
-    ['平均节拍', t.effHours > 0 ? `${fmtN(Math.round(t.doneQty / t.effHours))} 件/时` : '—'],
-    ['计划工时', `${t.shiftHours || 0} h`],
-    ['有效工时', `${t.effHours || 0} h`]
-  ].map(([k, v, c]) => `<div class="p-kv"><span>${k}</span><b class="${c || ''}">${v}</b></div>`).join('');
-
-  // 多个型号、或同一条线分了段，才需要拆开看（一个型号一段时上面那些数已经是它的了）。
-  // 放在左列「当前生产的机种」下面 —— 它回答的就是"这几个型号各做了多少"，
-  // 和上面的实时列表是同一个问题的两个角度。
-  const modelSec = (byModel.length > 1 || (t.segCount || 0) > (t.inputLines || 0)) ? `
-    <div class="p-sec pg-mdl-sec">按产品</div>
-    ${byModel.map((m) => {
-      const extra = [m.lineCount > 1 ? `${m.lineCount} 条线` : '', m.segs > 1 ? `${m.segs} 段` : '']
-        .filter(Boolean).join(' · ');
-      return `
-      <div class="pg-mdl">
-        <b>${H(m.code)}</b>
-        <span>${fmtN(m.doneQty)} / ${fmtN(m.theory)} 件${extra ? ' · ' + extra : ''}</span>
-        <em class="${rateCls(m.rate)}">${m.rate == null ? '—' : Math.round(m.rate * 100) + '%'}</em>
+  // 柱状图：纯 CSS，X 轴 = 机种，Y = 当天累计产量
+  const max = Math.max(1, ...bars.map((b) => b.doneQty));
+  const cols = bars.map((b) => {
+    const pct = Math.round((b.doneQty / max) * 100);
+    return `
+      <div class="pbar-col" title="${H(b.code)}${b.name ? '　' + H(b.name) : ''}　${b.doneQty} 件">
+        <span class="pbar-v">${b.doneQty}</span>
+        <div class="pbar-track"><i style="height:${Math.max(3, pct)}%"></i></div>
+        <span class="pbar-k">${H(b.code)}</span>
       </div>`;
-    }).join('')}` : '';
+  }).join('');
 
-  $('pBody').innerHTML = `
-    <div class="pkpis">${kpis}</div>
-    <div class="p-cols">
-      <div>
-        <div class="p-sec">当前生产的机种</div>
-        <div class="pg-live">${liveHtml}</div>
-        ${modelSec}
-      </div>
-      <div>
-        <div class="p-sec">效率明细</div>
-        ${detail}
-      </div>
-    </div>`;
+  $('pBody').innerHTML = `<div class="pchart">${cols}</div>`;
 }
 
 $('pPrev').addEventListener('click', () => {
