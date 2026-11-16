@@ -424,16 +424,16 @@
           <div class="card-head">
             <span class="sub" id="termSub">—</span>
             <div class="spacer"></div>
-            <!-- 两个视角：按工序 = 这道工序的屏在不在；按客户端 = 哪些机器连上来了、分配在哪 -->
-            <button class="btn sm primary" id="tmOp">按工序</button>
-            <button class="btn sm" id="tmClient">按客户端</button>
-            <label class="inl" id="termLineWrap">
+            <!-- 两个视角：按客户端 = 默认（哪些机器连上来了、分配在哪）；按工序 = 这道工序的屏在不在 -->
+            <button class="btn sm" id="tmOp">按工序</button>
+            <button class="btn sm primary" id="tmClient">按客户端</button>
+            <label class="inl hide" id="termLineWrap">
               线体
               <select id="termLinePick"></select>
             </label>
             <button class="btn sm" id="termRefresh">刷新</button>
           </div>
-          <div class="table-wrap" id="termOpWrap">
+          <div class="table-wrap hide" id="termOpWrap">
             <table class="data-table" id="termTable">
               <thead>
                 <tr>
@@ -451,18 +451,18 @@
             </table>
           </div>
 
-          <!-- 按客户端：服务端登记过的每一台机器，不管它有没有被分配到工位 -->
-          <div class="table-wrap hide" id="termClientWrap">
+          <!-- 按客户端：服务端登记过的每一台机器，不管它有没有被分配到工位。默认就是这个视角 -->
+          <div class="table-wrap" id="termClientWrap">
             <table class="data-table" id="clientTable">
               <thead>
                 <tr>
-                  <th style="width:150px">IP 地址</th>
-                  <th style="width:140px">计算机名</th>
-                  <th style="width:160px">自报线体 / 工序</th>
-                  <th style="width:120px">最后心跳</th>
-                  <th>分配在</th>
-                  <th style="width:190px">状态</th>
-                  <th style="width:80px"></th>
+                  <th style="width:140px">IP 地址</th>
+                  <th style="width:130px">计算机名</th>
+                  <th style="width:150px">自报线体 / 工序</th>
+                  <th style="width:110px">最后心跳</th>
+                  <th style="width:300px">分配在</th>
+                  <th style="width:180px">状态</th>
+                  <th style="width:110px"></th>
                 </tr>
               </thead>
               <tbody></tbody>
@@ -470,8 +470,8 @@
           </div>
 
           <p class="foot-hint" id="termFoot">
-            IP 由服务端从连接来源读取，不采信终端自报；终端每 5 秒上报一次参数。
-            未上线的工序也会列出来，方便区分"没装机"和"装了没开机"。
+            IP 由服务端从连接来源读取。分配在哪个工位直接在这里选：先选线体、再选工序，选完即生效；
+            屏上把线号 / 工序号改了，这里会显示「已改配」并报出它现在报的是什么。
           </p>
         </div>
       </div>

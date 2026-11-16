@@ -58,8 +58,11 @@ const S = {
 
   terms: null,
   termLineId: '',
-  termMode: 'op',    // op = 按工序看（这道工序的屏在不在）；client = 按客户端看（哪些机器连上来了）
+  // client = 默认视角：哪些机器连上来了、分配在哪（现场最常问的就是这个）
+  // op = 按工序看这条线的屏在不在，需要先选线体
+  termMode: 'client',
   clients: null,
+  opsByLine: {},     // lineId -> [工序码]，给「分配在」那列的工序下拉用；只缓存不失效（换型时后端也会给全量）
 
   media: null,
   libAll: null,
@@ -3584,8 +3587,21 @@ async function loadClients() {
   } catch {
     S.clients = null;
   }
+  // 「分配在」那列要列线体，没进过线体设置页时这里补一次
+  if (!S.lines || !S.lines.length) {
+    try { S.lines = (await api('/api/lines')).lines || []; } catch { S.lines = []; }
+  }
   renderClientTable();
   renderTopStats();
+}
+
+/** 某条线有哪些工序码（给「分配在」的工序下拉）。按线体的当前机种取，未上线也列出来。 */
+async function opsOfLine(lineId) {
+  if (!lineId) return [];
+  if (S.opsByLine[lineId]) return S.opsByLine[lineId];
+  const d = await api('/api/terminals?lineId=' + encodeURIComponent(lineId));
+  S.opsByLine[lineId] = (d.terminals || []).map((t) => t.op).filter(Boolean);
+  return S.opsByLine[lineId];
 }
 
 function renderClientTable() {
@@ -3610,9 +3626,21 @@ function renderClientTable() {
 
   tb.innerHTML = d.clients.map((c) => {
     const b = c.bind;
-    const alloc = b
-      ? `${H(b.lineCode)} / <b>${H(b.processCode)}</b>`
-      : '<span class="muted">未分配</span>';
+
+    // 「分配在」= 线体 + 工序两个下拉，选完立刻写库 —— 等价于工序页那列「屏」，
+    // 但在按客户端的视角里能直接配，不用先跑去「机种设置 → 工序设定」找那道工序。
+    const lineOpts = ['<option value="">未分配</option>']
+      .concat((S.lines || []).map((l) =>
+        `<option value="${H(l.id)}"${b && b.lineId === l.id ? ' selected' : ''}>${H(l.code)}${l.name && l.name !== l.code ? '（' + H(l.name) + '）' : ''}</option>`))
+      .join('');
+    const known = (b && S.opsByLine[b.lineId]) || [];
+    const opList = known.length ? known : (b ? [b.processCode] : []);
+    const opOpts = b
+      ? ['<option value="">— 换工序 —</option>']
+        .concat(opList.map((code) =>
+          `<option value="${H(code)}"${code === b.processCode ? ' selected' : ''}>${H(code)}</option>`))
+        .join('')
+      : '<option value="">先选线体</option>';
 
     let state;
     if (!c.online) {
@@ -3620,7 +3648,7 @@ function renderClientTable() {
     } else if (!b) {
       state = '<span class="badge muted">在线 · 未分配</span>';
     } else if (b.state === 'moved') {
-      state = `<span class="badge warn">已改配 · 现在报 ${H(c.lineCode || '—')}/${H(c.opCode || '—')}，按分配执行</span>`;
+      state = `<span class="badge warn">已改配 · 现在报 ${H(c.lineCode || '—')}/${H(c.opCode || '—')}</span>`;
     } else {
       state = '<span class="badge ok">在线 · 与分配一致</span>';
     }
@@ -3630,9 +3658,15 @@ function renderClientTable() {
       <td>${c.name ? H(c.name) : '<span class="muted">—</span>'}</td>
       <td class="mono">${H(c.lineCode || '—')} / ${H(c.opCode || '—')}</td>
       <td class="num">${H(ageShort(c.ageMs))}前</td>
-      <td>${alloc}</td>
+      <td>
+        <select class="btn xs" data-cbline="${H(c.ip)}" style="max-width:120px;padding:4px 6px">${lineOpts}</select>
+        <select class="btn xs" data-cbop="${H(c.ip)}" data-line="${b ? H(b.lineId) : ''}" style="max-width:110px;padding:4px 6px">${opOpts}</select>
+      </td>
       <td>${state}</td>
-      <td>${b ? `<button class="btn xs ghost" data-cunbind="${H(c.ip)}">解除</button>` : ''}</td>
+      <td>
+        ${b ? `<button class="btn xs ghost" data-cunbind="${H(c.ip)}">解除</button>` : ''}
+        <button class="btn xs ghost danger" data-cdel="${H(c.ip)}" title="只删台账记录；屏还在跑的话 5 秒后会重新出现">删除</button>
+      </td>
     </tr>`;
   }).join('');
 }
@@ -3640,7 +3674,67 @@ function renderClientTable() {
 $('tmOp').addEventListener('click', () => setTermMode('op'));
 $('tmClient').addEventListener('click', () => setTermMode('client'));
 
+// 「分配在」的两个下拉：选线体 → 填工序 → 选完即写库。
+// 走的是同一个 bind 接口（和工序页那列「屏」等价），所以换型时工位上的屏不用重配：
+// 绑定键是 process_code，机种换了这个码还在。
+$('clientTable').addEventListener('change', async (e) => {
+  const lineSel = e.target.closest('[data-cbline]');
+  if (lineSel) {
+    const ip = lineSel.dataset.cbline;
+    const lineId = lineSel.value;
+    if (!lineId) {
+      // 选「未分配」= 解绑（播放回落到它自报的号）
+      try {
+        await postJson('/api/clients/' + encodeURIComponent(ip) + '/unbind', {});
+        toast('已解除分配', 'ok');
+        await loadClients();
+      } catch (err) { toast(err.message, 'err'); }
+      return;
+    }
+    try {
+      const ops = await opsOfLine(lineId);
+      const row = lineSel.closest('tr');
+      const sel = row.querySelector('[data-cbop]');
+      sel.dataset.line = lineId;
+      sel.innerHTML = ['<option value="">— 选工序 —</option>']
+        .concat(ops.map((code) => `<option value="${H(code)}">${H(code)}</option>`)).join('');
+      if (!ops.length) toast('这条线还没有工序表，先去「机种设置」里配', 'err');
+      else sel.focus();       // 直接聚焦，现场少点一次
+    } catch (err) { toast(err.message, 'err'); }
+    return;
+  }
+
+  const opSel = e.target.closest('[data-cbop]');
+  if (!opSel) return;
+  const ip = opSel.dataset.cbop;
+  const lineId = opSel.dataset.line;
+  const op = opSel.value;
+  if (!lineId || !op) return;
+  try {
+    const r = await postJson('/api/clients/' + encodeURIComponent(ip) + '/bind',
+      { lineId, processCode: op, src: 'admin' });
+    toast(r.replacedClientId ? `已指派到 ${op}（顶掉了 ${r.replacedClientId}）` : `已指派到 ${op}`, 'ok');
+    await loadClients();
+  } catch (err) { toast(err.message, 'err'); }
+});
+
 $('clientTable').addEventListener('click', async (e) => {
+  const del = e.target.closest('[data-cdel]');
+  if (del) {
+    const ip = del.dataset.cdel;
+    const ok = await ask('删除这条客户端记录？',
+      `${ip} 会从列表里消失，连同它的分配。\n\n`
+      + '这只清服务端的台账，不是封禁：如果这台屏还在运行，下一次心跳（5 秒内）就会把它重新登记回来。'
+      + '要它别再出现，只能关掉那台终端。');
+    if (!ok) return;
+    try {
+      await api('/api/clients/' + encodeURIComponent(ip), { method: 'DELETE' });
+      toast('已删除记录', 'ok');
+      await loadClients();
+    } catch (err) { toast(err.message, 'err'); }
+    return;
+  }
+
   const btn = e.target.closest('[data-cunbind]');
   if (!btn) return;
   const ip = btn.dataset.cunbind;
@@ -3657,6 +3751,9 @@ $('clientTable').addEventListener('click', async (e) => {
 setInterval(() => {
   if (S.tab !== 'terms' || document.hidden) return;
   if (S.termMode === 'client') {
+    // 正在选「分配在」的下拉时不要重绘：2 秒一次的整体重绘会把刚点开的 select 直接销毁
+    const ae = document.activeElement;
+    if (ae && ae.tagName === 'SELECT' && ae.closest('#clientTable')) return;
     api('/api/clients')
       .then((d) => { S.clients = d; renderClientTable(); })
       .catch(() => {});

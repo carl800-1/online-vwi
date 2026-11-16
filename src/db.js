@@ -1365,6 +1365,24 @@ export function unbindClient(clientId) {
   return q.run('DELETE FROM client_bind WHERE client_id = ?', String(clientId || '')).changes;
 }
 
+/**
+ * 删掉一台客户端的台账（连同它的绑定）。
+ *
+ * 只删记录，**不是封禁**：屏还在跑的话 5 秒后心跳会把记录重新插回来
+ * （client 表 id 就是 IP，upsert 语义）。前端必须把这句话说出来，
+ * 否则现场会以为"删了又自己回来 = 有 bug"。
+ */
+export function removeClient(clientId) {
+  const id = String(clientId || '').trim();
+  if (!id) return 0;
+  let removed = 0;
+  tx(() => {
+    q.run('DELETE FROM client_bind WHERE client_id = ?', id);
+    removed = q.run('DELETE FROM client WHERE id = ?', id).changes;
+  });
+  return removed;
+}
+
 export function unbindProcess(lineId, processCode) {
   return q.run('DELETE FROM client_bind WHERE line_id = ? AND process_code = ?',
     String(lineId || ''), String(processCode || '')).changes;

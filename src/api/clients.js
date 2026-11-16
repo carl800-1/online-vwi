@@ -14,7 +14,7 @@
 // 没指派的屏仍旧按自报值播放（新屏装完到确认之间不能黑屏）。
 import {
   q, clients as allClients, clientOf, bindOfProcess, bindOfClient, binds as allBinds,
-  bindClient, unbindClient, unbindProcess, processesOf, lineByCode, upsertClient
+  bindClient, unbindClient, unbindProcess, removeClient, processesOf, lineByCode, upsertClient
 } from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
 import { getState, notifyContentChanged } from '../switch.js';
@@ -292,6 +292,23 @@ export function register(router) {
     // 解绑会改变"播什么"（从指派值回落到自报值），同样要推
     if (n) notifyContentChanged();
     sendJson(res, 200, { ok: true, removed: n });
+  });
+
+  /**
+   * 删除一条客户端台账（连同它的绑定）。
+   *
+   * 删的只是"服务端记着这台机器"这件事，**不是封禁**：屏还在跑的话，下一次心跳
+   * （5 秒内）就会把它重新登记回来 —— 界面上的提示必须说清这点，否则会被当成"删不掉"。
+   * 真实用途是清掉换过 IP 的老条目、报废机器、以及测试残留。
+   */
+  router.del('/api/clients/:id', (req, res) => {
+    const c = clientOf(req.params.id);
+    if (!c) throw badRequest('客户端不存在：' + req.params.id);
+    const hadBind = Boolean(bindOfClient(c.id));
+    const n = removeClient(c.id);
+    // 删掉带绑定的记录等于解绑（播放从指派值回落），要推一次
+    if (hadBind) notifyContentChanged();
+    sendJson(res, 200, { ok: true, removed: n, hadBind });
   });
 
   /** 解绑某道工序（屏还在，但这道工序不再指定它） */
