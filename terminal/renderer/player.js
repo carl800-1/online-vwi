@@ -23,6 +23,9 @@ const S = {
   modelId: '',
   op: '',
   snap: null,
+  // 上一次「播放内容」排除掉的项数。只有 0 项清单时才用得上：
+  // 和"本来就没内容"要显示不同的话，工人和工程部才知道该去改哪儿。
+  hidden: 0,
   appliedKey: ''
 };
 
@@ -225,11 +228,32 @@ async function applyView(view) {
   }
 
   if (!items.length) {
+    // 空清单有两种，别混：
+    //   · 本来就没配内容 —— 绝不翻成黑屏，保持旧画面，只让状态条去告警
+    //   · 原来有、现在被「播放内容」全排除（hidden>0）—— 管理端明确不让播，
+    //     必须真的清掉。保留旧画面等于"勾掉了照样播"，人只会觉得设置没生效。
+    if (Number(view.hidden) > 0 && S.queue.length) {
+      S.hidden = Number(view.hidden) || 0;
+      const old = S.active;
+      S.queue = [];
+      S.idx = 0;
+      S.modelCode = view.modelCode || S.modelCode;
+      S.modelId = view.modelId || S.modelId;
+      S.appliedKey = key;
+      // 先按新状态渲染再清层：等待页要立刻接上，中间不能出现一帧空白
+      if (S.snap) S.snap.status = 'incomplete';
+      clearLayer(old);
+      updateChrome();
+      renderWait();
+      ack(view.id, true);
+      return;
+    }
     // 空清单：绝不翻成黑屏。保持旧画面，只让状态条去告警。
     const hadContent = S.queue.length > 0;
     if (!hadContent) {
       S.modelCode = view.modelCode || S.modelCode;
       S.modelId = view.modelId || S.modelId;
+      S.hidden = Number(view.hidden) || 0;
       renderWait();
     }
     S.appliedKey = key;
@@ -249,6 +273,7 @@ async function applyView(view) {
   S.idx = 0;
   S.modelCode = view.modelCode || '';
   S.modelId = view.modelId || '';
+  S.hidden = 0;                         // 有内容了，之前的"被排除"提示就该消失
   S.appliedKey = key;
 
   LAYERS.forEach((L, k) => L.box.classList.toggle('on', k === target));
@@ -322,7 +347,9 @@ function renderStatus(snap) {
     hint.hidden = true;
   } else if (st === 'incomplete') {
     right.className = 'right warn';
-    text.textContent = `内容不全 ${snap.done || S.queue.length} 项`;
+    // 屏上还有内容时才说"不全"；屏是空的，说清是"被排除"还是"压根没有"
+    const n = snap.done || S.queue.length;
+    text.textContent = n ? `内容不全 ${n} 项` : (S.hidden ? '内容被排除' : '无播放内容');
     // 屏上还有内容时才挂角标；屏是空的，中央那张等待页已经把话说完了，不必重复
     hint.hidden = !hasContent;
     hint.className = 'warn';
@@ -357,6 +384,17 @@ function renderWait() {
   const txt = $('waitText');
   const bar = $('waitBar');
   const wh = $('waitHint');
+
+  // 空队列 + 有"被排除"计数 = 内容被「播放内容」挡掉了。
+  // 这一条要排在最前面：状态快照可能还没推过来（flip 比 status 早），
+  // 按 st 分支走会暂时显示"正在获取内容"，等于把人指向网络问题。
+  if (S.hidden) {
+    title.textContent = '本工序内容已暂停播放';
+    txt.textContent = `${S.snap?.modelCode || S.modelCode} · ${S.snap?.op || S.op}　共 ${S.hidden} 项被排除`;
+    bar.style.width = '0%';
+    wh.textContent = '工程部在「机种设置 · 播放内容」里重新勾选后，本屏会自动恢复播放';
+    return;
+  }
 
   if (st === 'preparing') {
     title.textContent = '正在获取内容';

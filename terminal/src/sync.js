@@ -380,12 +380,21 @@ class Syncer extends EventEmitter {
         const code = list.modelCode || modelCode || '';
 
         if (!items.length) {
-          // 空清单：允许切换，但屏上必须显式告警，不能静默播空白
-          this.prepared.set(modelId, { modelCode: code, items: [], at: Date.now() });
+          // 空清单有两种，别混：
+          //   · 本来就没配内容 —— 允许切换，屏上显式告警
+          //   · 原来有、现在被「播放内容」全排除（hiddenCount>0）—— 管理端明确不让播
+          //
+          // ⚠️ 这里**不能**直接 return（1.8.3 修）。只改「播放内容」把一项工序全挡住时，
+          //    清单会变成 0 项，而屏上还挂着上一次的内容。直接 return 的后果有两个：
+          //      ① 不翻转 → 屏继续播着已经被勾掉的内容，人以为改了没生效；
+          //      ② 不更新 appliedContentRev → 主循环每 25 秒重新核对一遍，永远收敛不了。
+          const hidden = Number(list.hiddenCount) || 0;
+          this.prepared.set(modelId, { modelCode: code, items: [], at: Date.now(), hidden });
           this.missing = [];
           this.progress = { done: 0, total: 0 };
           await this.reportReady(modelId);
           this.emitStatus(true);
+          await this.applyPrepared(modelId, code);
           return true;
         }
 
@@ -409,25 +418,7 @@ class Syncer extends EventEmitter {
 
         await this.reportReady(modelId);
         this.emitStatus(true);
-
-        // 下完就自己补上，别干等下一轮长轮询：
-        //   · 掉队（服务端早就不等它、已经强翻过）—— 补播新型号
-        //   · 同型号内容被改（工程部改了指导书）—— 指纹变了就换，没变只更新版本号
-        if (this.running && this.serverCurrentId === modelId) {
-          const prep = this.prepared.get(modelId);
-          const sameModel = this.appliedModelId === modelId;
-          const needFlip = !sameModel || (this.serverContentRev !== this.appliedContentRev);
-          if (prep && needFlip) {
-            if (sameModel && fpOf(prep.items) === this.appliedFp) {
-              // 变的是别的工序/别的型号，本机这套其实没动 —— 记下版本号，不闪屏
-              this.appliedContentRev = this.serverContentRev;
-              console.log('[sync] 内容版本更新，但本工序清单未变，不重载');
-            } else {
-              console.log(sameModel ? '[sync] 本工序内容已更新，重载画面' : '[sync] 补播');
-              await this.flipTo(prep, code, modelId);
-            }
-          }
-        }
+        await this.applyPrepared(modelId, code);
         return true;
       } catch (e) {
         if (e.message === 'aborted' || controller.signal.aborted) {
@@ -447,6 +438,39 @@ class Syncer extends EventEmitter {
     this.inflight = job;
     await job.promise;
     return this.prepared.has(modelId);
+  }
+
+  /**
+   * 预备内容就绪之后，决定"要不要真的换画面"。
+   *
+   * 两处调用：清单非空（下载完）与清单为空（内容被「播放内容」全排除）。
+   * 空清单也必须走这里 —— 否则那条"勾掉之后屏上还在播"的路永远绕不过去。
+   *
+   * 三个不该翻的情况：
+   *   · 已经连目标型号都不要了（服务端换了型号）
+   *   · 服务端没变化（rev 相同）
+   *   · 同型号且指纹一样（变的是别的工序，本机这套其实没动）—— 只更新版本号，不闪屏
+   */
+  async applyPrepared(modelId, code) {
+    if (!this.running || this.serverCurrentId !== modelId) return;
+    const prep = this.prepared.get(modelId);
+    if (!prep) return;
+    const sameModel = this.appliedModelId === modelId;
+    if (sameModel && this.serverContentRev === this.appliedContentRev) return;
+    if (sameModel && fpOf(prep.items) === this.appliedFp) {
+      this.appliedContentRev = this.serverContentRev;
+      console.log('[sync] 内容版本更新，但本工序清单未变，不重载');
+      return;
+    }
+    if (!prep.items.length) {
+      console.log(
+        `[sync] ${code} 本工序无可播内容` +
+        (prep.hidden ? `（${prep.hidden} 项被「播放内容」排除）` : '') + '，清屏'
+      );
+    } else {
+      console.log(sameModel ? '[sync] 本工序内容已更新，重载画面' : '[sync] 补播');
+    }
+    await this.flipTo(prep, code, modelId);
   }
 
   abortInflight() {
@@ -473,7 +497,12 @@ class Syncer extends EventEmitter {
     if (this.flipping) return;
     this.flipping = true;
     try {
-      const ok = await this.pushView(prep.items, modelCode, modelId, { reason: 'switch' });
+      // hidden 要一起下发：渲染层靠它区分"本来就没内容"和"内容被播放内容排除"。
+      // 前者保留旧画面（绝不翻成黑屏），后者必须真的清掉。
+      const ok = await this.pushView(prep.items, modelCode, modelId, {
+        reason: 'switch',
+        hidden: prep.hidden || 0
+      });
       if (!ok) {
         // 渲染层没 ack：不落索引，保住旧画面。下次轮询还会再试。
         console.warn('[sync] 渲染层未确认翻转，保留旧画面');
