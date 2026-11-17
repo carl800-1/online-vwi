@@ -1,4 +1,4 @@
-// 5.0.1 界面减法点检：导航只剩 5 项、作业内容只有推送面板、终端监控单视图、系统页有线体清单。
+// 5.0.1 界面减法点检：导航只剩 5 项、作业内容是当天机种清单、终端监控单视图、系统设置只剩本机信息。
 //
 //   VWI_UI_BASE=http://127.0.0.1:8093 electron test/_ui-501.cjs
 //
@@ -32,6 +32,9 @@ app.whenReady().then(async () => {
   });
 
   await win.loadURL(BASE + '/');
+  // 当天机种清单存在 localStorage（按线体分开），同一 user-data-dir 连跑两次会带着上次的清单
+  await win.webContents.executeJavaScript('localStorage.clear()').catch(() => {});
+  await win.webContents.reload();
   await sleep(2500);
 
   const pick = (expr) => win.webContents.executeJavaScript(
@@ -103,17 +106,28 @@ app.whenReady().then(async () => {
   ok(!terms.tmOp && !terms.opWrap, '「按工序」视图与按钮已移除', JSON.stringify(terms));
   ok(terms.clientWrap && terms.cols === 8, `客户端表 ${terms.cols} 列（IP/机名/线体/工序/心跳/版本/状态/操作）`);
 
-  console.log('\n④ 系统页：本厂线体清单');
-  await pick(`(function(){ const b=document.querySelector('.nav-item[data-view="system"]'); if(b) b.click(); return !!b; })()`);
-  await sleep(1200);
+  console.log('\n④ 系统设置：只剩本机信息，线体清单已删');
+  // 浏览器版看不出这一页（点 system 会被 if (!loadSysPanel) return 拦掉、桌面信息也填不上），
+  // 所以这里只验 DOM 结构；实际渲染留到打包版冒烟。
   const sys = await pick(`({
-    lines: document.querySelectorAll('#sysLines .sys-line').length,
-    statusSel: document.querySelectorAll('#sysLines [data-lstatus]').length
+    nav: (document.querySelector('.nav-item[data-view="system"]')?.textContent || '').trim(),
+    navCount: document.querySelectorAll('.nav-item[data-view]').length,
+    sysLinesNode: !!$('sysLines'),
+    lines: document.querySelectorAll('#view-system .sys-line').length,
+    statusSel: document.querySelectorAll('[data-lstatus]').length,
+    viewText: (document.getElementById('view-system')?.textContent || '').replace(/\s+/g, ' ').trim(),
+    nodes: ['sysVer','sysPort','sysAuto','sysLan','sysData','sysLog','sysHide','sysQuit']
+      .filter(id => !document.getElementById(id))
   })`);
-  ok(sys.lines > 0, `系统页列出 ${sys.lines} 条线体`, String(sys.lines));
-  ok(sys.statusSel === sys.lines, '每条都有状态下拉');
-  const shot2 = await win.webContents.capturePage();
-  fs.writeFileSync(path.join(OUT, 'ui-5.0.1-system.png'), shot2.toPNG());
+  ok(sys.nav === '系统设置', `导航项文案：${sys.nav}`);
+  ok(!sys.sysLinesNode && sys.lines === 0 && sys.statusSel === 0,
+    '「本厂线体」整块已删除（没有 #sysLines、没有状态下拉）', JSON.stringify(sys));
+  ok(!/本厂线体/.test(sys.viewText), '视图里也没有「本厂线体」字样');
+  ok(sys.nodes.length === 0, `本机信息结构还在（缺：${sys.nodes.join(',') || '无'}）`, sys.nodes.join(','));
+  ok(/终端装机要填的服务端地址/.test(sys.viewText) && /数据目录/.test(sys.viewText),
+    '服务端地址 / 数据目录 / 日志 三块还在');
+  // 这里不截图：浏览器版切不到系统页（点了没反应），硬截只会拍到上一页。
+  // 系统设置页的图由打包版冒烟脚本（test/_ui-delivery.cjs）在桌面模式下出。
 
   console.log('\n⑤ 机种设置：工序表不再有「屏」和「工时」');
   await pick(`(function(){ document.querySelector('.nav-item[data-view="models"]').click(); return true; })()`);

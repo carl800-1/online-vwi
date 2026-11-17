@@ -1,13 +1,13 @@
-// 管理端逻辑：作业内容 + 机种设置 + 媒体库 + 终端监控 + 系统
+// 管理端逻辑：作业内容 + 机种设置 + 媒体库 + 终端监控 + 系统设置
 // 无框架、无构建，浏览器直接跑。所有状态都在内存，一次刷新从服务端重建。
 //
 // 5.0.1 的位置：这是一台「线头主机」，只干一件事 —— 把视频和 VWI 送到线上的屏。
 // 所以页面只有四页，判断标准只有一条：**不在"送到屏"这条链上的，一律不要**。
-//   作业内容 = 选线 → 选机种 → 点「推送」，屏立即换内容。现场天天看的就是这一页。
+//   作业内容 = 当天要做的机种排成一列，做到哪个点哪个「推送」，屏立即换内容。
 //   机种设置 = **定义层**：这个机种有哪些工序、各做什么、放哪几类内容。
 //   媒体库   = **内容层**：先选机种、再选工序、再传图片 / PDF / 视频。
 //   终端监控 = 哪些屏连上来了、报的哪道工序。线号工序号屏上自己填，这里只读。
-//   系统     = 本机设置 + 本厂线体清单（名称 / 状态）。
+//   系统设置 = 本机设置（版本 / 端口 / 自启 / 服务端地址 / 数据目录 / 日志）。
 //
 // 内容怎么到屏上（不是"推"，是"通知 + 屏来拉"）：
 //   改内容 / 改当前机种 → contentRev+1 → 叫醒挂起的长轮询 → 屏自己来拉清单和文件。
@@ -233,7 +233,7 @@ const VIEW_TITLE = {
   models: '机种设置',
   media: '媒体库',
   terms: '终端监控',
-  system: '系统'
+  system: '系统设置'
 };
 
 // 「系统」只有桌面程序能提供（托盘、自启、本机路径），浏览器版连导航都不显示
@@ -322,8 +322,8 @@ async function renderBoard() {
     empty.hidden = false;
     empty.innerHTML = `<b>现在没有产线在运行。</b>
       <span>${S.board.length
-        ? '到「系统 → 本厂线体」把这条线的状态改成「运行中」。'
-        : '还没有线体 —— 交付包应当自带，去「系统 → 本厂线体」看。'}</span>`;
+        ? '服务端里所有线体的状态都不是「运行中」—— 屏要播内容，线体得是运行中。'
+        : '服务端里一条线体都没有 —— 交付包应当自带，库可能不对。'}</span>`;
     return;
   }
   empty.hidden = true;
@@ -2108,7 +2108,7 @@ $('fileInput').addEventListener('change', (e) => {
 });
 
 // ==================== 媒体库 ====================
-/** 线体清单：机种设置里要用（这个机种能在哪几条线上做），系统页也要用 */
+/** 线体清单：机种设置里要用（这个机种能在哪几条线上做），作业内容也用它列候选机种 */
 async function loadLines() {
   const d = await api('/api/lines');
   S.lines = d.lines || [];
@@ -2211,70 +2211,6 @@ setInterval(() => {
   loadClients().catch(() => {});
 }, 2000);
 
-// ==================== 系统页：本厂线体 ====================
-const LINE_STATUS_TEXT = [
-  ['running', '运行中'],
-  ['stopped', '停用'],
-  ['maintain', '维修中'],
-  ['care', '保养中']
-];
-
-function renderSysLines(rows) {
-  const box = $('sysLines');
-  if (!box) return Promise.resolve();
-  const paint = (lines) => {
-    if (!lines.length) {
-      box.innerHTML = '<div class="lan-item">还没有线体 —— 交付包应当自带 11 条，这里空的说明库不对</div>';
-      return;
-    }
-    box.innerHTML = lines.map((l) => `<div class="sys-line">
-        <b class="sl-name">${H(l.name)}</b>
-        <span class="sl-code">${H(l.code)}</span>
-        <span class="sl-on">在线 ${l.onlineCount || 0}</span>
-        <div class="spacer"></div>
-        <select class="btn xs" data-lstatus="${H(l.id)}" style="padding:4px 6px">
-          ${LINE_STATUS_TEXT.map(([v, t]) =>
-            `<option value="${v}"${l.status === v ? ' selected' : ''}>${t}</option>`).join('')}
-        </select>
-        <button class="btn xs" data-lname="${H(l.id)}">改名</button>
-      </div>`).join('');
-  };
-  if (rows) { paint(rows); return Promise.resolve(); }
-  return loadLines().then(paint);
-}
-
-$('sysLines').addEventListener('change', async (e) => {
-  const sel = e.target.closest('[data-lstatus]');
-  if (!sel) return;
-  try {
-    await putJson('/api/lines/' + encodeURIComponent(sel.dataset.lstatus), { status: sel.value });
-    toast(sel.value === 'running' ? '已改为运行中，这条线的屏开始播内容' : '已改为' + sel.options[sel.selectedIndex].text, 'ok');
-    await loadBoard();
-    await renderSysLines();
-  } catch (err) { toast(err.message, 'err'); await renderSysLines(); }
-});
-
-$('sysLines').addEventListener('click', async (e) => {
-  const btn = e.target.closest('[data-lname]');
-  if (!btn) return;
-  const id = btn.dataset.lname;
-  const line = (S.lines || []).find((l) => l.id === id);
-  if (!line) return;
-  const out = await dialog({
-    title: '改线体名称',
-    message: '编码（' + line.code + '）是终端寻址用的，这里只改显示名称。',
-    fields: [{ key: 'name', label: '名称', value: line.name }],
-    okText: '保存'
-  });
-  if (!out || !out.name) return;
-  try {
-    await putJson('/api/lines/' + encodeURIComponent(id), { name: out.name });
-    toast('已改名', 'ok');
-    await loadBoard();
-    await renderSysLines();
-  } catch (err) { toast(err.message, 'err'); }
-});
-
 // ==================== 桌面程序：系统面板 ====================
 const desk = window.vwiDesktop;
 
@@ -2318,9 +2254,6 @@ if (desk) {
   };
 
   loadSysPanel = openSys;
-
-  // 本厂线体：终端按「线号 + 工序号」寻址，只有 running 的线屏才播
-  renderSysLines().catch(() => {});
 
   $('sysLan').addEventListener('click', async (e) => {
     const url = e.target.dataset && e.target.dataset.copy;
@@ -2373,7 +2306,6 @@ if (desk) {
     const m = await api('/api/models');
     S.models = m.models || [];
     await loadBoard();
-    renderSysLines().catch(() => {});   // 系统页的线体清单（浏览器版也填，桌面版还有托盘信息）
     const st = await api('/api/status').catch(() => null);
     if (st && st.version) { S.version = st.version; renderSideFoot(); }
   } catch (err) {

@@ -2380,18 +2380,3 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
   border: 1px dashed var(--line); border-radius: 8px; background: #fcfdff;
 }
 
-/* ================= 系统页：本厂线体 ================= */
-.sys-lines { display: flex; flex-direction: column; gap: 6px; }
-.sys-line {
-  display: flex; align-items: center; gap: 10px;
-  padding: 7px 10px 7px 12px;
-  border: 1px solid var(--line2); border-radius: 8px; background: #fbfcfe;
-}
-.sys-line .sl-name { font-size: 13.5px; font-weight: 600; }
-.sys-line .sl-code {
-  font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; color: var(--ink3);
-  padding: 1px 7px; border: 1px solid var(--line); border-radius: 999px;
-}
-.sys-line .sl-on { font-size: 12px; color: var(--ink3); font-variant-numeric: tabular-nums; }
-.sys-line .spacer { flex: 1; }
-.sys-line select { font-size: 12px; }
