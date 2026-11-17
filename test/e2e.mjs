@@ -1,8 +1,11 @@
-// 端到端协议测试：模拟 2 台终端，验证"无人在线 / 两段式切换 / 一起翻"三条路径
+// 端到端协议测试：模拟 2 台终端，验证"内容发布 → 屏来拉 → 翻页"整条主链
 //
-// 为什么要有这个脚本：A1（换型切得动、切得齐）是项目验收核心。
-// 人工点浏览器只能证明"页面没崩"，证明不了"服务器等到所有人备齐才喊翻"。
-// 这里用真 HTTP 把协议跑一遍，任何状态机回归都会当场报错。
+// 为什么要有这个脚本：A1（内容能到屏、换了机种屏跟着换）是项目验收核心。
+// 人工点浏览器只能证明"页面没崩"，证明不了"屏拿到的清单和服务器上的一致"。
+// 这里用真 HTTP 把协议跑一遍，任何回归都会当场报错。
+//
+// 5.0.1 起换型是直切（指定即生效），不再有 prepare / 举手 / 集齐才翻的两段式，
+// 所以原来那几十条状态机断言换成了「指定 → seq+1 → 屏拿到新清单」三步。
 //
 // 运行：node test/run.mjs    （自动起一个临时数据目录的实例，跑完清理）
 
@@ -175,14 +178,16 @@ async function upload(buf, name) {
   await put('/api/processes/' + P.OP3.id, { playMode: 'loop' });
 
   // ---------- 2. 无终端在线 ----------
-  console.log('\n[2] 没有任何终端在线时切换');
+  console.log('\n[2] 没有任何终端在线时指定当前机种');
   let before = await state();
+  const LN0 = before.lineId;
   ok(before.online.length === 0, '此时无终端在线');
   ok(before.seq === 0, '初始 seq = 0');
-  r = await post('/api/switch', { modelCode: 'X200' });
-  ok(r.body.activated === true, '无终端在线时直接激活（否则管理端会一直卡在"准备中"）');
-  ok(r.body.state.seq === 1, '直接激活时 seq +1');
-  ok(r.body.state.currentModelId === M.X200.id, '当前机种写为 X200');
+  r = await post('/api/board/current', { lineId: LN0, modelCode: 'X200' });
+  ok(r.ok && r.body.currentModelCode === 'X200', '屏还没装也照样生效（落库即生效，不等举手）');
+  let st0 = await state();
+  ok(st0.seq === 1, '指定后 seq +1');
+  ok(st0.currentModelId === M.X200.id, '当前机种写为 X200');
 
   // ---------- 3. 终端上线 ----------
   console.log('\n[3] 两台终端上线（OP3 / OP4）');
@@ -201,26 +206,18 @@ async function upload(buf, name) {
   ok(r.status === 200 && r.body.noStation === true, '当前机种没有这道工序 → noStation=true（不是 404）');
   ok(/没有工序 OP99/.test(r.body.message || ''), '并给出可读原因，不用运维猜是网络还是没内容');
 
-  // ---------- 4. 两段式切换 ----------
-  console.log('\n[4] 两段式切换：prepare → ready → activate');
+  // ---------- 4. 直切 ----------
+  console.log('\n[4] 直切：指定即生效，不等屏举手');
   before = await state();
-  r = await post('/api/switch', { modelCode: 'X210' });
-  ok(r.ok && r.body.phase === 'prepare', '有终端在线时进入 prepare（不立刻翻）');
-  ok(r.body.state.seq === before.seq, 'prepare 阶段 seq 不变（画面还没翻）');
-  ok(r.body.state.pendingModelCode === 'X210', '服务器记住了目标 X210');
-
+  r = await post('/api/board/current', { lineId: LN0, modelCode: 'X210' });
+  ok(r.ok && r.body.currentModelCode === 'X210', '指定当前机种立即生效');
   st = await state();
-  ok(st.pendingModelCode === 'X210', '终端从长轮询能获知目标机种');
+  ok(st.seq === before.seq + 1, 'seq 只 +1');
+  ok(st.currentModelId === M.X210.id, '当前机种变成 X210');
+  ok(st.pendingModelId === undefined, '状态里不再有 pending（两段式已删）');
 
   r = await post('/api/ready', { op: 'OP3', modelId: M.X210.id });
-  ok(r.ok && r.body.accepted === true, 'OP3 举手被接受');
-  ok(r.body.activated === false, '只有 1/2 台备好时不激活（关键：不出半新半旧）');
-
-  r = await post('/api/ready', { op: 'OP4', modelId: M.X210.id });
-  ok(r.body.activated === true, '两台都备好后立即激活');
-  ok(r.body.state.seq === before.seq + 1, '激活时 seq 只 +1');
-  ok(r.body.state.currentModelId === M.X210.id, '当前机种变成 X210');
-  ok(r.body.state.phase === 'idle', '激活后回到 idle');
+  ok(r.status === 404, '/api/ready 已下线（终端不再举手等发令）');
 
   // ---------- 5. 内容按工序隔离 ----------
   console.log('\n[5] 内容按工序隔离');
@@ -230,29 +227,22 @@ async function upload(buf, name) {
   ok(pl4.modelCode === 'X210' && pl4.empty === true, 'OP4 该机种没内容 → empty=true（终端显式告警）');
   ok(pl3.items[0].url.startsWith('/m/'), '清单里带媒体地址');
 
-  // ---------- 6. 过期举手 ----------
-  console.log('\n[6] 迟到 / 过期举手');
-  await post('/api/switch', { modelCode: 'X220' });
-  r = await post('/api/ready', { op: 'OP3', modelId: M.X210.id });
-  ok(r.status === 409, '拿旧机种举手被拒（409），不会被误算已备好');
-
-  // ---------- 7. 放弃切换 ----------
-  console.log('\n[7] 放弃切换');
-  st = await state();
-  ok(st.phase === 'prepare' && st.pendingModelCode === 'X220', '当前在准备 X220');
-  r = await post('/api/switch/cancel', {});
-  ok(r.ok && r.body.state.phase === 'idle', '放弃后回到 idle');
-  ok(r.body.state.currentModelId === M.X210.id, '放弃后当前机种仍是 X210（画面不动）');
-  ok(r.body.state.pendingModelId === '', '放弃后清掉 pending');
+  // ---------- 6. 两段式接口已下线 ----------
+  console.log('\n[6] 两段式接口已下线');
+  ok((await post('/api/switch', { modelCode: 'X220' })).status === 404, '/api/switch 已删');
+  ok((await post('/api/switch/cancel', {})).status === 404, '/api/switch/cancel 已删');
+  ok((await post('/api/board/next', { lineId: LN0, modelCode: 'X220' })).status === 404,
+    '/api/board/next 已删（排产随两段式一起砍）');
+  ok((await post('/api/board/switch', { lineId: LN0, modelCode: 'X220' })).status === 404,
+    '/api/board/switch 已删（换型改走 /api/board/current）');
 
   // ---------- 8. 反复切换 ----------
   console.log('\n[8] 反复切换（seq 单调）');
   before = await state();
-  await post('/api/switch', { modelCode: 'X200' });
-  await post('/api/ready', { op: 'OP3', modelId: M.X200.id });
-  r = await post('/api/ready', { op: 'OP4', modelId: M.X200.id });
-  ok(r.body.activated === true, '两段式可反复执行');
-  ok(r.body.state.seq === before.seq + 1, 'seq 严格 +1');
+  await post('/api/board/current', { lineId: LN0, modelCode: 'X200' });
+  st = await state();
+  ok(st.currentModelId === M.X200.id, '直切可反复执行');
+  ok(st.seq === before.seq + 1, 'seq 严格 +1');
   const pl = (await j('/display/playlist?op=OP3')).body;
   ok(pl.modelCode === 'X200' && pl.count === 2, '内容随机种整批换回 X200 的 2 项');
 
@@ -300,18 +290,13 @@ async function upload(buf, name) {
 
   ok((await j('/display/boot?op=OP3&line=NOPE')).status === 404, '线体编码配错立刻 404，不静默黑屏');
 
-  // 两条线各自换型，互不影响
-  const st1Before = (await j('/api/status?lineId=' + ls.find((l) => l.code === 'L1').id)).body;
-  const swLine = await post('/api/switch', { modelCode: 'X220', lineCode: 'L1' });
-  ok(swLine.body.state.pendingModelCode === 'X220' || swLine.body.state.modelCode === 'X220',
-    '可以在指定线体上发起换型');
-  const st2During = (await j('/api/status?lineId=' + L2)).body;
-  ok(!st2During.pendingModelCode && st2During.seq === 0, '一线换型不影响二线的状态机');
-
-  // 几条屏在线就要几条一起举手 —— 只有全部就绪才激活，这是两段式切换本来的规矩
-  for (const op of st1Before.online) await post('/api/ready', { op, modelId: M.X220.id, line: 'L1' });
-  const st1After = (await j('/api/status?lineId=' + ls.find((l) => l.code === 'L1').id)).body;
-  ok(st1After.modelCode === 'X220' && st1After.seq === st1Before.seq + 1, '一线切换到 X220 并 seq +1',
+  // 两条线各自推送，互不影响
+  const L1id0 = ls.find((l) => l.code === 'L1').id;
+  const st1Before = (await j('/api/status?lineId=' + L1id0)).body;
+  const swLine = await post('/api/board/current', { lineId: L1id0, modelCode: 'X220' });
+  ok(swLine.ok, '可以在指定线体上直接推送机种');
+  const st1After = (await j('/api/status?lineId=' + L1id0)).body;
+  ok(st1After.modelCode === 'X220' && st1After.seq === st1Before.seq + 1, '一线切到 X220 并 seq +1',
     { before: st1Before, after: st1After });
   ok((await j('/api/status?lineId=' + L2)).body.modelCode === '', '二线仍然没有当前机种（完全隔离）');
 
@@ -715,37 +700,12 @@ async function upload(buf, name) {
   bd = (await j('/api/board')).body;
   ok(bd.overview.running >= 2, `多条线可以同时运行（当前 ${bd.overview.running} 条）`);
 
-  // ---- 排产 ----
-  const curCode = bd.lines.find((l) => l.id === LN1).currentModelCode;
-  const other = Object.values(M).find((m) => m.code !== curCode && m.enabled);
-  let nx = await post('/api/board/next', { lineId: LN1, modelCode: other.code });
-  ok(nx.ok && nx.body.nextModelCode === other.code, '可以给线体排产下一个机种');
-  bd = (await j('/api/board')).body;
-  ok(bd.lines.find((l) => l.id === LN1).nextModelCode === other.code, '排产后 /api/board 能读到 nextModelCode');
-
-  ok((await post('/api/board/next', { lineId: LN1, modelCode: curCode })).status === 400,
-    '把"下一个"排成正在生产的机种会被拒绝');
-
-  // 取消排产
-  await post('/api/board/next', { lineId: LN1, modelCode: '' });
-  bd = (await j('/api/board')).body;
-  ok(bd.lines.find((l) => l.id === LN1).nextModelCode === '', '传空 modelCode 可以取消排产');
-
-  // ---- 换型会把排产摘掉（因为它已经进入"正在切"） ----
-  await post('/api/board/next', { lineId: LN1, modelCode: other.code });
-  const sw2 = await post('/api/board/switch', { lineId: LN1, modelCode: other.code });
-  ok(sw2.ok, '排产后可以直接换型到那个机种');
-  bd = (await j('/api/board')).body;
-  ok(bd.lines.find((l) => l.id === LN1).nextModelCode === '', '换型后 next 被清空（不留下过期的排产）');
-
   // ---- 状态：维修中 ----
   let chg = await put('/api/lines/' + LN1, { status: 'maintain' });
   ok(chg.ok && chg.body.status === 'maintain' && chg.body.enabled === false,
     '改成维修中：status 变 maintain、enabled 自动变 0');
   bd = (await j('/api/board')).body;
   ok(bd.overview.maintain >= 1, '概览里统计到维修中的线');
-  ok(bd.lines.find((l) => l.id === LN1).nextModelCode === '',
-    '不在运行的线，排产一并清掉（不留过期数据）');
 
   // 维修中的线不出现在"运行产线"的筛选里（前端只渲染 status=running）
   ok(bd.lines.filter((l) => l.status === 'running').every((l) => l.id !== LN1),
@@ -774,15 +734,12 @@ async function upload(buf, name) {
   const boardOf = async (lineId) => (await j('/api/board')).body.lines.find((l) => l.id === lineId);
 
   const b15 = await boardOf(LN1);
-  // 上一节最后那次换型可能还挂在 prepare（终端早不轮询了，等不到举手），先放弃掉
-  if (b15.phase === 'prepare') await post('/api/switch/cancel', { lineId: LN1 });
   const pickA = Object.values(M).find((m) => m.code !== b15.currentModelCode && m.enabled);
   const seqBefore = await seqOf(LN1);
   const setA = await post('/api/board/current', { lineId: LN1, modelCode: pickA.code });
   ok(setA.ok && setA.body.currentModelCode === pickA.code, '不走换型协议，直接指定当前机种');
   const a15 = await boardOf(LN1);
   ok(a15.currentModelCode === pickA.code, '总览立刻显示新的当前机种（那一行的大字）');
-  ok(a15.phase === 'idle', '指定后不留在 pending（不会卡在"换型中"）');
   ok(await seqOf(LN1) === seqBefore + 1, 'seq 只 +1（终端据此来取新内容，不重复翻页）');
 
   const sameSet = await post('/api/board/current', { lineId: LN1, modelCode: pickA.code });
@@ -795,24 +752,12 @@ async function upload(buf, name) {
   ok((await post('/api/board/current', { lineId: 'nope', modelCode: pickA.code })).status === 400,
     '不存在的线体被拒绝');
 
-  // 排产的正好就是刚指定的这个 → 排产顺手清掉，否则"下一个"和"正在生产"会是同一个
+  // 一条线可以反复推送不同机种，seq 每次都 +1（屏据此翻页）
   const pickB = Object.values(M).find((m) => m.code !== pickA.code && m.enabled);
-  await post('/api/board/next', { lineId: LN1, modelCode: pickB.code });
+  const seqB = await seqOf(LN1);
   await post('/api/board/current', { lineId: LN1, modelCode: pickB.code });
-  ok((await boardOf(LN1)).nextModelCode === '', '指定的机种正好是排产的那个时，排产自动清空');
-
-  // 换型中不让直接改当前机种 —— 两套逻辑打架会留下"当前是 A、屏上在翻 B"
-  await put('/api/lines/' + LN2, { status: 'running' });
-  await post('/api/board/next', { lineId: LN2, modelCode: M.X200.code });
-  const prep = await post('/api/board/switch', { lineId: LN2, modelCode: M.X200.code });
-  if (prep.ok && prep.body.phase === 'prepare') {
-    ok((await post('/api/board/current', { lineId: LN2, modelCode: pickA.code })).status === 400,
-      '换型进行中不允许直接改当前机种（先放弃切换）');
-    await post('/api/switch/cancel', { lineId: LN2 });
-  } else {
-    ok(true, '换型直接生效（这条线上没有终端在线），跳过"换型中不许改"这一条');
-  }
-  await put('/api/lines/' + LN2, { status: 'stopped' });
+  ok((await boardOf(LN1)).currentModelCode === pickB.code, '连续推送不同机种，后一个覆盖前一个');
+  ok(await seqOf(LN1) === seqB + 1, '每推送一次 seq +1（不重复翻页也不漏翻）');
 
   // ---------- 汇总 ----------
   console.log('\n────────────────────────────');

@@ -10,7 +10,8 @@
 //   4) 三类全勾写回空串（= 未配置），不会被存成 'image,pdf,video' 两种形态；
 //   5) 一样都不勾直接 400，不落库；
 //   6) 改播放内容会推 contentRev（否则终端要等重启才认）；
-//   7) 五页导出带「播放内容」列，原样再导一行都不算改动。
+//   7) 线体 Excel 五页已在 5.0.1 下线（含「播放内容」列的那张「工序参数」页），
+//      旧地址必须 404 —— 留着半张表比没有更糟。
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -216,29 +217,19 @@ const ALL_REQS = [
     ok(bad.status === 400 && /PDF/.test(bad.d.error || ''), '只勾了图片时，PDF 页会被拦（以前悄悄放行）',
       bad.d.error);
 
-    // ── 11. 导出带这一列，改完能导回 ────────────────────────
-    console.log('\n11) 导出与导回');
-    const ex = await fetch(BASE + '/api/export/lines.xlsx');
-    const buf = Buffer.from(await ex.arrayBuffer());
-    const sheets = parseSheets(buf);
-    const sheet = sheets.find((s) => s.name === '工序参数');
-    const head = sheet.rows[0];
-    const iPK = head.indexOf('播放内容');
-    ok(iPK >= 0, '「工序参数」页有「播放内容」列', head.join('/'));
-    const row1 = sheet.rows.slice(1).find((r) => r[2] === p1.code && r[0] === model.code);
-    ok(row1 && row1[iPK] === '全部', '三类全放写「全部」', row1 && String(row1[iPK]));
-
-    await putJson('/api/processes/' + p1.id, { playKinds: ['video'] });
-    const ex2 = await fetch(BASE + '/api/export/lines.xlsx');
-    const buf2 = Buffer.from(await ex2.arrayBuffer());
-    const s2 = parseSheets(buf2).find((s) => s.name === '工序参数');
-    const rowV = s2.rows.slice(1).find((r) => r[2] === p1.code && r[0] === model.code);
-    ok(rowV && rowV[iPK] === '视频', '只放视频写「视频」', rowV && String(rowV[iPK]));
-
-    const pre = await postRaw('/api/import/parse?filename=full.xlsx', buf2);
-    ok(pre.status === 200 && pre.d.sheet === '工序参数', '全量表还能读（新列没把表头顶乱）',
-      `${pre.status} ${pre.d.sheet || pre.d.error}`);
-    ok(pre.d.counts.diff === 0, '原样再导：一行都不算有变化', JSON.stringify(pre.d.counts));
+    // ── 11. 线体 Excel 五页已下线 ───────────────────────────
+    console.log('\n11) 线体 Excel 已下线');
+    // 5.0.1：只留「发布」主链，线体 Excel 五页（含「工序参数」那张带播放内容的表）整块砍掉。
+    // 播放内容改为只能在界面上勾 —— 少一条能绕过类型闸门的批量改法。
+    for (const u of ['/api/export/lines.xlsx', '/api/export/lines-template.xlsx']) {
+      const r = await fetch(BASE + u);
+      ok(r.status === 404, `${u} 已下线`, String(r.status));
+    }
+    // 机种自己的工序清单导出还在（机种设置右上角那个按钮）
+    const ex = await fetch(BASE + '/api/export/processes.xlsx');
+    ok(ex.ok, '工序清单导出仍然可用', String(ex.status));
+    const sheets = parseSheets(Buffer.from(await ex.arrayBuffer()));
+    ok(sheets.some((s) => s.name === '工序清单'), '导出的还是「工序清单」页');
   } catch (e) {
     fails.push('未捕获异常：' + e.message);
     console.error(e);

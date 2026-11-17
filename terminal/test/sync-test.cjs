@@ -111,9 +111,19 @@ function makeFlipLog() {
   return { events, handler };
 }
 
+// 5.0.1：换型号只剩「指定当前机种」这一条路（两段式与 /api/switch 已删）。
+// 得先知道是哪条线 —— 终端不带 line 时服务端回落到 sort 最前的那条启用线体，
+// 这里跟着用同一条，测试和屏走的是同一个口径。
+async function mainLine() {
+  if (mainLine.id) return mainLine.id;
+  const st = await req('GET', '/api/status');
+  mainLine.id = st.lineId;
+  return mainLine.id;
+}
+
 async function switchTo(code) {
-  // 服务端若已在这个型号，先切走再切回来，否则 switchTo 会返回 already-pending
-  return req('POST', '/api/switch', { modelCode: code });
+  const lineId = await mainLine();
+  return req('POST', '/api/board/current', { lineId, modelCode: code });
 }
 
 // ───────────────────────── 用例 ─────────────────────────
@@ -123,7 +133,7 @@ async function main() {
   console.log(`临时数据目录：${ROOT}\n`);
 
   const st0 = await req('GET', '/api/status');
-  console.log(`服务器当前：${st0.modelCode}　seq=${st0.seq}　phase=${st0.phase}`);
+  console.log(`服务器当前：${st0.modelCode}　seq=${st0.seq}　contentRev=${st0.contentRev}`);
   console.log(`本机已有缓存：${cache.stats().files} 个文件\n`);
 
   // ── S1 冷启动：本地空 → 下载 → 起播 ──

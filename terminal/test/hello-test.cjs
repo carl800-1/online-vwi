@@ -1,12 +1,12 @@
 /**
- * 终端 1.8.0：指派下发与自报。
+ * 终端自报（hello）与配置优先级。
  *
- * 只测两件不需要 Electron 的事：
- *   ① hello 自报（真的打 HTTP，四种返回都要能读懂）
- *   ② 指派下发（Syncer 收到 assign 要发事件，且**同一个值只发一次**，否则主进程会反复重启同步）
- *   ③ 配置优先级（管理端改写过的那份要压过部署包 json，否则重启就变回去）
+ * 5.0.1 把「管理端指派」整套删了，所以这个文件只剩两件不需要 Electron 的事：
+ *   ① hello 自报 —— 装机的人站在屏前，要知道服务端到底收没收到
+ *   ② 配置优先级 —— 老机器上 `managed:true` 的那份仍然压过部署包 json
+ *      （字段不再写入，但存量不能一升级就丢配置）
  *
- * 跑法：node test/assign-test.cjs
+ * 跑法：node test/hello-test.cjs
  * 自带假服务器，不依赖真实服务端，也不连网。
  */
 const fs = require('node:fs');
@@ -14,7 +14,7 @@ const path = require('node:path');
 const os = require('node:os');
 const http = require('node:http');
 
-const ROOT = path.join(os.tmpdir(), 'esop-assign-test-' + Date.now());
+const ROOT = path.join(os.tmpdir(), 'esop-hello-test-' + Date.now());
 const EXE_DIR = path.join(ROOT, 'exe');
 process.env.ESOP_TERMINAL_ROOT = ROOT;
 process.env.PORTABLE_EXECUTABLE_DIR = EXE_DIR;
@@ -37,10 +37,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ───────────────────────── 假服务器 ─────────────────────────
 
-let helloReply = { state: 'pending', lineCode: 'L1', processCode: 'OP1' };
+let helloReply = { state: 'confirmed', lineCode: 'L1', processCode: 'OP1' };
 let helloStatus = 200;
-let helloBody = null;          // 记录终端发上来的 body
-let stateReply = { rev: 1, seq: 0, phase: 'idle', currentModelId: '', modelCode: '', contentRev: 1, online: [] };
+let helloBody = null;
+// 故意带上 assign：验证新终端**完全不看**这个字段了
+let stateReply = {
+  rev: 1, seq: 0, currentModelId: '', modelCode: '', contentRev: 1, online: [],
+  assign: { line: 'L2', op: 'OP9', src: 'admin' }
+};
+const readyHits = [];      // 1.8.4 不该再打 /api/ready，打了几次都记下来
 
 const server = http.createServer((req, res) => {
   const chunks = [];
@@ -59,11 +64,11 @@ const server = http.createServer((req, res) => {
       return send(200, { ok: true, ...helloReply });
     }
     if (url.pathname === '/api/state') {
-      // 稍等一下再回：不然长轮询变成死循环，CPU 直接跑满
       setTimeout(() => send(200, { ...stateReply }), 40);
       return;
     }
-    if (url.pathname === '/api/telemetry' || url.pathname === '/api/ready') return send(200, { ok: true });
+    if (url.pathname === '/api/ready') { readyHits.push(url.pathname); return send(404, { error: '接口不存在' }); }
+    if (url.pathname === '/api/telemetry') return send(200, { ok: true });
     if (url.pathname === '/display/playlist') return send(200, { items: [], modelCode: 'X' });
     send(404, { error: 'no' });
   });
@@ -72,33 +77,25 @@ const server = http.createServer((req, res) => {
 // ───────────────────────── 用例 ─────────────────────────
 
 async function testHello(base) {
-  console.log('\nH1 自报：四种状态都要能读懂');
-  helloReply = { state: 'pending', lineCode: 'L1', processCode: 'OP30' };
-  let r = await hello(base, { line: 'L1', op: 'OP30', ver: '1.8.0', res: '1920x1080', name: '3F-XB-01' });
-  eq(r.ok, true, 'pending：调用成功');
-  eq(r.state, 'pending', 'pending：状态透传');
-  ok(r.message.includes('等管理端确认'), 'pending：带中文话术', r.message);
+  console.log('\nH1 自报：服务端收到了，屏上要说清楚');
+  helloReply = { state: 'confirmed', lineCode: 'L1', processCode: 'OP30' };
+  let r = await hello(base, { line: 'L1', op: 'OP30', ver: '1.8.4', res: '1920x1080', name: '3F-XB-01' });
+  eq(r.ok, true, '自报成功');
+  eq(r.state, 'confirmed', '新服务端只有 confirmed 一种');
+  ok(r.message.includes('按本机设置'), '话术说明"按你自己填的号播"', r.message);
   eq(helloBody.name, '3F-XB-01', '把计算机名一起报上去（管理端显示名字而不是裸 IP）');
   eq(helloBody.line, 'L1', '带上线号');
   eq(helloBody.op, 'OP30', '带上工序号');
-  eq(helloBody.ver, '1.8.0', '带上版本号');
+  eq(helloBody.ver, '1.8.4', '带上版本号');
+  eq(r.assign, null, 'assign 恒为 null（5.0.1 服务端不再指派）');
 
-  helloReply = { state: 'confirmed', lineCode: 'L1', processCode: 'OP30' };
-  r = await hello(base, { line: 'L1', op: 'OP30' });
-  eq(r.state, 'confirmed', 'confirmed：状态透传');
-
+  console.log('\nH2 接老服务端也不会崩（状态原样透传，只是不改配置）');
   helloReply = { state: 'assigned', lineCode: 'L2', processCode: 'OP05', assign: { lineCode: 'L2', processCode: 'OP05' } };
   r = await hello(base, { line: 'L1', op: 'OP30' });
-  eq(r.state, 'assigned', 'assigned：状态透传');
-  eq(r.assign.processCode, 'OP05', 'assigned：把管理端指到哪带回来');
-  ok(r.message.includes('按管理端执行'), 'assigned：话术说明本机要跟着改', r.message);
+  eq(r.state, 'assigned', '老服务端回 assigned：状态透传');
+  ok(r.message.includes('仍按自己的设置'), '话术写明本机不会跟着改', r.message);
 
-  helloReply = { state: 'conflict', conflictWith: '192.168.1.32' };
-  r = await hello(base, { line: 'L1', op: 'OP30' });
-  eq(r.state, 'conflict', 'conflict：状态透传');
-  eq(r.conflictWith, '192.168.1.32', 'conflict：告诉现场是哪台占着');
-
-  console.log('\nH2 自报失败不能挡住装机');
+  console.log('\nH3 自报失败不能挡住装机');
   helloStatus = 400;
   r = await hello(base, { line: 'L1', op: 'OP30' });
   eq(r.ok, false, '400：算失败');
@@ -113,89 +110,61 @@ async function testHello(base) {
   eq(r.ok, false, '没填工序号：不打请求，直接判失败');
 }
 
-async function testAssign(base) {
-  console.log('\nA1 下发与本地不一致 → 发一次 assign 事件');
-  stateReply = { ...stateReply, assign: { line: 'L1', op: 'OP2', src: 'admin' } };
+async function testNoAssign(base) {
+  console.log('\nS1 服务端还下发 assign 也不理它（1.8.4 删了改派）');
   const s = new Syncer({ line: 'L1', op: 'OP1', server: base }, {});
-  const seen = [];
-  s.on('assign', (a) => seen.push(a));
+  let fired = 0;
+  s.on('assign', () => { fired++; });
   s.start();
-  await sleep(700);
-  eq(seen.length, 1, '只发一次');
-  if (seen[0]) {
-    eq(seen[0].line, 'L1', '带来目标线体');
-    eq(seen[0].op, 'OP2', '带来目标工序');
-    eq(seen[0].fromOp, 'OP1', '带来原工序（日志与屏上提示要用）');
-    eq(seen[0].src, 'admin', '带来来源（管理端改派）');
-  }
-
-  // 服务端还在继续下发同一个值（长轮询每轮都带），不能再发
-  await sleep(600);
-  eq(seen.length, 1, '同一个值重复下发不会重复发事件');
-
-  console.log('\nA2 值变了 → 再发一次；与本地一致 → 不发');
-  stateReply = { ...stateReply, assign: { line: 'L2', op: 'OP3', src: 'admin' } };
-  await sleep(600);
-  eq(seen.length, 2, '换成另一个位置会再发一次');
-  eq(seen[1] && seen[1].line, 'L2', '第二次的目标线体');
+  await sleep(800);
+  eq(fired, 0, '一个 assign 事件都不发');
+  eq(s.cfg.line, 'L1', '本地配置没被改写（还是自己填的 L1）');
+  eq(s.cfg.op, 'OP1', '工序号也没被改写');
   s.stop();
 
-  const s2 = new Syncer({ line: 'L2', op: 'OP3', server: base }, {});
-  const seen2 = [];
-  s2.on('assign', (a) => seen2.push(a));
-  s2.start();
-  await sleep(600);
-  eq(seen2.length, 0, '本地已经是这个位置：不发（不会自己重启自己）');
-  s2.stop();
-
-  console.log('\nA3 没有被指派过 → 一个事件都不该有');
-  stateReply = { ...stateReply, assign: undefined };
-  const s3 = new Syncer({ line: 'L1', op: 'OP1', server: base }, {});
-  const seen3 = [];
-  s3.on('assign', (a) => seen3.push(a));
-  s3.start();
-  await sleep(500);
-  eq(seen3.length, 0, '没有 assign 字段时什么都不做（老服务端）');
-  s3.stop();
+  console.log('\nS2 不再举手（1.8.4 删了 /api/ready）');
+  eq(readyHits.length, 0, `跑了 ${800}ms 一次 /api/ready 都没打过`, readyHits.length ? readyHits.join(',') : '');
 }
 
 function testConfigPriority() {
-  console.log('\nC1 配置优先级：管理端改写过的那份压过部署包 json');
+  console.log('\nC1 配置优先级：老机器上 managed 的那份仍然压过部署包 json');
   // 部署包 json 说 L1/OP1（运维批量部署的那份）
   fs.writeFileSync(path.join(EXE_DIR, 'config.json'),
     JSON.stringify({ server: 'http://10.0.0.1:8092', line: 'L1', op: 'OP1' }), 'utf8');
-  // 本机（管理端改派后写入）
+  // 本机：4.5 时代被管理端改写过的那份（存量数据，不能一升级就丢）
   fs.writeFileSync(config.PATHS.config,
     JSON.stringify({ server: 'http://10.0.0.1:8092', line: 'L2', op: 'OP5', managed: true }), 'utf8');
 
   let c = config.load();
-  eq(c.line, 'L2', 'managed 的本地配置优先（否则重启就变回部署包的值）');
+  eq(c.line, 'L2', 'managed 的本地配置优先（老机器升级后不会突然变回部署包的值）');
   eq(c.op, 'OP5', '工序也跟着本地');
   eq(c.from, 'local-managed', '来源标记为 local-managed');
 
-  // 手工清掉 managed（前端没有这个开关，等价于重新部署一份干净配置）
+  // 手工清掉 managed（现场想回到"部署包 json 说了算"时就这么做）
   fs.writeFileSync(config.PATHS.config,
     JSON.stringify({ server: 'http://10.0.0.1:8092', line: 'L2', op: 'OP5' }), 'utf8');
   c = config.load();
   eq(c.line, 'L1', '没有 managed 标记时回到老行为：部署包 json 优先');
   eq(c.from, 'portable', '来源标记为 portable');
 
-  console.log('\nC2 managed 要能落盘（下次启动才认）');
-  const saved = config.save({ ...c, line: 'L3', op: 'OP7', managed: true });
-  eq(saved.managed, true, 'save 返回里带 managed');
-  const raw = JSON.parse(fs.readFileSync(config.PATHS.config, 'utf8'));
-  eq(raw.managed, true, '真的写进了 config.json');
-  eq(config.load().line, 'L3', '再读一次就是管理端说的那条线');
+  console.log('\nC2 设置页保存不会把 kiosk / 自启重置（1.8.1 修过的那个坑）');
+  fs.writeFileSync(path.join(EXE_DIR, 'config.json'),
+    JSON.stringify({ server: 'http://10.0.0.1:8092', line: 'L1', op: 'OP1', kiosk: true, autoStart: true }), 'utf8');
+  const cur = config.load();
+  const saved = config.save({ ...cur, op: 'OP7' });
+  eq(saved.op, 'OP7', '工序号改成了 OP7');
+  eq(saved.kiosk, true, 'kiosk 没被重置成默认值');
+  eq(saved.autoStart, true, 'autoStart 没被重置成默认值');
 }
 
 async function main() {
-  console.log(`\n终端指派与自报测试　临时目录 ${ROOT}`);
+  console.log(`\n终端自报与配置测试　临时目录 ${ROOT}`);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const base = `http://127.0.0.1:${server.address().port}`;
 
   try {
     await testHello(base);
-    await testAssign(base);
+    await testNoAssign(base);
     testConfigPriority();
   } finally {
     server.close();

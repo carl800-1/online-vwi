@@ -135,11 +135,12 @@ const LOOPBACK = /\/\/(127\.0\.0\.1|localhost|\[::1\])(:|$)/i.test(SERVER);
       { timeoutMs: 15000 }
     );
     ok(true, '长轮询有返回（不是挂住不回）');
-    const need = ['rev', 'seq', 'phase', 'contentRev'];
+    // 5.0.1 起没有 phase 了（两段式已删）；终端只认这几个
+    const need = ['rev', 'seq', 'contentRev'];
     const missing = need.filter((k) => st[k] === undefined);
     ok(missing.length === 0, '终端要用的字段齐全（' + need.join(' / ') + '）',
       '缺 ' + missing.join(' / ') + '，终端会按默认值走');
-    info(`rev=${st.rev}　seq=${st.seq}　contentRev=${st.contentRev}　phase=${st.phase || '-'}`);
+    info(`rev=${st.rev}　seq=${st.seq}　contentRev=${st.contentRev}`);
     info(`当前机种 ${st.modelCode || '(未指定)'}　在线屏 ${(st.online || []).length} 台`);
     if (!st.modelCode) {
       info('这条线还没有指定当前机种 —— 屏会显示等待，不是连不上');

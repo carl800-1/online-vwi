@@ -1,18 +1,19 @@
-// 「客户端（屏）与工序绑定」的回归测试
+// 「屏台账（终端监控）」的回归测试
 //
 //   node test/clients.mjs      （自带干净数据目录，端口 8112，跑完即焚）
 //
-// 验这些事：
-//   1) 屏每 5 秒的心跳会把自己登记成一台客户端（老终端 1.7.1 一行不改就能进列表）
-//   2) 心跳里不带 line（跟随服务端）时，记的是解析后的实际线体，不是空
-//   3) 绑定落在 (线体, 工序码) 上；一台屏只占一个工位、一道工序只一台屏
-//   4) 同工序换一台：原来的被换下，接口告诉你换的是谁
-//   5) 屏上把工序号改了 → 立刻判 moved，并报出它现在报的是什么（这是整个功能的重点）
-//   6) 心跳超时 → offline
-//   7) 绑定会推 contentRev（4.5.0 起指派决定播放，和 4.4.0 相反）
-//   8) 参数校验：缺工序 / 工序码非法 / 线体不存在 / 客户端不存在 都 400
-//   9) 解除：按客户端解、按工序解，都真的从库里消失
-//  10) hello 四态（pending/confirmed/assigned/conflict）与「指派优先于自报」
+// 5.0.1 把「指派体系」整套砍了（client_bind / 四态握手 / 服务端改写屏配置）。
+// 屏的身份就是它自己报的「线号 + 工序号」，服务端只记最新一次心跳。
+// 所以这里验的是台账本身，不再是绑定与协商：
+//
+//   1) 屏每 5 秒的心跳会把自己登记进台账（老终端一行不改就能出现在列表里）
+//   2) 心跳里不带 line（跟随服务端）时，记的是解析后的实际线体，不是空串
+//   3) 心跳停了算离线，再跳回来自动恢复在线
+//   4) 两道工序报成同一道时，库里两台都在 —— 冲突由界面按行标红，不在服务端拦
+//   5) 参数校验：缺工序 / 工序码非法 / 线号配错，各自给对的状态码
+//   6) hello 仍保留（老终端保存设置后调一次），回 confirmed、assign=null
+//   7) 删除：只清台账，屏还在跑的话下一次心跳就把它插回来
+//   8) 指派时代的三条接口都已下线（404，不是 405）
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -42,12 +43,12 @@ const json = async (p, opt) => {
 const post = (p, body) => json(p, {
   method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {})
 });
+const del = (p) => json(p, { method: 'DELETE' });
 
 /** 心跳：ip 由 body 带（本机跑多台时 socket 都是 127.0.0.1） */
 const beat = (ip, line, op, extra = {}) => post('/api/telemetry', { ip, line, op, ...extra });
-const clientOf = async (ip) => (await json('/api/clients')).d.clients.find((c) => c.ip === ip);
-const bindIn = async (ip, lineId, code) => (
-  await json('/api/binds')).d.binds.find((b) => b.ip === ip && b.lineId === lineId && b.processCode === code);
+const list = async () => (await json('/api/clients')).d;
+const clientOf = async (ip) => (await list()).clients.find((c) => c.ip === ip);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function startServer() {
@@ -75,181 +76,93 @@ async function waitReady(ms = 20000) {
   try {
     if (!await waitReady()) throw new Error('服务没起来');
 
-    // 新库里不一定已经指定了当前机种，机种直接取列表第一个
     const st = (await json('/api/status')).d;
     const line = st.lineCode;
-    const lineId = st.lineId;
     const model = ((await json('/api/models')).d.models || [])[0];
     const procs = (await json('/api/processes?modelId=' + model.id)).d.processes;
     const p1 = procs[0].code;
     const p2 = procs[1].code;
-    const line2 = (await json('/api/lines')).d.lines.find((l) => l.code !== line);
     console.log(`线体 ${line} / 工序 ${p1}、${p2}\n`);
 
     // ── 1. 心跳登记 ────────────────────────────────────────
-    console.log('1) 心跳把自己登记成客户端');
-    ok((await json('/api/clients')).d.total === 0, '还没人上报时列表是空的');
+    console.log('1) 心跳把自己登记进台账');
+    ok((await list()).total === 0, '还没人上报时列表是空的');
     await beat('10.0.0.31', line, p1);
     await beat('10.0.0.32', line, p2);
-    let list = (await json('/api/clients')).d;
-    ok(list.total === 2 && list.online === 2, '两台屏都登记上了，都是在线', `${list.total}/${list.online}`);
+    let l = await list();
+    ok(l.total === 2 && l.online === 2, '两台屏都登记上了，都是在线', `${l.total}/${l.online}`);
     const c31 = await clientOf('10.0.0.31');
-    ok(c31 && c31.lineCode === line && c31.opCode === p1, '记下了它自报的线体和工序', c31 && `${c31.lineCode}/${c31.opCode}`);
-    ok(c31 && c31.bind === null, '新屏是"未分配"状态');
-    ok(list.bound === 0 && list.problem === 0, '没绑定时不计已分配、也不报问题');
+    ok(c31 && c31.lineCode === line && c31.opCode === p1, '记下了它自报的线体和工序',
+      c31 && `${c31.lineCode}/${c31.opCode}`);
+    ok(c31.name === '' && c31.ver === '', '没报的字段留空，不瞎填');
+    ok(l.clients[0].online === true && l.clients[0].ageMs < 5000, '列表里带 ageMs（界面显示"几秒前"）',
+      String(l.clients[0].ageMs));
 
     // ── 2. 不带 line（跟随服务端）────────────────────────────
     console.log('\n2) 屏上没填线号（跟随服务端）');
     await beat('10.0.0.33', '', p1);
     const c33 = await clientOf('10.0.0.33');
     ok(c33 && c33.lineCode === line,
-      '记的是解析后的实际线体，不是空串（否则一绑就显示改配了）', c33 && JSON.stringify(c33.lineCode));
+      '记的是解析后的实际线体，不是空串（否则界面上看着像没配线）', c33 && JSON.stringify(c33.lineCode));
 
-    // ── 3. 绑定 ────────────────────────────────────────────
-    console.log('\n3) 绑定到「线体 × 工序」');
-    const b1 = await post('/api/clients/10.0.0.31/bind', { lineId, processCode: p1 });
-    ok(b1.status === 200 && b1.d.bind && b1.d.bind.state === 'online',
-      '绑上之后状态是 online', JSON.stringify(b1.d.bind && b1.d.bind.state));
-    ok(b1.d.bind.lineCode === line && b1.d.bind.processCode === p1, '绑定回的是这条线的这道工序');
-    ok((await bindIn('10.0.0.31', lineId, p1)) !== undefined, '/api/binds 里查得到');
-    ok((await json('/api/clients')).d.bound === 1, '已分配计数变成 1');
-
-    // ── 4. 一道工序只一台屏 ────────────────────────────────
-    console.log('\n4) 同一道工序换一台屏');
-    const b2 = await post('/api/clients/10.0.0.33/bind', { lineId, processCode: p1 });
-    ok(b2.status === 200 && b2.d.replacedClientId === '10.0.0.31',
-      '接口报出被换下的是谁', b2.d.replacedClientId);
-    ok((await bindIn('10.0.0.33', lineId, p1)) !== undefined, '新的一台占了这格');
-    ok((await bindIn('10.0.0.31', lineId, p1)) === undefined, '原来那台在这一格没了');
-    ok((await clientOf('10.0.0.31')).bind === null, '原来那台变回"未分配"');
-
-    // ── 5. 一台屏只占一个工位 ──────────────────────────────
-    console.log('\n5) 同一台屏换到另一个工位');
-    const b3 = await post('/api/clients/10.0.0.33/bind', { lineId, processCode: p2 });
-    ok(b3.status === 200 && b3.d.movedFrom && b3.d.movedFrom.processCode === p1,
-      '接口报出它原来在哪个工序', JSON.stringify(b3.d.movedFrom));
-    ok((await bindIn('10.0.0.33', lineId, p1)) === undefined, '原来的格子清空了');
-    ok((await json('/api/clients')).d.bound === 1, '一共还是一条绑定（没变成两条）');
-
-    // ── 6. 改号 → moved ───────────────────────────────────
-    console.log('\n6) 屏上把工序号改了');
-    await beat('10.0.0.33', line, p1);        // 它现在报 p1，但绑定在 p2
-    const c33b = await clientOf('10.0.0.33');
-    ok(c33b.bind.state === 'moved', '判成「已改配」而不是"离线"', c33b.bind.state);
-    ok(c33b.bind.seenOpCode === p1 && c33b.bind.processCode === p2,
-      '同时报得出"绑的是 p2、它现在报 p1"', `${c33b.bind.processCode} vs ${c33b.bind.seenOpCode}`);
-    ok((await json('/api/clients')).d.problem === 1, '问题台数 +1（顶栏要能看见）');
-    await beat('10.0.0.33', line, p2);
-    ok((await clientOf('10.0.0.33')).bind.state === 'online', '改回去之后恢复 online');
-
-    // 改线号也算改配
-    if (line2) {
-      await beat('10.0.0.33', line2.code, p2);
-      ok((await clientOf('10.0.0.33')).bind.state === 'moved', '改线号同样判成「已改配」');
-      await beat('10.0.0.33', line, p2);
-    }
-
-    // ── 7. 离线 ───────────────────────────────────────────
-    console.log('\n7) 心跳停了');
+    // ── 3. 离线与恢复 ──────────────────────────────────────
+    console.log('\n3) 心跳停了 → 离线；再跳 → 恢复');
     await sleep(TTL + 500);
     const off = await clientOf('10.0.0.31');
     ok(off.online === false, '超过阈值就算离线');
-    const boundOff = await post('/api/clients/10.0.0.31/bind', { lineId, processCode: p2 });
-    ok(boundOff.d.bind && boundOff.d.bind.state === 'offline',
-      '离线的屏绑上去状态是 offline（不是 online）', boundOff.d.bind && boundOff.d.bind.state);
-    await beat('10.0.0.31', line, p2);
-    ok((await clientOf('10.0.0.31')).bind.state === 'online', '心跳回来就自动恢复');
+    ok(off.ageMs >= TTL, '离线时 ageMs 继续累加（界面显示"几分钟前在线"）', String(off.ageMs));
+    await beat('10.0.0.31', line, p1);
+    ok((await clientOf('10.0.0.31')).online === true, '心跳回来就自动恢复在线');
 
-    // ── 8. 绑定不碰播放 ───────────────────────────────────
-    console.log('\n8) 绑定推内容变更（4.5.0 起，和 4.4.0 相反）');
-    const stBefore = (await json('/api/status')).d;
-    await post('/api/clients/10.0.0.32/bind', { lineId, processCode: p2 });
-    const stAfter = (await json('/api/status')).d;
-    ok(stAfter.contentRev > stBefore.contentRev, 'contentRev 前进了（否则屏还在播旧内容）',
-      `${stBefore.contentRev} → ${stAfter.contentRev}`);
-    ok(stBefore.seq === stAfter.seq, 'seq 没动（不是换型）');
+    // ── 4. 同工序两屏 ──────────────────────────────────────
+    console.log('\n4) 两台屏报同一道工序');
+    const p3 = procs[2].code;
+    await beat('10.0.0.41', line, p3);
+    await beat('10.0.0.42', line, p3);
+    const dup = (await list()).clients.filter((c) => c.lineCode === line && c.opCode === p3);
+    ok(dup.length === 2, '两台都在库里（服务端不拦，冲突由界面按行标红）', String(dup.length));
+    ok(dup.every((c) => c.online), '两台都是在线状态 —— 标红要靠 opCode 重复判，不是靠在线数');
 
-    // ── 9. 参数校验 ───────────────────────────────────────
-    console.log('\n9) 参数校验');
-    ok((await post('/api/clients/10.0.0.31/bind', { lineId })).status === 400, '缺工序码 → 400');
-    ok((await post('/api/clients/10.0.0.31/bind', { lineId, processCode: 'OP 1' })).status === 400,
+    // ── 5. 参数校验 ────────────────────────────────────────
+    console.log('\n5) 参数校验');
+    ok((await post('/api/telemetry', { ip: '10.0.0.61', line, op: '' })).status === 400, '缺工序码 → 400');
+    ok((await post('/api/telemetry', { ip: '10.0.0.61', line, op: 'OP 1' })).status === 400,
       '工序码带空格 → 400');
-    ok((await post('/api/clients/10.0.0.31/bind', { lineId: 'ln_nope', processCode: p1 })).status === 400,
-      '线体不存在 → 400');
-    ok((await post('/api/clients/9.9.9.9/bind', { lineId, processCode: p1 })).status === 400,
-      '客户端不存在 → 400');
-    ok((await post('/api/clients/10.0.0.31/bind', { lineCode: line, processCode: p1 })).status === 200,
-      '用 lineCode 代替 lineId 也认');
-    // 「当前机种没有这道工序」的提示，要先让这条线真的在做一个机种
-    await post('/api/board/current', { lineId, modelCode: model.code });
-    const warn = await post('/api/clients/10.0.0.31/bind', { lineId, processCode: 'OP99' });
-    ok(warn.status === 200 && /没有工序 OP99/.test(warn.d.warning || ''),
-      '绑一个当前机种没有的工序：允许，但给一句提示', warn.d.warning);
+    ok((await post('/api/telemetry', { ip: '10.0.0.61', line: 'NOPE', op: p1 })).status === 404,
+      '线号配错 → 404（终端上表现为连不上，要去屏前查配置）');
+    ok((await clientOf('10.0.0.61')) === undefined, '被拒的心跳不写台账');
 
-    // ── 10. 解除 ──────────────────────────────────────────
-    // ── 10. hello 与「指派优先于自报」（4.5.0）──────────────
-    //
-    // 这一节用 127.0.0.1 当"那台屏"：指派是从**连接来源 IP** 认的，
-    // 而测试进程所有请求的 socket 都是 127.0.0.1 —— 正好就是一台真机器，
-    // 不需要给生产代码开后门去伪造来源。hello 的 body.ip 只用来造"另一台"。
-    console.log('\n10) hello 自报与指派优先');
-    const SELF = '127.0.0.1';
-    const hello = (body) => post('/api/clients/hello', { ip: SELF, line, ...body });
+    // ── 6. hello 仍保留 ────────────────────────────────────
+    console.log('\n6) hello（老终端保存设置后调一次）');
+    const h = await post('/api/clients/hello', { ip: '10.0.0.71', line, op: p2, ver: '1.8.3' });
+    ok(h.status === 200 && h.d.state === 'confirmed', '回 confirmed，屏上显示「服务端已收到」', h.d.state);
+    ok(h.d.assign === null, 'assign 恒为 null（没有指派这回事了）', JSON.stringify(h.d.assign));
+    const c71 = await clientOf('10.0.0.71');
+    ok(c71 && c71.opCode === p2 && c71.ver === '1.8.3', 'hello 也把机器登记进台账，版本一起记');
+    ok((await post('/api/clients/hello', { ip: '10.0.0.71', line, op: 'OP 1' })).status === 400,
+      'hello 的工序码同样要合法');
 
-    if (await clientOf(SELF)) await post('/api/clients/' + SELF + '/unbind', {});
+    // ── 7. 删除 ────────────────────────────────────────────
+    console.log('\n7) 删除记录');
+    const d1 = await del('/api/clients/10.0.0.71');
+    ok(d1.status === 200 && d1.d.removed === 1, '删掉一条');
+    ok((await clientOf('10.0.0.71')) === undefined, '列表里没有了');
+    ok((await del('/api/clients/10.0.0.71')).status === 404, '再删一次 → 404，不是静默成功');
+    await beat('10.0.0.71', line, p2);
+    ok((await clientOf('10.0.0.71')) !== undefined,
+      '屏还在跑 → 下一次心跳把它插回来（删除不是封禁）');
 
-    const h1 = await hello({ op: p1 });
-    ok(h1.status === 200 && h1.d.state === 'pending', '第一次自报 → pending（等管理端确认）', h1.d.state);
-    ok(h1.d.lineCode === line && h1.d.processCode === p1, '回显服务端解析后的线体与工序');
-    ok((await clientOf(SELF)) !== undefined, 'hello 也把机器登记进列表（不用等 5 秒心跳）');
-
-    const bSelf = await post('/api/clients/' + SELF + '/bind', { lineId, processCode: p1, src: 'self' });
-    ok(bSelf.status === 200 && bSelf.d.bind.src === 'self', '管理端确认指派，来源记成 self', bSelf.d.bind.src);
-
-    const h2 = await hello({ op: p1 });
-    ok(h2.d.state === 'confirmed', '再自报 → confirmed', h2.d.state);
-    ok(h2.d.assign && h2.d.assign.processCode === p1, 'assign 回的是被指派的工序');
-
-    // 有人在屏上把工序号改成 p2 —— 管理端说了算，按 p1 执行
-    const h3 = await hello({ op: p2 });
-    ok(h3.d.state === 'assigned', '改了号 → assigned（不跟着它走）', h3.d.state);
-    ok(h3.d.assign.processCode === p1, 'assign 仍是管理端指派的 p1', JSON.stringify(h3.d.assign));
-
-    // 关键一条：自报 p2，拉回来的必须是指派给它的 p1
+    // ── 8. 指派时代的三条接口已下线 ─────────────────────────
+    console.log('\n8) 指派体系的接口已下线');
+    ok((await json('/api/binds')).status === 404, '/api/binds 已删');
+    ok((await post('/api/clients/10.0.0.31/bind', { line, processCode: p1 })).status === 404,
+      '/api/clients/:id/bind 已删');
+    ok((await post('/api/binds/release', { line, processCode: p1 })).status === 404,
+      '/api/binds/release 已删');
     const pl = await json(`/display/playlist?line=${encodeURIComponent(line)}&op=${encodeURIComponent(p2)}`);
-    ok(pl.status === 200 && pl.d.processCode === p1,
-      `屏自报 ${p2}，拿到的还是指派的 ${p1}`, `${p2} → ${pl.d.processCode}`);
-    ok(pl.d.assigned === true && pl.d.selfProcessCode === p2,
-      'assigned=true，且把自报值一起回给终端（屏上要能说清"你填的是 p2"）',
+    ok(pl.status === 200 && pl.d.assigned === false && pl.d.selfProcessCode === p2,
+      '清单恒按屏自报的号回答（assigned=false，字段留着给老终端）',
       `assigned=${pl.d.assigned} self=${pl.d.selfProcessCode}`);
-
-    // /api/state 带 assign，终端据此改写自己的 config.json
-    const s1 = await json(`/api/state?line=${encodeURIComponent(line)}&op=${encodeURIComponent(p2)}&since=0`);
-    ok(s1.status === 200 && s1.d.assign && s1.d.assign.op === p1,
-      '/api/state 带回 assign，终端据此改写本地配置', JSON.stringify(s1.d.assign));
-
-    // 另一台没被指派的屏，报一个已经被占用的工序 → conflict，不抢
-    await beat('10.0.0.41', line, p2);                        // 先让它上线（绑定要先有这台机器）
-    await post('/api/clients/10.0.0.41/bind', { lineId, processCode: p2 });
-    const h4 = await post('/api/clients/hello', { ip: '10.0.0.51', line, op: p2 });
-    ok(h4.d.state === 'conflict', '没被指派又撞上别人占着的工序 → conflict', h4.d.state);
-    ok(h4.d.conflictWith === '10.0.0.41', '报出占着那道工序的是哪台', h4.d.conflictWith);
-
-    // 解绑后回落到"按自报"：不能让没指派的屏没内容可播
-    await post('/api/clients/' + SELF + '/unbind', {});
-    const pl2 = await json(`/display/playlist?line=${encodeURIComponent(line)}&op=${encodeURIComponent(p2)}`);
-    ok(pl2.d.processCode === p2 && pl2.d.assigned === false,
-      '解绑后按屏自报的号回答', `${pl2.d.processCode}/assigned=${pl2.d.assigned}`);
-
-    console.log('\n11) 解除');
-    const un1 = await post('/api/clients/10.0.0.31/unbind', {});
-    ok(un1.status === 200 && un1.d.removed === 1, '按客户端解除');
-    ok((await clientOf('10.0.0.31')).bind === null, '这台变回未分配');
-    const un2 = await post('/api/binds/release', { lineId, processCode: p2 });
-    ok(un2.status === 200 && un2.d.removed >= 1, '按工序解除（把占着 OP 的那台一起放掉）');
-
-    const end = (await json('/api/binds')).d;
-    ok(end.total === 0, '最后一条绑定都不剩', String(end.total));
   } catch (e) {
     fails.push('未捕获异常：' + e.message);
     console.error(e);
