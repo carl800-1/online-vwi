@@ -669,6 +669,7 @@ $('refreshBtn').addEventListener('click', async () => {
     else if (S.tab === 'models') await loadModels();
     else if (S.tab === 'media') await loadStations();
     else if (S.tab === 'terms') await loadClients();
+    else if (S.tab === 'system' && loadSysPanel) loadSysPanel();  // 重读本机信息（端口 / 路径 / 地址）
     toast('已刷新');
   } catch (e) { toast(e.message, 'err'); }
 });
