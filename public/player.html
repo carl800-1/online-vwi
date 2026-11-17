@@ -212,7 +212,8 @@
 // 与 exe 接收端的对应关系：
 //   exe：磁盘双目录 + 同步 rename 翻页 + 删旧目录
 //   这里：内存 Blob + 同步换队列 + revokeObjectURL
-// 两者遵循同一套协议（prepare / ready / activate），所以这个页面能当验收集的参考实现对拍。
+// 两者遵循同一套协议（5.0 起是直切：先把清单下齐、校验完 → 一次性翻页），
+// 所以这个页面能当验收集的参考实现对拍。
 
 const OP = (new URLSearchParams(location.search).get('op') || 'OP10').trim();
 const $ = (id) => document.getElementById(id);
@@ -232,8 +233,6 @@ const S = {
   stale: false,
   online: false,
   phase: 'idle',
-  pendingModelId: '',
-  pendingModelCode: '',
   empty: true,
   emptyRetryAt: 0,
   contentSig: '',
@@ -326,10 +325,6 @@ function renderChrome() {
   if (S.preparing) return;                    // 准备中的徽标由下载进度自己写
   if (!S.online) {
     setBadge('gray', '离线播放');
-    return;
-  }
-  if (S.phase === 'prepare' && S.pendingModelCode && S.pendingModelId !== S.modelId) {
-    setBadge('blue', `待切换 ${S.pendingModelCode}`);
     return;
   }
   if (S.empty) {
@@ -510,10 +505,14 @@ async function syncContent() {
   }
 }
 
+/**
+ * 5.0.1：只剩「下载 + 校验」这一半。
+ * 原来备齐后要 POST /api/ready 举手等服务器统一发令（两段式换型），
+ * 现在推送即直切 —— 备齐就直接翻，不再有举手步骤。
+ */
 async function prepare(modelId, modelCode) {
   if (S.preparing) return null;
   S.preparing = true;
-  if (S.prepared) { purge(S.prepared.queue); S.prepared = null; }
 
   setBadge('blue', `准备中 ${modelCode} …`);
   setHint('blue', `正在准备 ${modelCode}　0/…`);
@@ -524,24 +523,10 @@ async function prepare(modelId, modelCode) {
       setHint('blue', `正在准备 ${modelCode}　${done}/${total}　${name || ''}`);
     });
 
-    S.prepared = { modelId, modelCode, queue: r.queue, sig: r.sig };
-
-    // 备齐了才举手：这是"先备齐后翻"的关键一步
-    try {
-      await api('/api/ready', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ op: OP, modelId })
-      }, 8000);
-    } catch (e) {
-      // 409 = 目标已变更，留着这轮的工作等下一次轮询重来
-      console.warn('[ready]', e.message);
-    }
-
     clearHint();
     S.preparing = false;
     renderChrome();
-    return S.prepared;
+    return { modelId, modelCode, queue: r.queue, sig: r.sig };
   } catch (e) {
     S.preparing = false;
     setBadge('red', '内容下载失败');
@@ -563,39 +548,22 @@ async function poll() {
     const revChanged = st.rev !== S.rev;
     S.rev = st.rev;
     S.online = true;
-    S.phase = st.phase;
-    S.pendingModelId = st.pendingModelId || '';
-    S.pendingModelCode = st.pendingModelCode || '';
     S.seq = st.seq;
 
-    // ① 有准备任务：下载 + 校验 + 举手（画面不动）
-    if (S.phase === 'prepare' && S.pendingModelId && S.pendingModelId !== S.modelId) {
-      if (!S.prepared || S.prepared.modelId !== S.pendingModelId) {
-        await prepare(S.pendingModelId, S.pendingModelCode);
-      }
-    }
-
-    // ② 服务器已激活：整屏翻
-    if (st.currentModelId && st.currentModelId !== S.modelId) {
-      if (S.prepared && S.prepared.modelId === st.currentModelId) {
-        const p = S.prepared;
-        S.prepared = null;
-        flip(p.queue, p.modelCode, p.modelId, p.sig);
-      } else if (!S.preparing) {
-        // 超时强切：服务器不等了，只能现场备，备完立刻翻
-        const p = await prepare(st.currentModelId, st.modelCode || '');
-        if (p) { S.prepared = null; flip(p.queue, p.modelCode, p.modelId, p.sig); }
-        else {
-          // 备不下来 → 红字警告，画面仍是旧型号。宁可让人看见，不能混批。
-          S.stale = true;
-          setHint('red', '内容未就绪 · 请勿作业　本工序未能下载新型号内容');
-        }
+    // 服务端换了当前机种：下齐 + 校验完再一次翻页（永不半屏混批）
+    if (st.currentModelId && st.currentModelId !== S.modelId && !S.preparing) {
+      const p = await prepare(st.currentModelId, st.modelCode || '');
+      if (p) flip(p.queue, p.modelCode, p.modelId, p.sig);
+      else {
+        // 备不下来 → 红字警告，画面仍是旧型号。宁可让人看见，不能混批。
+        S.stale = true;
+        setHint('red', '内容未就绪 · 请勿作业　本工序未能下载新型号内容');
       }
     }
 
     if (st.currentModelId === S.modelId) S.stale = false;
 
-    // ③ 当前型号内容为空（工程部还没做）→ 橙色告警；
+    // ② 当前型号内容为空（工程部还没做）→ 橙色告警；
     //    并且每 10 秒自动重试一次：工程部在服务器上配好内容后，屏上应当自动出现，
     //    不该让班长为了"刷新一下"再切一次型号。节流是怕空清单时把服务器问爆。
     if (st.currentModelId && st.currentModelId === S.modelId && S.empty && !S.preparing) {
@@ -609,8 +577,8 @@ async function poll() {
       }
     }
 
-    // ④ 清单被改过（同一个型号）：rev 变了就核对指纹，变了就重下重翻
-    if (revChanged && st.phase === 'idle' && st.currentModelId === S.modelId && !S.empty && !S.preparing) {
+    // ③ 清单被改过（同一个型号）：rev 变了就核对指纹，变了就重下重翻
+    if (revChanged && st.currentModelId === S.modelId && !S.empty && !S.preparing) {
       await syncContent();
     }
 
@@ -634,7 +602,6 @@ async function poll() {
     S.rev = b.rev || 0;
     S.seq = b.seq || 0;
     S.online = true;
-    S.phase = b.phase || 'idle';
 
     if (!b.modelCode) {
       showNotice(

@@ -21,23 +21,10 @@
       <rect x="3" y="10" width="18" height="4.8" rx="1.5"/>
       <rect x="3" y="16.2" width="18" height="3.6" rx="1.5"/>
     </symbol>
-    <!-- 线体设置：两段工序 + 折线连接，读作"工序流程"（直角比曲线在 18px 下更清楚） -->
-    <symbol id="i-line" viewBox="0 0 24 24">
-      <rect x="2.6" y="3.4" width="6.6" height="5.6" rx="1.5"/>
-      <rect x="14.8" y="15" width="6.6" height="5.6" rx="1.5"/>
-      <path d="M9.2 6.2h5.2a2.2 2.2 0 0 1 2.2 2.2v6.6"/>
-    </symbol>
     <!-- 机种设置：立方体（一个产品 = 一组工位） -->
     <symbol id="i-model" viewBox="0 0 24 24">
       <path d="M12 2.9l8.3 4.4v9.4L12 21.1 3.7 16.7V7.3z"/>
       <path d="M3.9 7.4L12 11.8l8.1-4.4M12 11.8v9.1"/>
-    </symbol>
-    <!-- 生产输入：三根递增的柱子（当日产量台账，一条线一根） -->
-    <symbol id="i-prod" viewBox="0 0 24 24">
-      <path d="M3.6 20.4h16.8"/>
-      <rect x="4.8" y="13.2" width="3.8" height="7.2" rx="1.1"/>
-      <rect x="10.1" y="9.2" width="3.8" height="11.2" rx="1.1"/>
-      <rect x="15.4" y="5.2" width="3.8" height="15.2" rx="1.1"/>
     </symbol>
     <!-- 媒体库：图片框 + 山峰 + 太阳 -->
     <symbol id="i-media" viewBox="0 0 24 24">
@@ -45,14 +32,6 @@
       <circle cx="8.6" cy="9.4" r="1.5"/>
       <path d="M3.6 17.4l4.6-4.2a2 2 0 0 1 2.7 0l3.1 2.9"/>
       <path d="M13.4 15.6l2.3-2.1a2 2 0 0 1 2.7 0l2 1.9"/>
-    </symbol>
-    <!-- 文件查询：文件 + 放大镜（媒体库管"往工序里放"，这里管"全库找文件"） -->
-    <symbol id="i-files" viewBox="0 0 24 24">
-      <path d="M13.4 3.4H6.6a2 2 0 0 0-2 2v13.2a2 2 0 0 0 2 2h5.6"/>
-      <path d="M13.4 3.4l5 5v2.2"/>
-      <path d="M13.4 3.4v5h5"/>
-      <circle cx="16.2" cy="16.2" r="3.3"/>
-      <path d="M18.6 18.6L21.2 21.2"/>
     </symbol>
     <!-- 终端监控：显示器 + 底座 -->
     <symbol id="i-terminal" viewBox="0 0 24 24">
@@ -92,12 +71,8 @@
 
     <nav class="nav" id="nav">
       <button class="nav-item active" data-view="board"><svg class="ico"><use href="#i-board"/></svg>作业内容</button>
-      <div class="nav-group">设置</div>
-      <button class="nav-item" data-view="lines"><svg class="ico"><use href="#i-line"/></svg>线体设置</button>
       <button class="nav-item" data-view="models"><svg class="ico"><use href="#i-model"/></svg>机种设置</button>
-      <button class="nav-item" data-view="prod"><svg class="ico"><use href="#i-prod"/></svg>生产输入</button>
       <button class="nav-item" data-view="media"><svg class="ico"><use href="#i-media"/></svg>媒体库</button>
-      <button class="nav-item" data-view="files"><svg class="ico"><use href="#i-files"/></svg>文件查询</button>
       <button class="nav-item" data-view="terms"><svg class="ico"><use href="#i-terminal"/></svg>终端监控</button>
       <button class="nav-item desk-only" data-view="system"><svg class="ico"><use href="#i-system"/></svg>系统</button>
     </nav>
@@ -124,40 +99,11 @@
 
     <section class="content">
 
-      <!-- ========== 作业内容 = 总览 ==========
-           三段，从上往下读：
-             ① 产线概览   —— 今天几条线在跑、几条停 / 修 / 养（只看数字）
-             ② 运行产线   —— 每条在跑的线一行：做什么、下一个做什么、换型
-             ③ 操作说明   —— 这页每个按钮是什么意思
+      <!-- ========== 作业内容 = 发布 ==========
+           只做一件事：选线 → 选机种 → 推送。
+           上面一排是推送面板（运行产线 + 该线下的机种），下面列出每条线的正在生产状态。
            内容录入不在这里 —— 那是「机种设置」和「媒体库」的活。 -->
       <div class="view" id="view-board">
-        <div class="card bsum">
-          <div class="card-head">
-            <h2>产线概览</h2>
-            <span class="sub" id="bsumSub">—</span>
-            <div class="spacer"></div>
-            <span class="sub" id="bsumTs"></span>
-          </div>
-          <div class="bsum-row" id="bsum"></div>
-        </div>
-
-        <!-- 生产概况：这一条只回答四件事 —— 这一小时做了多少、今天累计多少、
-             效率几个点、停了多久。数字全部来自左边「生产输入」录的台账，
-             不接 MES、不读终端，所以没录就是没录，这里不估。 -->
-        <div class="card pcard">
-          <div class="card-head">
-            <h2>生产概况</h2>
-            <span class="sub" id="pSub">—</span>
-            <div class="spacer"></div>
-            <span class="pg-warn" id="pMissing" hidden></span>
-            <button class="pnav" id="pPrev" title="看前一天">‹</button>
-            <span class="pg-day" id="pDayLabel">今天</span>
-            <button class="pnav" id="pNext" title="看后一天">›</button>
-            <button class="btn sm" id="pInputBtn" title="去「生产输入」录当天的产量、工时和停机">去录入</button>
-          </div>
-          <div class="pbody" id="pBody"></div>
-        </div>
-
         <div class="card">
           <div class="card-head">
             <h2>运行产线</h2>
@@ -179,68 +125,6 @@
           <div class="run-list" id="board"></div>
         </div>
 
-        <div class="card bhelp">
-          <div class="card-head">
-            <h2>操作说明</h2>
-            <span class="sub">这一页每个按钮在做什么</span>
-          </div>
-          <div class="bhelp-body">
-            <div class="bh"><span class="bh-i">🟢</span>
-              <div><b>运行中 / 停用 / 维修中 / 保养中</b>：只有「运行中」的线会让终端读它的内容。
-              改成另外三种，这条线的屏会停在最后一屏，不会变成空白；要改回运行先去「线体设置」。</div></div>
-            <div class="bh"><span class="bh-i">🔵</span>
-              <div><b>正在生产</b>：这条线当前下发的机种，屏上播的就是它，大字那个就是。<br>还没指定时是一个 <b>+ 指定正在生产的机种</b> —— 先把它填上，排产和换型才有起点；现场已经换过料、管理端还停在老机种时，点旁边的「改」对正。</div></div>
-            <div class="bh"><span class="bh-i">➡️</span>
-              <div><b>下一个 / + 排产下一个机种</b>：提前把下一炉要做的机种排好，不用等真要换时才翻。排在库里，关服务端也不丢；不想要了点 <b>✕</b> 取消。没排产时「换型」按钮是灰的。</div></div>
-            <div class="bh"><span class="bh-i">🔄</span>
-              <div><b>换型</b>：排产只是记一笔，<b>点「换型」才真正下发</b>。点了按钮会变亮，
-              显示「换型中 已就绪 3/5」—— 终端正在下载新内容。</div></div>
-            <div class="bh"><span class="bh-i">⏱</span>
-              <div><b>换型中</b>：全部就绪才一起切画面；5 分钟还没齐会强制切换，
-              没备齐的屏亮红字「内容未就绪 · 请勿作业」，旧的继续播，不会半新半旧。
-              想中止就点「放弃切换」。</div></div>
-            <div class="bh"><span class="bh-i">⚠️</span>
-              <div><b>内容不齐</b>：当前机种在某道工序连内容都没配，换型一定卡在那。
-              先去「媒体库」补，别硬切 —— 这一页只看不补。</div></div>
-          </div>
-        </div>
-
-      </div>
-
-      <!-- ========== 线体设置：线体 + 工序（这条线上有几块屏） ========== -->
-      <div class="view hide" id="view-lines">
-        <div class="card">
-          <div class="card-head">
-            <h2>线体</h2>
-            <span class="sub">一条线体 = 一条物理产线。状态是「运行」时终端才读它，多条线可以同时运行。</span>
-            <div class="spacer"></div>
-            <button class="btn sm" id="lnImportBtn" title="从 Excel / CSV 导入线体清单（先逐行判定，确认了才写库）">导入 Excel</button>
-            <button class="btn sm" id="lnExportBtn" title="导出线体清单：名称 / 编码 / 工位数 / 状态，改完能整份导回">导出 Excel</button>
-            <button class="btn sm primary" id="lnNewBtn">+ 新建线体</button>
-          </div>
-          <div class="table-wrap">
-            <table class="data-table" id="lineTable">
-              <thead>
-                <tr>
-                  <th>线体名称</th>
-                  <th style="width:96px">工位数</th>
-                  <th style="width:150px">可生产机种</th>
-                  <th style="width:216px">线体状态</th>
-                  <th style="width:76px">在线</th>
-                  <th style="width:150px">操作</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
-          </div>
-          <p class="foot-hint">
-            状态点一下就知道：<b>运行</b> 正在生产 ／ <b>停线</b> 今天不开 ／ <b>维修</b> 设备故障 ／ <b>保养</b> 计划维护。
-            后三种终端都读不到内容，屏上停在最后一屏（不会变空白）；从「运行」改走会先问一句。
-            <b>可生产机种</b>是自动统计的：在「机种设置」里勾了这条线的机种有几个。
-            <b>工位数</b>是这条线实际有几块屏，只做参考 —— 一个机种几道工序在机种设置里定，工序数别超过工位数。
-            内容和线体无关，改线体不会丢任何文件。
-          </p>
-        </div>
       </div>
 
       <!-- ========== 机种设置：机种 → 工位 → 文件 ==========
@@ -285,9 +169,7 @@
                   <th>做什么</th>
                   <th style="width:122px">播放方式</th>
                   <th style="width:138px" title="勾上哪几类，终端在这道工序就只放哪几类（PDF 指 PDF 拆出来的页）。三类全勾 = 都放">播放内容</th>
-                  <th style="width:104px" title="一道工序 = 一个工位；填这一工位做一件要几秒，导出线体 Excel 时用来算瓶颈和线平衡">工时<i>秒/件</i></th>
                   <th style="width:76px">内容</th>
-                  <th style="width:104px" title="这道工序在这条线上是哪台屏。点开可以把某台客户端分配给这条线的这道工序；屏上把线号工序号改了的话，这里会标「已改配」">屏</th>
                   <th style="width:40px"></th>
                 </tr>
               </thead>
@@ -296,72 +178,15 @@
           </div>
           <div class="st-table-foot">
             工序码由新建机种时定下（OP1、OP2…），终端上的工序号要和它一致（<code>?op=OP1</code>），
-            所以这里只读。名称 / 做什么 / 播放方式 / 播放内容 / 工时点一下就能改，<b>离开这一格自动保存</b>。
+            所以这里只读。名称 / 做什么 / 播放方式 / 播放内容点一下就能改，<b>离开这一格自动保存</b>。
             <b>「做什么」</b>写作业要点，会显示在终端顶栏；往工序里放图片 / PDF / 视频请去<b>「媒体库」</b>。<br>
             <b>播放方式</b>和<b>播放内容</b>只在这里设（媒体库里不再重复设一遍）：
-            前者管循环还是播一遍停，后者管这块屏放哪几类（图片 / PDF / 视频），至少要留一类。
-            <b>屏</b>这一列是「这道工序对应哪台客户端」：点开按线体挑一台，绑完就能看出它在线、
-            还是把线号工序号改了（标「已改配」）。<b>工时</b>填这一工位做一件要几秒（一道工序 = 一个工位），留空表示还没测。
-            上面的<b>工时合计 / 瓶颈</b>由它算出来，导出线体 Excel 时用来算线平衡率；
-            它和「标准产能（件/时）」是两回事 —— 效率那栏仍然按标准产能算，两个数并列对照。
+            前者管循环还是播一遍停，后者管这块屏放哪几类（图片 / PDF / 视频），至少要留一类。<br>
+            哪块屏播哪道工序，在屏自己的设置里填线号和工序号 —— 服务端只负责记录，
+            打开<b>「终端监控」</b>就能看到谁连上来了。
           </div>
         </div>
 
-      </div>
-
-      <!-- ========== 生产输入 ==========
-           从「机种设置」里独立出来的一页（v4.2.2）。
-           台账按「产线 × 日」记之后，这一页**已经不需要"当前选中哪个机种"**了 ——
-           产品只是行里的一列，改一行就行。留在机种设置下面反而让人以为
-           必须先选机种才能录，而现场的动线是"照着当天在跑的线填数"。
-           标准产能不在这儿填：它是机种属性（机种设置 → 改编号/名称/产能），
-           效率由它现算。 -->
-      <div class="view hide" id="view-prod">
-        <div class="card">
-          <div class="card-head">
-            <h2>生产输入</h2>
-            <span class="sub" id="piSub">当天在生产的产线，一条线可以分几段做不同型号</span>
-            <div class="spacer"></div>
-            <span class="pi-saved" id="piSaved"></span>
-            <button class="pnav" id="piPrev" title="看前一天">‹</button>
-            <span class="pi-day" id="piDayLabel">今天</span>
-            <button class="pnav" id="piNext" title="看后一天">›</button>
-            <button class="btn sm" id="piAdd" title="停线 / 维修中的线也要补录时用">+ 添加产线</button>
-            <button class="btn sm primary" id="piSave">保存</button>
-          </div>
-
-          <div class="pt-wrap">
-            <table class="pt" id="piTable">
-              <thead>
-                <tr>
-                  <th style="width:150px">产线</th>
-                  <th style="width:236px">生产的型号</th>
-                  <th style="width:88px">计划开机<i>小时</i></th>
-                  <th style="width:88px">计划产量<i>件</i></th>
-                  <th style="width:100px">实际每小时<i>件</i></th>
-                  <th style="width:100px">累计产能<i>件</i></th>
-                  <th style="width:92px">停机<i>分钟</i></th>
-                  <th>生产效率</th>
-                  <th style="width:96px"><span class="pt-th-ops">操作</span></th>
-                </tr>
-              </thead>
-              <tfoot id="piTfoot"></tfoot>
-            </table>
-          </div>
-
-          <div class="pi-calc" id="piCalc"></div>
-          <div class="st-table-foot">
-            当天在运行的产线<b>自动列出来</b>，型号先按这条线现在的机种带出来，改一下就行。
-            <b>一条线一天做几个型号，就在对应那段末尾点「+ 型号」</b>（新段长在这一段后面），每段各填各的工时、产量、停机 ——
-            小批量来回换型时（一个型号只做半小时）也记得清。
-            这些数<b>手工录</b> —— 系统不接 MES、终端也不数件，所以不做任何推算。<b>效率自动算</b>：
-            累计产能 ÷（有效工时 × 产品标准产能），标准产能在「机种设置 → 改编号/名称/产能」里维护。
-            「实际每小时」是现场整点抄一次计数器，它决定生产概况的「当前每小时产能」；
-            「停机」填了才算、不填就是 0，不会自己猜。
-            <b>选「不开线」的产线不进作业内容页的生产概况</b> —— 今天没排产就别让它顶着一条「未录入」。
-            填完点「保存」，上面那一栏立刻跟着变。
-          </div>
-        </div>
       </div>
 
       <!-- ========== 媒体库 ========== -->
@@ -406,60 +231,14 @@
         </div>
       </div>
 
-      <!-- ========== 文件查询 ========== -->
-      <div class="view hide" id="view-files">
-        <div class="card">
-          <div class="card-head">
-            <span class="sub" id="mediaTxt">—</span>
-            <div class="spacer"></div>
-            <button class="btn sm" id="uploadBtn">上传文件</button>
-            <button class="btn sm" id="adviceBtn">规格体检</button>
-            <button class="btn sm danger" id="gcBtn">清理未引用</button>
-          </div>
-          <div class="toolbar">
-            <input type="search" id="mediaSearch" placeholder="按文件名搜索">
-            <select id="mediaKind" class="btn sm" style="padding:6px 10px">
-              <option value="">全部类型</option>
-              <option value="image">只看图片</option>
-              <option value="video">只看视频</option>
-              <option value="source">只看 PDF 原件</option>
-            </select>
-          </div>
-          <div class="mediagrid" id="mediagrid"></div>
-        </div>
-      </div>
-
       <!-- ========== 终端监控 ========== -->
       <div class="view hide" id="view-terms">
         <div class="card">
           <div class="card-head">
+            <h2>已联网的屏</h2>
             <span class="sub" id="termSub">—</span>
             <div class="spacer"></div>
-            <!-- 两个视角：按客户端 = 默认（哪些机器连上来了、分配在哪）；按工序 = 这道工序的屏在不在 -->
-            <button class="btn sm" id="tmOp">按工序</button>
-            <button class="btn sm primary" id="tmClient">按客户端</button>
-            <label class="inl hide" id="termLineWrap">
-              线体
-              <select id="termLinePick"></select>
-            </label>
             <button class="btn sm" id="termRefresh">刷新</button>
-          </div>
-          <div class="table-wrap hide" id="termOpWrap">
-            <table class="data-table" id="termTable">
-              <thead>
-                <tr>
-                  <th style="width:96px">工序</th>
-                  <th style="width:150px">名称</th>
-                  <th style="width:150px">IP 地址</th>
-                  <th style="width:130px">分辨率</th>
-                  <th style="width:110px">版本</th>
-                  <th style="width:130px">剩余磁盘</th>
-                  <th>下载进度</th>
-                  <th style="width:150px">状态</th>
-                </tr>
-              </thead>
-              <tbody></tbody>
-            </table>
           </div>
 
           <!-- 按客户端：服务端登记过的每一台机器，不管它有没有被分配到工位。默认就是这个视角 -->
@@ -467,13 +246,14 @@
             <table class="data-table" id="clientTable">
               <thead>
                 <tr>
-                  <th style="width:140px">IP 地址</th>
-                  <th style="width:130px">计算机名</th>
-                  <th style="width:150px">自报线体 / 工序</th>
+                  <th style="width:150px">IP 地址</th>
+                  <th style="width:150px">计算机名</th>
+                  <th style="width:110px">线体</th>
+                  <th style="width:110px">工序</th>
                   <th style="width:110px">最后心跳</th>
-                  <th style="width:300px">分配在</th>
-                  <th style="width:180px">状态</th>
-                  <th style="width:110px"></th>
+                  <th style="width:130px">版本</th>
+                  <th>状态</th>
+                  <th style="width:90px"></th>
                 </tr>
               </thead>
               <tbody></tbody>
@@ -481,8 +261,8 @@
           </div>
 
           <p class="foot-hint" id="termFoot">
-            IP 由服务端从连接来源读取。分配在哪个工位直接在这里选：先选线体、再选工序，选完即生效；
-            屏上把线号 / 工序号改了，这里会显示「已改配」并报出它现在报的是什么。
+            IP 由服务端从连接来源读取，线体 / 工序是屏自己报的（在屏的托盘菜单里改，改完 5 秒内这里就变）。
+            两道工序报成同一道时行会标红 —— 说明有块屏填错了号，去屏前改。
           </p>
         </div>
       </div>
@@ -522,6 +302,12 @@
                 <button class="btn sm" id="sysOpenLog">定位</button></div>
             </div>
 
+            <div class="sys-block">
+              <div class="sys-label">本厂线体
+                <em>终端按「线号 + 工序号」找服务端；只有「运行中」的线，屏才会播它的内容</em></div>
+              <div id="sysLines" class="sys-lines"></div>
+            </div>
+
             <p class="sys-tip">关掉窗口服务<strong>不会停</strong>，它会缩到右下角托盘继续为 5 台终端服务。
               双击托盘图标能重新打开；要真退出请用右上角「退出服务端」。
               升级或回滚前请先备份数据目录。</p>
@@ -548,24 +334,6 @@
       <button class="btn" id="dlgCancel">取消</button>
       <div class="spacer"></div>
       <button class="btn primary" id="dlgOk">确定</button>
-    </div>
-  </div>
-</div>
-
-<!-- 分配屏：独立弹窗。不复用 #dialog，是因为这里要在弹窗里连续点选、每点一次重画内容，
-     和"一问一答"的 dialog 不是一回事；共用一个反而会把底下那层内容冲掉 -->
-<div class="modal" id="bindModal">
-  <div class="modal-card bind-card">
-    <div class="modal-head">
-      <h3 id="bindTitle">分配屏</h3>
-      <div class="spacer"></div>
-      <button class="iconbtn" id="bindX" title="关闭">✕</button>
-    </div>
-    <div class="modal-body" id="bindBody"></div>
-    <div class="modal-foot">
-      <span class="bind-hint" id="bindHint"></span>
-      <div class="spacer"></div>
-      <button class="btn" id="bindClose">关闭</button>
     </div>
   </div>
 </div>
