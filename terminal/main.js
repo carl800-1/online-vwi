@@ -345,45 +345,8 @@ function startSync() {
     if (tray) refreshTrayMenu(snap);
   });
 
-  // 管理端改派：屏要跟着改，双端收敛到同一个值（4.5.0 服务端下发 → 1.8.0 终端执行）
-  syncer.on('assign', applyAssign);
-
   syncer.start();
   startWatchdog();
-}
-
-/**
- * 执行一次管理端改派：改写本地配置、屏上提示、重启同步。
- *
- * 为什么必须重启同步而不是改 cfg 了事：内容目录是按线体分的（cache.setLine），
- * 只改 cfg 会变成"按新线体请求内容、盘上还是旧线体的索引"，冷启动会先播错内容。
- * restart 之后 start() 会重新 setLine + 清盘，等于这台屏刚换了个岗位。
- */
-function applyAssign(a) {
-  const next = config.save({ ...cfg, line: a.line, op: a.op, managed: true });
-  if (!config.isValid(next)) {
-    console.warn('[assign] 改派后的配置不完整，忽略：', JSON.stringify(a));
-    return;
-  }
-  cfg = next;
-  console.log(`[assign] 已按管理端改写本地配置：${a.fromLine || '(跟随)'}/${a.fromOp} → ${a.line}/${a.op}` +
-    (a.src === 'self' ? '（采纳自报）' : ''));
-
-  if (tray) {
-    tray.setToolTip(`ESOP 客户端 · ${cfg.line} / ${cfg.op}`);
-  }
-  // 屏上留一条 4 秒的提示：工人会看到画面自己换了内容，得知道是管理端干的
-  if (win && !win.isDestroyed()) {
-    win.webContents.send('vwi:assign', {
-      line: a.line, op: a.op, fromLine: a.fromLine, fromOp: a.fromOp
-    });
-  }
-
-  // 重启同步（不销毁窗口，画面继续留着，直到新内容备好才翻）
-  stopSync();
-  setTimeout(() => {
-    if (!syncer) startSync();
-  }, 400);
 }
 
 function startWatchdog() {

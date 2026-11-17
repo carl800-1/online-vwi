@@ -22,13 +22,6 @@ contextBridge.exposeInMainWorld('vwi', {
     ipcRenderer.on('vwi:status', h);
     return () => ipcRenderer.removeListener('vwi:status', h);
   },
-  // 1.8.0：管理端改派下发，播放页挂一条 4 秒提示（画面自己换了内容，得让人知道是管理端干的）
-  onAssign: (cb) => {
-    const h = (_e, data) => cb(data);
-    ipcRenderer.on('vwi:assign', h);
-    return () => ipcRenderer.removeListener('vwi:assign', h);
-  },
-
   log: (level, msg) => ipcRenderer.send('vwi:log', { level, msg }),
 
   // 设置页用

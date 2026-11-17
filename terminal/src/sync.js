@@ -1,10 +1,14 @@
 // 同步引擎：终端与服务器之间唯一的通道。
 //
-// 只做四件事，按重要性排序：
-//   ① 长轮询 /api/state，知道"现在该是哪个型号"
-//   ② prepare 阶段把新型号内容下到本地并校验，下完 POST /api/ready 举手
-//   ③ 服务器 activate 之后，请求渲染层翻转（渲染层同步换队列），ack 后才删旧文件
-//   ④ 网络断了就退回离线态：画面不动、继续播本地内容，指数退避重连
+// 只做三件事，按重要性排序：
+//   ① 长轮询 /api/state，知道"现在该是哪个型号、内容版本是几"
+//   ② 把该型号本工序的内容下到本地并校验（边下边播旧的，下完才翻）
+//   ③ 请求渲染层翻转（渲染层同步换队列），ack 之后才删旧文件
+// 另外网络断了就退回离线态：画面不动、继续播本地内容，指数退避重连。
+//
+// 5.0.1 删掉的两样（服务端同步删了对应接口）：
+//   · 举手（POST /api/ready）—— 换型不再是"集齐才翻"，服务端指定即生效
+//   · 管理端改派（/api/state 的 assign）—— 屏的线号工序号只由屏自己填
 //
 // 有一条不能破：**画面翻不翻由磁盘说话**。本地没有这套内容，就不许翻，
 // 宁可亮红字让人看见，也不能让工人对着一屏半新半旧判断错了批次。
@@ -38,9 +42,6 @@ class Syncer extends EventEmitter {
     this.lastRev = 0;
     this.appliedModelId = '';
     this.appliedCode = '';
-    this.phase = 'idle';
-    this.pendingModelId = '';
-    this.pendingCode = '';
     this.status = 'boot';
     this.progress = { done: 0, total: 0 };
     // 机器参数：分辨率 / 版本 / 磁盘剩余。由 main.js 注入（渲染进程、主进程各有一半信息），
@@ -62,9 +63,6 @@ class Syncer extends EventEmitter {
     this.startedAt = Date.now();
     this._statusKey = '';
     this._wakeRetry = null;
-    // 1.8.0：已经发出过的那次改派（'L1/OP30'）。同一个值只发一次 ——
-    // 主进程收到就会重启同步，重启完成前还会再收到几轮相同下发，重复发会把配置写好几遍。
-    this.assignKey = '';
   }
 
   snapshot() {
@@ -73,10 +71,8 @@ class Syncer extends EventEmitter {
       op: this.cfg.op,
       server: this.cfg.server,
       status: this.status,
-      phase: this.phase,
       modelCode: this.appliedCode,
       modelId: this.appliedModelId,
-      pendingCode: this.pendingCode,
       seq: this.serverSeq,
       done: this.progress.done,
       total: this.progress.total,
@@ -160,8 +156,7 @@ class Syncer extends EventEmitter {
         // 1.8.0：计算机名。管理端的客户端列表里「192.168.1.31」变成「3F-XB-01」，
         // 现场说"3楼西北角那台"才找得到是哪一行。老服务端会忽略这个字段。
         if (this.meta.name) body.name = this.meta.name;
-        const m = this.pendingCode || this.appliedCode;
-        if (m) body.model = m;
+        if (this.appliedCode) body.model = this.appliedCode;
         await net.postJson(this.cfg.server, '/api/telemetry', body, { timeoutMs: 6000 });
       } catch { /* 遥测失败无所谓，别在屏上留痕迹 */ }
     };
@@ -192,7 +187,6 @@ class Syncer extends EventEmitter {
         this.onLinkUp();
         this.lastRev = Number(st.rev) || this.lastRev;
         this.serverSeq = Number(st.seq) || 0;
-        this.phase = st.phase || 'idle';
         this.online = st.online || [];
         await this.apply(st);
       } catch (e) {
@@ -240,29 +234,13 @@ class Syncer extends EventEmitter {
   // ───────────── 状态处理 ─────────────
 
   async apply(st) {
-    // ⓪ 管理端改派优先看：它决定"这台屏应该在哪"，比下面任何内容判断都靠前。
-    //    这里只上报事件、不动 cfg —— 换线体要连带换内容目录和缓存，那是主进程的事。
-    this.checkAssign(st);
-
     const curId = st.currentModelId || '';
     const curCode = st.modelCode || '';
     this.serverCurrentId = curId;
     this.serverContentRev = Number(st.contentRev) || 0;
 
-    // ① prepare：先把内容备好，画面不动
-    if (st.phase === 'prepare' && st.pendingModelId && st.pendingModelId !== this.appliedModelId) {
-      this.pendingModelId = st.pendingModelId;
-      this.pendingCode = st.pendingModelCode || '';
-      // 不能 await 下载：弱网下一套内容要下好几分钟，主循环被它堵住的话，
-      // 服务器五分钟后强翻，这台永远收不到"已经翻了"的通知，
-      // 只会一直停在"准备中"，工人看不出自己掉队了（A10 验收就是卡在这里）。
-      this.startPrepare(st.pendingModelId, this.pendingCode);
-      return;
-    }
-    this.pendingModelId = '';
-    this.pendingCode = '';
-
-    // ② idle：服务器已经喊翻了
+    // 服务端指定了哪个机种，就播哪个 —— 没有 prepare/举手/集齐再翻那套了。
+    // 屏这一侧只剩"下齐 → 校验 → 一次翻页"，网慢就多播一会儿旧的，不等也不抢。
     if (!curId) {
       // 服务端还没指定型号（全新部署），不黑屏，显示等待页
       this.status = 'no-model';
@@ -307,40 +285,8 @@ class Syncer extends EventEmitter {
   }
 
   /**
-   * 管理端改派的下发。
-   *
-   * 服务端从 4.5.0 起，`/api/state` 会带一个 assign（只有被指派过才有）：
-   * `{ line:'L1', op:'OP30', src:'admin'|'self' }`。它代表"管理端认为这台屏该在哪"——
-   * 与屏上填的不一致时，屏要跟着改，双端才能收敛到同一个值。
-   *
-   * 三个刻意的边界：
-   *   ① **只发事件，不在这里改 cfg**。换线体要连带换内容目录、清掉旧线的缓存索引，
-   *      那是主进程重启同步的事；在这里改一半会让下一次请求用新号、盘上还是旧线的内容。
-   *   ② **同一个值只发一次**。主进程重启同步需要几百毫秒，这期间还会收到几轮相同下发，
-   *      重复发等于反复重启。
-   *   ③ **一致时把 assignKey 清空**。管理端改回去再改回来，还要能再纠正一次。
-   */
-  checkAssign(st) {
-    const a = st && st.assign;
-    if (!a || !a.op) return;
-    const line = String(a.line || '').toUpperCase();
-    const op = String(a.op || '').toUpperCase();
-    const curLine = String(this.cfg.line || '').toUpperCase();
-    const curOp = String(this.cfg.op || '').toUpperCase();
-    if (line === curLine && op === curOp) { this.assignKey = ''; return; }
-    const key = line + '/' + op;
-    if (key === this.assignKey) return;
-    this.assignKey = key;
-    console.log(`[sync] 管理端改派：${curLine || '(跟随)'} / ${curOp} → ${line} / ${op}`);
-    this.emit('assign', {
-      line, op, src: a.src || '',
-      fromLine: curLine, fromOp: curOp
-    });
-  }
-
-  /**
    * 后台准备，不阻塞主循环。
-   * 长轮询是终端的耳朵：一旦被下载堵住，就听不到服务端的强制切换，
+   * 长轮询是终端的耳朵：一旦被下载堵住，就听不到服务端换了型号，
    * 掉队那台会一直显示"准备中"，等于把故障藏起来了。
    */
   startPrepare(modelId, modelCode, opts = {}) {
@@ -349,7 +295,7 @@ class Syncer extends EventEmitter {
     this.ensurePrepared(modelId, modelCode, opts).catch(() => { /* 失败由下一轮轮询重试 */ });
   }
 
-  /** 下载并校验某个（型号 × 本工序），完成即举手。返回是否可用。 */
+  /** 下载并校验某个（型号 × 本工序）。返回是否可用。 */
   async ensurePrepared(modelId, modelCode, opts = {}) {
     if (this.prepared.has(modelId)) return true;
     if (this.inflight && this.inflight.modelId === modelId) {
@@ -392,7 +338,6 @@ class Syncer extends EventEmitter {
           this.prepared.set(modelId, { modelCode: code, items: [], at: Date.now(), hidden });
           this.missing = [];
           this.progress = { done: 0, total: 0 };
-          await this.reportReady(modelId);
           this.emitStatus(true);
           await this.applyPrepared(modelId, code);
           return true;
@@ -416,7 +361,6 @@ class Syncer extends EventEmitter {
           (this.missing.length ? `，缺失 ${this.missing.length}` : '')
         );
 
-        await this.reportReady(modelId);
         this.emitStatus(true);
         await this.applyPrepared(modelId, code);
         return true;
@@ -479,19 +423,6 @@ class Syncer extends EventEmitter {
     this.inflight = null;
   }
 
-  async reportReady(modelId) {
-    try {
-      const body = { op: this.cfg.op, modelId };
-      if (this.cfg.line) body.line = this.cfg.line;
-      await net.postJson(this.cfg.server, '/api/ready', body);
-      console.log(`[sync] 已举手 ${this.cfg.line || '(当前线体)'} / ${this.cfg.op} / ${modelId}`);
-    } catch (e) {
-      // 409 = 目标已变更，无所谓，下一轮会按新目标重新来
-      // 其它错误（断网）也不致命：服务端会超时强翻，本地照样能自愈
-      if (e.status !== 409) console.warn('[sync] 举手失败：', e.message);
-    }
-  }
-
   /** 翻转：请求渲染层同步换队列，ack 之后再落索引、再删旧文件。 */
   async flipTo(prep, modelCode, modelId) {
     if (this.flipping) return;
@@ -546,8 +477,8 @@ class Syncer extends EventEmitter {
   emitStatus(force = false) {
     const snap = this.snapshot();
     const key = [
-      snap.status, snap.phase, snap.modelCode, snap.pendingCode,
-      snap.done, snap.total, snap.missing.length, snap.linked, snap.seq
+      snap.status, snap.modelCode, snap.done, snap.total,
+      snap.missing.length, snap.linked, snap.seq
     ].join('|');
     if (!force && key === this._statusKey) return;
     this._statusKey = key;
