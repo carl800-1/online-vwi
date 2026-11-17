@@ -1404,31 +1404,10 @@ export const LINE_STATUS = ['running', 'stopped', 'maintain', 'care'];
  */
 export function setLineStatus(lineId, status) {
   const s = LINE_STATUS.includes(status) ? status : 'stopped';
-  tx(() => {
-    q.run('UPDATE line SET status = ?, enabled = ? WHERE id = ?', s, s === 'running' ? 1 : 0, lineId);
-    // 不在跑的时候清掉排产：留着会让下次启用时看见一条过期的"下一炉"
-    if (s !== 'running') q.run("UPDATE line_state SET next_model_id = '' WHERE line_id = ?", lineId);
-  });
+  q.run('UPDATE line SET status = ?, enabled = ? WHERE id = ?', s, s === 'running' ? 1 : 0, lineId);
   return q.get('SELECT * FROM line WHERE id = ?', lineId);
 }
 
-/** 排产：给这条线定一个"下一个要生产的机种"。传空字符串 = 取消排产。 */
-export function setNextModel(lineId, modelId) {
-  const mid = String(modelId || '');
-  if (mid) {
-    const m = q.get('SELECT id FROM model WHERE id = ?', mid);
-    if (!m) throw new Error('机种不存在');
-    if (q.get('SELECT COALESCE(current_model_id,\'\') c FROM line_state WHERE line_id = ?', lineId)?.c === mid) {
-      throw new Error('这就是当前正在生产的机种，不用再排一次');
-    }
-  }
-  q.run(
-    `INSERT INTO line_state(line_id, next_model_id) VALUES(?,?)
-     ON CONFLICT(line_id) DO UPDATE SET next_model_id = excluded.next_model_id`,
-    lineId, mid
-  );
-  return mid;
-}
 
 /** 当前启用的线体。多条线同时跑时取 sort 最前的一条（不带 line 的老终端会用它）。 */
 export function activeLine() {

@@ -5,7 +5,7 @@
 // 工序不再属于线体，所以"这条线上有没有 OP30"这种问题已经不存在了；
 // 存在的是"这条线现在做的机种有没有 OP30"。后者才是现场真正会遇到的错配。
 import { q, processByCode, playKindOf, playKindsOf, PLAY_KINDS } from '../db.js';
-import { sendJson, badRequest, applyAssignment } from '../router.js';
+import { sendJson, badRequest } from '../router.js';
 import { touch, getState } from '../switch.js';
 import { termMeta } from '../util.js';
 
@@ -43,9 +43,6 @@ export function register(router) {
    * 终端用这个接口既做"切换下载"，也做"首次装机补内容"——同一套代码，两条路径。
    */
   router.get('/display/playlist', (req, res, ctx) => {
-    // 4.5.0：先看管理端把这块屏指派到哪，再决定按谁的号取内容。
-    // 没指派时 applyAssignment 返回 null，下面用的还是终端自报的 line / op。
-    const bind = applyAssignment(req, ctx);
     const { line } = ctx;
     const op = ctx.process.code;
     touch(line.id, op, termMeta(ctx));
@@ -62,6 +59,9 @@ export function register(router) {
         return sendJson(res, 200, {
           lineCode: line.code, lineName: line.name,
           modelCode: '', modelId: '', processCode: op, processName: '',
+          // 这两个字段在全部分支都要有：老终端读到 undefined 会当成"被指派"，
+          // 没必要为了让分支少两行去冒这个险。
+          assigned: false, selfLineCode: line.code, selfProcessCode: op,
           items: [], empty: true, count: 0, totalBytes: 0,
           message: `「${line.name}」还没有指定当前机种`
         });
@@ -91,12 +91,12 @@ export function register(router) {
       playMode: proc?.play_mode === 'once' ? 'once' : 'loop',
       // 实际生效的播放内容（image/pdf/video）。只给界面与排障看，终端不依赖它。
       playKinds: playKindsOf(proc?.play_kinds),
-      // 4.5.0：lineCode / processCode 现在可能**不是屏上填的那个**。
-      // assigned=true 表示管理端指派生效了；selfLineCode / selfProcessCode 才是屏自报的原值，
-      // 两个不一样就是"屏上号填错了，管理端已经替它纠正"。终端用它在角标上标"由管理端指派"。
-      assigned: Boolean(bind),
-      selfLineCode: ctx.selfLine ? ctx.selfLine.code : line.code,
-      selfProcessCode: ctx.selfProcess ? ctx.selfProcess.code : op,
+      // 5.0.1：没有管理端指派了，播的就是屏自报的那道工序。
+      // assigned 恒为 false、self* 恒等于上面的 lineCode/processCode —— 字段留着，
+      // 老终端（1.8.3）读到它们不会变行为。
+      assigned: false,
+      selfLineCode: line.code,
+      selfProcessCode: op,
       items: rows.map((r) => ({
         mediaId: r.media_id,
         kind: r.kind,
@@ -159,7 +159,6 @@ export function register(router) {
       noStation: !!cur && !proc,
       seq: st.seq,
       rev: st.rev,
-      phase: st.phase,
       itemCount: have,
       online: st.online,
       message: cur && !proc ? `「${cur.code}」没有工序 ${op}` : ''

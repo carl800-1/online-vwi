@@ -1,11 +1,8 @@
 // 切换与状态：这是整个系统最核心的三个接口，全部按线体独立
 import { q, activeLine, lineById, lineByCode, processesOf, upsertClient } from '../db.js';
 import { sendJson, readJsonBody, badRequest } from '../router.js';
-import {
-  getState, switchTo, markReady, waitForChange, cancelSwitch, touch,
-  setProgress, terminalsOf, SWITCH_TIMEOUT_MS
-} from '../switch.js';
-import { resolveTerminal, applyAssignment } from '../router.js';
+import { getState, waitForChange, touch, setProgress, terminalsOf } from '../switch.js';
+import { resolveTerminal } from '../router.js';
 import { VERSION } from '../version.js';
 import { termMeta, now } from '../util.js';
 
@@ -23,77 +20,27 @@ function pickLine(src) {
 
 function decorate(state) {
   const cur = state.currentModelId ? q.get('SELECT code, name FROM model WHERE id = ?', state.currentModelId) : null;
-  const pend = state.pendingModelId ? q.get('SELECT code, name FROM model WHERE id = ?', state.pendingModelId) : null;
-  // v4.0.0：一道工序就是一块屏，线体的屏数 = 当前机种的工序数
+  // 一道工序就是一块屏，线体的屏数 = 当前机种的工序数
   const procCount = state.currentModelId ? processesOf(state.currentModelId).length : 0;
   return {
     lineId: state.lineId,
     rev: state.rev,
     contentRev: state.contentRev,
     seq: state.seq,
-    phase: state.phase,
     currentModelId: state.currentModelId,
     modelCode: cur?.code || '',
     modelName: cur?.name || '',
-    pendingModelId: state.pendingModelId,
-    pendingModelCode: pend?.code || '',
-    deadline: state.deadline,
-    timeoutMs: SWITCH_TIMEOUT_MS,
     processCount: procCount,
     online: state.online,
-    ready: state.ready.map((r) => r.op),
     ts: Date.now()
   };
 }
 
 export function register(router) {
-  // ---------- 发起切换 ----------
-  router.post('/api/switch', async (req, res) => {
-    const body = await readJsonBody(req);
-    const code = String(body.modelCode || '').trim();
-    if (!code) throw badRequest('缺少 modelCode');
-    const line = pickLine(body);
-
-    const model = q.get('SELECT * FROM model WHERE code = ?', code);
-    if (!model) throw badRequest(`型号 ${code} 不存在`);
-    if (!model.enabled) throw badRequest(`型号 ${code} 已停用`);
-
-    const r = switchTo(line, model);
-    if (!r.ok) throw badRequest(r.message || '切换失败');
-    sendJson(res, 200, { ...r, state: decorate(getState(line.id)) });
-  });
-
-  // ---------- 放弃本次切换 ----------
-  router.post('/api/switch/cancel', async (req, res) => {
-    const body = await readJsonBody(req).catch(() => ({}));
-    const line = pickLine(body);
-    const r = cancelSwitch(line.id);
-    sendJson(res, 200, { ...r, state: decorate(getState(line.id)) });
-  });
-
-  // ---------- 终端举手：本工序内容已备齐 ----------
-  router.post('/api/ready', async (req, res, ctx) => {
-    const body = await readJsonBody(req);
-
-    // 终端可能只带 op（老配置），也可能连 line 一起带；都以 body 为准，其次 query
-    const term = { query: { ...ctx.query, ...body } };
-    const err = resolveTerminal(req, term);
-    if (err) throw Object.assign(new Error(err.message), { status: err.status });
-
-    const modelId = String(body.modelId || '').trim();
-    if (!modelId) throw badRequest('缺少 modelId');
-
-    touch(term.line.id, term.process.code, termMeta(ctx));
-    const r = markReady(term.line.id, term.process.code, modelId);
-    if (!r.ok) sendJson(res, 409, { ...r, state: decorate(getState(term.line.id)) });
-    else sendJson(res, 200, { ...r, state: decorate(getState(term.line.id)) });
-  });
-
   // ---------- 长轮询 ----------
   // 终端带 ?line=L1&op=OP30&since=<rev>；管理端带 ?lineId=<id>&since=<rev>（不带 op）
   router.get('/api/state', async (req, res, ctx) => {
     let line;
-    let bind = null;
     if (ctx.query.op) {
       // 终端身份要校验（线体存不存在、工序在不在），配错立刻报，不要静默
       const err = resolveTerminal(req, ctx);
@@ -102,10 +49,6 @@ export function register(router) {
         res.end(JSON.stringify({ error: err.message }));
         return;
       }
-      // 4.5.0：管理端指派优先。**必须放在 resolveTerminal 之后、touch 之前** ——
-      // 后面的 touch / getState 用的都是 ctx.line 与 ctx.process.code，
-      // 覆盖晚了就成了"播的内容是新的、在线表记的还是旧的"。
-      bind = applyAssignment(req, ctx);
       line = ctx.line;
       touch(line.id, ctx.process.code, termMeta(ctx));
     } else {
@@ -116,14 +59,7 @@ export function register(router) {
     await waitForChange(since, res);
 
     if (res.writableEnded || res.destroyed) return;
-    const out = decorate(getState(line.id));
-    // 终端靠这个字段决定"要不要把本地配置改成管理端指派的值"。
-    // 没指派就不给这个键：老终端不认识它（多一个也不会看），少一个更干净。
-    if (bind) {
-      const bl = q.get('SELECT code FROM line WHERE id = ?', bind.line_id);
-      out.assign = { line: bl ? bl.code : '', op: bind.process_code, src: bind.src || '' };
-    }
-    sendJson(res, 200, out);
+    sendJson(res, 200, decorate(getState(line.id)));
   });
 
   // ---------- 终端心跳：参数 + 下载进度 ----------
@@ -203,8 +139,7 @@ export function register(router) {
         done: t ? t.done : 0,
         total: t ? t.total : 0,
         modelCode: t ? t.modelCode : '',
-        status: t ? t.status : '',
-        ready: !!t && t.ready
+        status: t ? t.status : ''
       };
     });
 
@@ -213,11 +148,8 @@ export function register(router) {
       lineCode: line.code,
       lineName: line.name,
       enabled: !!line.enabled,
-      phase: st.phase,
       currentModelCode: st.currentModelId
         ? (q.get('SELECT code FROM model WHERE id = ?', st.currentModelId)?.code || '') : '',
-      pendingModelCode: st.pendingModelId
-        ? (q.get('SELECT code FROM model WHERE id = ?', st.pendingModelId)?.code || '') : '',
       onlineCount: rows.filter((r) => r.online).length,
       total: rows.length,
       terminals: rows,

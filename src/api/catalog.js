@@ -20,8 +20,6 @@ import { now, uid, str, int } from '../util.js';
 function lineStats(l) {
   const st = getState(l.id);
   const cur = st.currentModelId ? q.get('SELECT code FROM model WHERE id = ?', st.currentModelId) : null;
-  const nxt = q.get('SELECT next_model_id n FROM line_state WHERE line_id = ?', l.id)?.n || '';
-  const next = nxt ? q.get('SELECT code, name FROM model WHERE id = ?', nxt) : null;
   const models = modelsOfLine(l.id);
   return {
     id: l.id,
@@ -44,11 +42,6 @@ function lineStats(l) {
       : q.get('SELECT COUNT(DISTINCT p.code) n FROM process p JOIN model_line ml ON ml.model_id = p.model_id WHERE ml.line_id = ?', l.id).n) || 0,
     currentModelId: st.currentModelId,
     currentModelCode: cur?.code || '',
-    nextModelCode: next?.code || '',
-    nextModelName: next?.name || '',
-    phase: st.phase,
-    pendingModelCode: st.pendingModelId
-      ? (q.get('SELECT code FROM model WHERE id = ?', st.pendingModelId)?.code || '') : '',
     online: st.online.length
   };
 }
@@ -286,11 +279,8 @@ export function register(router) {
   router.del('/api/models/:id', (req, res) => {
     const m = mustModel(req.params.id);
     // 正在被某条线生产时不许删：删了终端会立刻变成"没有当前机种"，屏上停住。
-    const used = q.get(
-      "SELECT COUNT(*) n FROM line_state WHERE current_model_id = ? OR pending_model_id = ? OR next_model_id = ?",
-      m.id, m.id, m.id
-    ).n;
-    if (used) throw badRequest(`「${m.code}」还排在某条线上（当前 / 切换中 / 下一个），先把它换掉再删`);
+    const used = q.get('SELECT COUNT(*) n FROM line_state WHERE current_model_id = ?', m.id).n;
+    if (used) throw badRequest(`「${m.code}」还是某条线正在生产的机种，先换掉再删`);
     tx(() => {
       q.run('DELETE FROM model_line WHERE model_id = ?', m.id);
       q.run('DELETE FROM model WHERE id = ?', m.id);
