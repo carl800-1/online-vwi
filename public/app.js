@@ -29,7 +29,10 @@ const S = {
 
   // 运行产线「推送」面板：选一条运行中的线 + 该线下要推的机种
   focusLineId: '',       // 推送面板里选中的运行产线
-  pushModelCodes: [],    // 该线下多选出的机种 code 列表
+  pushModelCodes: [],    // 该线下勾选出的机种 code 列表
+  pushCodes: [],         // 该线下全部可用机种（折叠面板的候选池）
+  pushOpen: false,       // 机种选择面板是否展开（默认收起，选完能缩回去）
+  pushQuery: '',         // 面板里的搜索词
 
   models: [],
   nextCode: '',   // 新建机种弹窗里「机种编号」的预填值（服务端扫空号给 M1、M2…）
@@ -322,10 +325,11 @@ function renderBoard() {
 }
 
 /* ================= 运行产线「推送」面板 =================
-   选一条运行中的线 → 选它下面要推的机种（多选）→ 逐个点「推送」。
+   选一条运行中的线 → 点「选机种」展开勾选 → 逐个点「推送」。
    「推送」= 把该机种设为这条线「正在生产」的机种，屏立即切到它各工序内容
    （走 /api/board/current，直切、不等屏举手）。同一时间一条线只有一个"正在生产"，
-   所以多选只是候选池，点哪个就切哪个。 */
+   所以多选只是候选池，点哪个就切哪个。
+   机种面板默认收起、推送后自动收起 —— 原来是常开的 multiple 列表，选了收不回去。 */
 
 function runningLines() {
   return S.board.filter((l) => l.status === 'running');
@@ -336,10 +340,13 @@ function renderPushPanel() {
   const sel = $('pushLine');
   if (!run.length) {
     sel.innerHTML = '<option value="">没有运行中的产线</option>';
-    $('pushModels').innerHTML = '';
+    setPushOpen(false);
+    $('pushOpts').innerHTML = '';
     $('pushList').hidden = true;
     $('pushList').innerHTML = '';
     S.focusLineId = '';
+    S.pushCodes = [];
+    S.pushModelCodes = [];
     return;
   }
 
@@ -354,27 +361,70 @@ function renderPushPanel() {
 async function renderPushModels() {
   const lineId = S.focusLineId;
   const line = S.board.find((l) => l.id === lineId);
-  const sel = $('pushModels');
-  if (!line) { sel.innerHTML = ''; $('pushList').hidden = true; return; }
+  if (!line) {
+    S.pushCodes = [];
+    S.pushModelCodes = [];
+    setPushOpen(false);
+    $('pushList').hidden = true;
+    return;
+  }
 
   // 该线下可生产的机种：S.lines 带 modelCodes，懒加载一次（loadLines 只在进线体设置页时拉）
   if (!S.lines.length) { try { S.lines = (await api('/api/lines')).lines || []; } catch { S.lines = []; } }
   const lrow = S.lines.find((l) => l.id === lineId);
   const codes = lrow ? (lrow.modelCodes || []) : [];
 
-  if (!codes.length) {
-    sel.innerHTML = '<option value="">这条线还没挂机种</option>';
-    S.pushModelCodes = [];
-    $('pushList').hidden = true;
-    $('pushList').innerHTML = '';
-    return;
-  }
-
+  S.pushCodes = codes;
   S.pushModelCodes = S.pushModelCodes.filter((c) => codes.includes(c));
-  sel.innerHTML = codes.map((c) =>
-    `<option value="${H(c)}"${S.pushModelCodes.includes(c) ? ' selected' : ''}>${H(c)}</option>`
-  ).join('');
+  renderPushOpts();
   renderPushList();
+}
+
+/* 折叠面板：点「选机种」展开，勾几个、点「收起」收回去；以前是常开的多选列表，收不回去 */
+function setPushOpen(open) {
+  S.pushOpen = !!open;
+  const pick = $('pushPick');
+  if (!pick) return;
+  pick.hidden = !S.pushOpen;
+  $('pushPicker').setAttribute('aria-expanded', S.pushOpen ? 'true' : 'false');
+  $('pushPicker').classList.toggle('on', S.pushOpen);
+  if (S.pushOpen) {
+    renderPushOpts();
+    $('pushSearch').focus();
+  }
+}
+
+function pushPickerLabel() {
+  const n = S.pushModelCodes.length;
+  const total = S.pushCodes.length;
+  let txt = total ? `选机种（共 ${total} 个）` : '选机种';
+  if (n === 1) txt = S.pushModelCodes[0];
+  else if (n > 1) txt = `已选 ${n} 个：${S.pushModelCodes.slice(0, 2).join('、')}${n > 2 ? ' 等' : ''}`;
+  $('pushPickerText').textContent = txt;
+}
+
+function renderPushOpts() {
+  const box = $('pushOpts');
+  if (!box) return;
+  const q = (S.pushQuery || '').trim().toUpperCase();
+  if (!S.pushCodes.length) {
+    box.innerHTML = '<div class="push-opts-empty">这条线还没挂机种 —— 去「机种设置」给线体挂上</div>';
+  } else {
+    const list = S.pushCodes.filter((c) => !q || String(c).toUpperCase().includes(q));
+    if (!list.length) {
+      box.innerHTML = `<div class="push-opts-empty">没有匹配「${H(q)}」的机种</div>`;
+    } else {
+      const line = S.board.find((l) => l.id === S.focusLineId);
+      const cur = line ? line.currentModelCode : '';
+      box.innerHTML = list.map((c) => `
+        <label class="push-opt${S.pushModelCodes.includes(c) ? ' on' : ''}">
+          <input type="checkbox" value="${H(c)}"${S.pushModelCodes.includes(c) ? ' checked' : ''}>
+          <span class="push-opt-c">${H(c)}</span>${c === cur ? '<em class="push-cur">正在生产</em>' : ''}
+        </label>`).join('');
+    }
+  }
+  $('pushPickCnt').textContent = S.pushModelCodes.length ? `已勾选 ${S.pushModelCodes.length} 个` : '';
+  pushPickerLabel();
 }
 
 function renderPushList() {
@@ -398,6 +448,7 @@ async function pushModel(code) {
   try {
     await postJson('/api/board/current', { lineId, modelCode: code });
     toast(`已推送：${line.name} → ${code}，屏正在切换`, 'ok');
+    setPushOpen(false);   // 推完就把机种面板收回去，别一直占着地方
     await loadBoard();
   } catch (e) { toast(e.message, 'err'); }
 }
@@ -405,10 +456,31 @@ async function pushModel(code) {
 $('pushLine').addEventListener('change', () => {
   S.focusLineId = $('pushLine').value;
   S.pushModelCodes = [];
+  S.pushQuery = '';
+  $('pushSearch').value = '';
   renderPushModels();
 });
-$('pushModels').addEventListener('change', () => {
-  S.pushModelCodes = [...$('pushModels').selectedOptions].map((o) => o.value);
+$('pushPicker').addEventListener('click', () => setPushOpen(!S.pushOpen));
+$('pushFold').addEventListener('click', () => setPushOpen(false));
+$('pushClear').addEventListener('click', () => {
+  S.pushModelCodes = [];
+  renderPushOpts();
+  renderPushList();
+});
+$('pushSearch').addEventListener('input', () => {
+  S.pushQuery = $('pushSearch').value;
+  renderPushOpts();
+});
+$('pushOpts').addEventListener('change', (e) => {
+  const cb = e.target.closest('input[type="checkbox"]');
+  if (!cb) return;
+  const c = cb.value;
+  if (cb.checked) { if (!S.pushModelCodes.includes(c)) S.pushModelCodes.push(c); }
+  else S.pushModelCodes = S.pushModelCodes.filter((x) => x !== c);
+  const lab = cb.closest('.push-opt');
+  if (lab) lab.classList.toggle('on', cb.checked);
+  $('pushPickCnt').textContent = S.pushModelCodes.length ? `已勾选 ${S.pushModelCodes.length} 个` : '';
+  pushPickerLabel();
   renderPushList();
 });
 $('pushList').addEventListener('click', async (e) => {

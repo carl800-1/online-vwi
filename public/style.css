@@ -2268,6 +2268,46 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
 .push-mc { font-size: 13px; font-weight: 600; color: var(--ink); }
 .push-cur { font-style: normal; font-size: 11px; color: var(--ok); margin-left: 3px; }
 
+/* 机种选择：折叠面板（原来常开的 multiple 列表收不回去） */
+.push-picker {
+  min-width: 240px; max-width: 320px;
+  display: flex; align-items: center; gap: 8px;
+  font: inherit; font-size: 13px; color: var(--ink); text-align: left; cursor: pointer;
+  padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff;
+}
+.push-picker:hover { border-color: var(--brand); }
+.push-picker.on { border-color: var(--brand); background: var(--brand-bg); }
+.push-picker #pushPickerText { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.push-caret {
+  width: 12px; height: 12px; flex: none;
+  fill: none; stroke: var(--ink3); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
+}
+.push-picker.on .push-caret { transform: rotate(180deg); stroke: var(--brand-ink); }
+
+.push-pick { margin: 0 16px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fbfcfe; }
+.push-pick[hidden] { display: none; }
+.push-pick-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-bottom: 1px solid var(--line2);
+}
+.push-search {
+  font: inherit; font-size: 12.5px; width: 180px;
+  padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff;
+}
+.push-search:focus { outline: none; border-color: var(--brand); }
+.push-pick-cnt { font-size: 11.5px; color: var(--ink3); font-variant-numeric: tabular-nums; }
+.push-opts { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px; max-height: 176px; overflow: auto; }
+.push-opt {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 9px 4px 8px; border: 1px solid var(--line); border-radius: 7px;
+  background: #fff; cursor: pointer; font-size: 12.5px;
+}
+.push-opt:hover { border-color: var(--brand); }
+.push-opt.on { border-color: var(--brand); background: var(--brand-bg); }
+.push-opt input { margin: 0; accent-color: var(--brand); }
+.push-opt-c { font-family: ui-monospace, Consolas, monospace; font-weight: 600; }
+.push-opts-empty { font-size: 12.5px; color: var(--ink3); }
+
 
 /* ================= 系统页：本厂线体 ================= */
 .sys-lines { display: flex; flex-direction: column; gap: 6px; }

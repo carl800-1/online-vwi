@@ -45,7 +45,7 @@ app.whenReady().then(async () => {
     '没有 生产输入 / 线体设置 / 文件查询');
 
   console.log('\n② 作业内容：只有推送面板 + 运行产线');
-  const hasPanel = await pick(`!!$('pushLine') && !!$('pushModels') && !!$('board')`);
+  const hasPanel = await pick(`!!$('pushLine') && !!$('pushPicker') && !!$('board')`);
   ok(hasPanel, '推送面板和运行产线列表都在');
   const dead = await pick(`({
     pcard: !!document.getElementById('pBody'),
@@ -58,10 +58,14 @@ app.whenReady().then(async () => {
 
   const lineOpts = await pick(`$('pushLine').options.length`);
   ok(lineOpts > 0, `「运行产线」下拉有 ${lineOpts} 个选项`, String(lineOpts));
-  await pick(`(function(){ const s=$('pushModels'); if(!s.options.length) return false; s.options[0].selected=true; s.dispatchEvent(new Event('change')); return true; })()`);
+  await pick(`(function(){ $('pushPicker').click(); return true; })()`);
+  await sleep(400);
+  await pick(`(function(){ const cb=document.querySelector('#pushOpts .push-opt input'); if (cb) cb.click(); return true; })()`);
   await sleep(300);
   const pushRows = await pick(`document.querySelectorAll('.push-row [data-pushmodel]').length`);
   ok(pushRows >= 1, `选机种后出现 ${pushRows} 个「推送」按钮`, String(pushRows));
+  await pick(`(function(){ $('pushFold').click(); return true; })()`);
+  await sleep(200);
 
   const rlBtns = await pick(`({
     picknext: document.querySelectorAll('[data-picknext]').length,

@@ -117,9 +117,24 @@
               <select id="pushLine" class="push-sel"></select>
             </div>
             <div class="push-field">
-              <label class="push-label" for="pushModels">该产线下的机种（可多选）</label>
-              <select id="pushModels" class="push-sel" multiple size="6"></select>
+              <div class="push-label">该产线下的机种（可多选）</div>
+              <button type="button" class="push-picker" id="pushPicker" aria-expanded="false"
+                      title="点开选择要推的机种，选完能收回去">
+                <span id="pushPickerText">选机种</span>
+                <svg class="push-caret" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>
+              </button>
             </div>
+          </div>
+          <div class="push-pick" id="pushPick" hidden>
+            <div class="push-pick-head">
+              <input class="push-search" id="pushSearch" type="text" placeholder="搜索机种编号"
+                     autocomplete="off" spellcheck="false">
+              <span class="push-pick-cnt" id="pushPickCnt"></span>
+              <div class="spacer"></div>
+              <button type="button" class="btn sm" id="pushClear">清空</button>
+              <button type="button" class="btn sm" id="pushFold">收起</button>
+            </div>
+            <div class="push-opts" id="pushOpts"></div>
           </div>
           <div class="push-list" id="pushList" hidden></div>
           <div class="run-list" id="board"></div>
