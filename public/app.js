@@ -2003,9 +2003,13 @@ function uploadFile(file, onProgress, owner) {
   });
 }
 
+/** 浮层最多同时挂几条进度：拖 10 张图时会挡住右侧栏，只留最近 3 条就够看 */
+const UPL_MAX = 3;
+
 function uplRow(name) {
   const box = $('uplList');
   box.classList.remove('hide');
+  while (box.children.length >= UPL_MAX) box.removeChild(box.firstElementChild);
   const el = document.createElement('div');
   el.className = 'uplrow';
   el.innerHTML = '<span class="nm"></span><span class="pct">0%</span><span class="pg"><i></i></span>';
@@ -2024,12 +2028,31 @@ function uplRow(name) {
   };
 }
 
-function clearUplIfIdle() {
+/** 5 秒后自动收浮层的定时器（见 scheduleUplHide） */
+let uplHideTimer = null;
+
+/** 上一批已经跑完的行（完成/失败）在开新批时清掉，免得旧结果和新进度混在一起 */
+function resetUplRows() {
+  clearTimeout(uplHideTimer);
   const box = $('uplList');
-  if (!box.querySelector('.uplrow')) { box.classList.add('hide'); return; }
-  setTimeout(() => {
-    if (!box.querySelector('.uplrow')) box.classList.add('hide');
-  }, 2600);
+  box.querySelectorAll('.uplrow.ok, .uplrow.err').forEach((el) => el.remove());
+  if (!box.querySelector('.uplrow')) box.classList.add('hide');
+}
+
+/**
+ * 传完 5 秒后把浮层收掉（连行一起清）。
+ * 为什么不留在那儿：完成的行没人回头看，留着就一直挂在右下角挡内容；
+ * 5 秒够看清「完成 / 复用 / 类型不允许」这几个字，也够看见失败原因。
+ */
+function scheduleUplHide() {
+  clearTimeout(uplHideTimer);
+  uplHideTimer = setTimeout(() => {
+    const box = $('uplList');
+    // 这 5 秒里又拖了新文件进来就再等一轮，别把正在传的进度抹掉
+    if (box.querySelector('.uplrow:not(.ok):not(.err)')) return;
+    box.innerHTML = '';
+    box.classList.add('hide');
+  }, 5000);
 }
 
 /**
@@ -2043,6 +2066,7 @@ async function handleFiles(files) {
   if (!st) return toast('先选一个工序', 'err');
   const list = [...files];
   if (!list.length) return;
+  resetUplRows();
 
   const allowed = (st.reqs || []).map((r) => r.kind);
   const items = [...st.items];
@@ -2100,7 +2124,7 @@ async function handleFiles(files) {
       toast(err.message, 'err');
     }
   }
-  clearUplIfIdle();
+  scheduleUplHide();
 }
 
 $('fileInput').addEventListener('change', (e) => {

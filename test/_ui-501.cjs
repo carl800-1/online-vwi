@@ -166,7 +166,34 @@ app.whenReady().then(async () => {
   })`);
   ok(media.sel > 0, `媒体库有 ${media.sel} 个下拉/选择器`, String(media.sel));
 
-  console.log('\n⑦ 控制台');
+  console.log('\n⑦ 上传进度浮层：最多只留最近 3 条');
+  const upl = await pick(`(function(){
+    const box = $('uplList');
+    box.innerHTML = '';
+    box.classList.add('hide');
+    for (let i = 1; i <= 6; i++) uplRow('file-' + i + '.jpg').ok();
+    const rows = [...box.querySelectorAll('.uplrow')].map((el) => el.querySelector('.nm').textContent);
+    const h = Math.round(box.getBoundingClientRect().height);
+    const shown = box.classList.contains('hide') ? 0 : rows.length;
+    // 收尾：模拟新一批开始（已完成的行应当被清掉、浮层收起）
+    resetUplRows();
+    return { rows, h, shown, after: box.querySelectorAll('.uplrow').length, hidden: box.classList.contains('hide') };
+  })()`);
+  ok(upl.rows.length === 3, `连传 6 个文件，浮层只有 ${upl.rows.length} 条`, upl.rows.join(','));
+  ok(upl.rows.join(',') === 'file-4.jpg,file-5.jpg,file-6.jpg', `留住的是最近 3 条：${upl.rows.join(' / ')}`);
+  ok(upl.shown === 3 && upl.h > 0 && upl.h <= 150, `浮层高度 ${upl.h}px（3 行封顶，不再长到半屏）`);
+  ok(upl.after === 0 && upl.hidden, '新一批开始前，上一批已完成的行会被清掉并收起', String(upl.after));
+
+  // 传完之后不该一直挂在右下角：5 秒自动收掉（期间有新文件进来就再等一轮）
+  await pick(`(function(){ uplRow('done-1.jpg').ok(); scheduleUplHide(); return true; })()`);
+  await sleep(1200);
+  const midShown = await pick(`$('uplList').classList.contains('hide') ? 0 : $('uplList').children.length`);
+  ok(midShown === 1, `1.2 秒时还在（${midShown} 条），不是立刻闪掉`);
+  await sleep(4800);
+  const gone = await pick(`({ rows: $('uplList').children.length, hidden: $('uplList').classList.contains('hide') })`);
+  ok(gone.hidden && gone.rows === 0, '5 秒后自动消失，行也清空', JSON.stringify(gone));
+
+  console.log('\n⑧ 控制台');
   ok(errors.length === 0, '无 console 错误', errors.slice(0, 3).join(' | '));
 
   console.log(`\n结果：${pass} 通过 / ${fails.length} 失败`);

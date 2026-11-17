@@ -1738,13 +1738,15 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
 .cell-input:focus { border-color: var(--brand); outline: none; background: #fff; }
 .warn-txt { color: var(--warn); }
 
-/* ---------- 上传进度浮层（工位内上传时不打断操作） ---------- */
+/* ---------- 上传进度浮层（工位内上传时不打断操作） ----------
+   只留最近 3 条：一批拖 10 张图时浮层会长到半屏高，把右侧栏压住。
+   DOM 里也由 uplRow() 控制在 3 条（140px 够放 3 行，第 4 行起才滚动）。 */
 .upl-float {
   position: fixed; right: 20px; bottom: 20px; width: 330px;
   background: #fff; border: 1px solid var(--line); border-radius: 10px;
   box-shadow: 0 10px 34px rgba(15, 23, 42, .18);
   padding: 10px 12px; display: flex; flex-direction: column; gap: 7px;
-  z-index: 70; max-height: 40vh; overflow: auto;
+  z-index: 70; max-height: 140px; overflow-y: auto; overflow-x: hidden;
 }
 .upl-float.hide { display: none; }
 

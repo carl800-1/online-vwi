@@ -151,6 +151,27 @@ async function findTarget() {
   ok(/^v\d/.test(after.ver) && after.port === '8092', `重读后信息还在：${after.ver} / ${after.port}`);
   ok(after.toasts.some((t) => /已刷新/.test(t)), `提示：${after.toasts.join(' / ') || '（没有浮层）'}`);
 
+  console.log('\n⑤ 上传进度浮层：3 条封顶 + 5 秒自动收');
+  // 不真传文件：uplRow 是全局函数，直接造 8 条「已完成」的行看渲染与尺寸
+  const upl = await cdp.pick(`(function(){
+    const box = $('uplList');
+    box.innerHTML = '';
+    box.classList.add('hide');
+    for (let i = 1; i <= 8; i++) uplRow('CB18FE-0' + i + '.jpg').ok();
+    const rows = [...box.querySelectorAll('.uplrow')].map((el) => el.querySelector('.nm').textContent);
+    return { rows, h: Math.round(box.getBoundingClientRect().height) };
+  })()`);
+  ok(upl.rows.length === 3, `造 8 条只留 ${upl.rows.length} 条：${upl.rows.join(' / ')}`);
+  ok(upl.h > 0 && upl.h <= 150, `浮层高度 ${upl.h}px（3 行封顶）`);
+  await sleep(300);
+  const shot2 = await cdp.send('Page.captureScreenshot', { format: 'png' });
+  fs.writeFileSync(path.join(OUT, 'ui-5.0.1-upload.png'), Buffer.from(shot2.data, 'base64'));
+  ok(true, 'docs/ui-5.0.1-upload.png');
+  await cdp.pick(`(function(){ scheduleUplHide(); return true; })()`);
+  await sleep(5300);
+  const gone = await cdp.pick(`({ rows: $('uplList').children.length, hidden: $('uplList').classList.contains('hide') })`);
+  ok(gone.hidden && gone.rows === 0, '5 秒后自动消失并清空', JSON.stringify(gone));
+
   console.log('\n────────────────────────');
   console.log(`通过 ${pass} 项，失败 ${fails.length} 项`);
   if (fails.length) { console.log('失败项：'); fails.forEach((f) => console.log(' - ' + f)); }
