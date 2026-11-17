@@ -44,9 +44,20 @@ app.whenReady().then(async () => {
   ok(!nav.includes('prod') && !nav.includes('lines') && !nav.includes('files'),
     '没有 生产输入 / 线体设置 / 文件查询');
 
-  console.log('\n② 作业内容：只有推送面板 + 运行产线');
-  const hasPanel = await pick(`!!$('pushLine') && !!$('pushPicker') && !!$('board')`);
-  ok(hasPanel, '推送面板和运行产线列表都在');
+  console.log('\n② 作业内容：一句说明 + 当前作业线 + 当天机种清单');
+  const shape = await pick(`({
+    hint: (document.querySelector('.board-hint')?.textContent || '').replace(/\\s+/g, ' ').trim(),
+    bar: !!$('boardBar'),
+    picker: !!$('pushPicker'),
+    legacy: !!$('board'),
+    oldRow: document.querySelectorAll('#boardBar .rl').length,
+    lineText: (document.querySelector('.bar-line')?.textContent || $('pushLine')?.selectedOptions?.[0]?.textContent || '').trim()
+  })`);
+  ok(/排列当天要生产的机种/.test(shape.hint), `说明：${shape.hint}`);
+  ok(shape.bar && shape.picker, '有一行信息（作业线 / 正在生产 / 在线数 / 添加机种）');
+  ok(!shape.legacy && shape.oldRow === 0, '不再一行一条铺线体列表（#board 已移除）', JSON.stringify(shape));
+  ok(shape.lineText.length > 0, `当前作业线：${shape.lineText}`);
+
   const dead = await pick(`({
     pcard: !!document.getElementById('pBody'),
     bsum: !!document.getElementById('bsum'),
@@ -56,14 +67,14 @@ app.whenReady().then(async () => {
   ok(!dead.pcard && !dead.bsum && !dead.bhelp && !dead.chart,
     '生产概况 / 产线概览 / 操作说明 / 柱状图 都已移除', JSON.stringify(dead));
 
-  const lineOpts = await pick(`$('pushLine').options.length`);
-  ok(lineOpts > 0, `「运行产线」下拉有 ${lineOpts} 个选项`, String(lineOpts));
   await pick(`(function(){ $('pushPicker').click(); return true; })()`);
   await sleep(400);
+  const cands = await pick(`document.querySelectorAll('#pushOpts .push-opt').length`);
+  ok(cands >= 1, `展开后列出 ${cands} 个候选机种`);
   await pick(`(function(){ const cb=document.querySelector('#pushOpts .push-opt input'); if (cb) cb.click(); return true; })()`);
   await sleep(300);
-  const pushRows = await pick(`document.querySelectorAll('.push-row [data-pushmodel]').length`);
-  ok(pushRows >= 1, `选机种后出现 ${pushRows} 个「推送」按钮`, String(pushRows));
+  const planRows = await pick(`document.querySelectorAll('.plan-row [data-planpush]').length`);
+  ok(planRows >= 1, `勾选后下面清单出现 ${planRows} 个「推送」按钮`);
   await pick(`(function(){ $('pushFold').click(); return true; })()`);
   await sleep(200);
 

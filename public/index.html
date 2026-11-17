@@ -106,38 +106,38 @@
       <div class="view" id="view-board">
         <div class="card">
           <div class="card-head">
-            <h2>运行产线</h2>
+            <h2>当天生产</h2>
             <span class="sub" id="runSub">—</span>
             <div class="spacer"></div>
             <button class="btn sm" id="runRefresh">刷新</button>
           </div>
-          <div class="push-panel">
-            <div class="push-field">
-              <label class="push-label" for="pushLine">运行产线</label>
-              <select id="pushLine" class="push-sel"></select>
-            </div>
-            <div class="push-field">
-              <div class="push-label">该产线下的机种（可多选）</div>
-              <button type="button" class="push-picker" id="pushPicker" aria-expanded="false"
-                      title="点开选择要推的机种，选完能收回去">
-                <span id="pushPickerText">选机种</span>
-                <svg class="push-caret" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>
-              </button>
-            </div>
-          </div>
+
+          <div class="board-hint">排列当天要生产的机种，并决定是否推送相关内容</div>
+
+          <!-- 当前作业线 + 正在生产 + 添加机种（现场单线时只显示线号，不铺线体列表） -->
+          <div class="board-bar" id="boardBar"></div>
+
           <div class="push-pick" id="pushPick" hidden>
             <div class="push-pick-head">
               <input class="push-search" id="pushSearch" type="text" placeholder="搜索机种编号"
                      autocomplete="off" spellcheck="false">
               <span class="push-pick-cnt" id="pushPickCnt"></span>
               <div class="spacer"></div>
-              <button type="button" class="btn sm" id="pushClear">清空</button>
               <button type="button" class="btn sm" id="pushFold">收起</button>
             </div>
             <div class="push-opts" id="pushOpts"></div>
           </div>
-          <div class="push-list" id="pushList" hidden></div>
-          <div class="run-list" id="board"></div>
+
+          <div class="plan-head" id="planHead" hidden>
+            <b>当天要生产的机种</b>
+            <span class="plan-seq-tip">按顺序往下走，点「推送」把这条机种的内容送到屏上</span>
+            <div class="spacer"></div>
+            <span class="plan-cnt" id="planCnt"></span>
+            <button class="btn sm" id="planClear">清空清单</button>
+          </div>
+          <div class="plan-list" id="planList"></div>
+
+          <div class="run-empty" id="boardEmpty" hidden></div>
         </div>
 
       </div>

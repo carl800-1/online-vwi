@@ -27,12 +27,15 @@ const S = {
   board: [],
   boardTimer: null,
 
-  // 运行产线「推送」面板：选一条运行中的线 + 该线下要推的机种
-  focusLineId: '',       // 推送面板里选中的运行产线
-  pushModelCodes: [],    // 该线下勾选出的机种 code 列表
+  // 作业内容（当天机种清单）：现场基本是单线，所以不铺线体列表，
+  // 只记一个「当前作业线」，下面是当天要生产的机种顺序清单
+  focusLineId: '',       // 当前作业线（默认第一条运行中的线）
+  plan: [],              // 当天要生产的机种 code 列表，顺序即生产顺序（存 localStorage）
   pushCodes: [],         // 该线下全部可用机种（折叠面板的候选池）
   pushOpen: false,       // 机种选择面板是否展开（默认收起，选完能缩回去）
   pushQuery: '',         // 面板里的搜索词
+  barSig: '',            // 上面那行信息的重绘签名（2 秒一轮，没变就别重绘）
+  pushOptsSig: '',       // 候选面板的重绘签名（别把勾到一半的冲掉）
 
   models: [],
   nextCode: '',   // 新建机种弹窗里「机种编号」的预填值（服务端扫空号给 M1、M2…）
@@ -262,234 +265,250 @@ document.querySelectorAll('.nav-item[data-view]').forEach((b) => {
   });
 });
 
-// ---------- 总览 ----------
+// ---------- 作业内容（当天机种清单） ----------
 /**
- * 总览的数据来自 /api/board：一次把全部线体给全。
- * 为什么不做"选中一条线再看"：现场要的是一眼扫完 ——
- * 今天哪几条线在跑、各做什么、哪块屏卡住了。逐条点进去看不到全局。
+ * 现场基本是单线，所以不再一行一条铺「运行产线」列表。
+ * 一屏只有两件事：这条线的屏上正在播什么、当天还要按什么顺序做哪些机种。
+ * 清单顺序只记在本机（localStorage，按线体分开存）—— 服务端不管排产：
+ * 点「推送」哪一条，哪一条就上屏，其余留在清单里排队。
  */
 async function loadBoard() {
   const d = await api('/api/board');
   S.board = d.lines || [];
-  renderBoard();
-  renderPushPanel();
+  await renderBoard();
   renderTopStats();
   renderSideFoot();
 }
-
-/**
- * 运行产线：一行一条，只列 status = running 的线。
- * 一行只有三块：哪条线 / 正在生产哪个机种（可点「改」对正）/ 几块屏在线。
- * 换型不在这儿点 —— 上面推送面板选机种、点「推送」就直接切了。
- */
-function renderBoard() {
-  const run = runningLines();
-  $('runSub').innerHTML = run.length ? `${run.length} 条线在运行` : '没有线在运行';
-
-  if (!run.length) {
-    $('board').innerHTML = `<div class="run-empty">
-      <b>现在没有产线在运行。</b>
-      <span>${S.board.length
-        ? '到「系统 → 本厂线体」把某条线的状态改成「运行中」，它就会出现在这里。'
-        : '还没有线体 —— 交付包应当自带，去「系统 → 本厂线体」看。'}</span>
-    </div>`;
-    return;
-  }
-
-  $('board').innerHTML = run.map((l) => {
-    const cur = l.currentModelCode
-      ? `<b class="rl-big">${H(l.currentModelCode)}</b>
-         <span class="rl-nm">${H(l.currentModelName || '')}</span>
-         <button class="rl-edit" data-pickcur="${H(l.id)}" title="改：这条线正在生产的机种">改</button>`
-      : `<b class="rl-big none">未指定</b>
-         <button class="rl-add" data-pickcur="${H(l.id)}">+ 指定正在生产的机种</button>`;
-
-    // 当前机种在这条线上有工序没配内容 —— 推送过去屏上也是空的，提前亮出来
-    const warn = l.currentModelCode && l.noContentCount > 0
-      ? `<button class="rl-warn" data-goto-model="${H(l.currentModelId)}"
-                 title="点这里去媒体库补内容">⚠ ${l.noContentCount} 道工序没配</button>`
-      : '';
-
-    return `<div class="rl" data-lid="${H(l.id)}">
-      <div class="rl-id">
-        <b class="rl-name">${H(l.name)}</b>
-        <span class="rl-code">${H(l.code)}</span>
-      </div>
-      <div class="rl-cur"><span class="rl-k">正在生产</span>${cur}</div>
-      <div class="rl-side">
-        ${warn}
-        <span class="rl-on" title="这条线上有几块屏在线">在线 <b>${l.onlineCount}</b>/${l.clients.length}</span>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-/* ================= 运行产线「推送」面板 =================
-   选一条运行中的线 → 点「选机种」展开勾选 → 逐个点「推送」。
-   「推送」= 把该机种设为这条线「正在生产」的机种，屏立即切到它各工序内容
-   （走 /api/board/current，直切、不等屏举手）。同一时间一条线只有一个"正在生产"，
-   所以多选只是候选池，点哪个就切哪个。
-   机种面板默认收起、推送后自动收起 —— 原来是常开的 multiple 列表，选了收不回去。 */
 
 function runningLines() {
   return S.board.filter((l) => l.status === 'running');
 }
 
-function renderPushPanel() {
-  const run = runningLines();
-  const sel = $('pushLine');
-  if (!run.length) {
-    sel.innerHTML = '<option value="">没有运行中的产线</option>';
-    setPushOpen(false);
-    $('pushOpts').innerHTML = '';
-    $('pushList').hidden = true;
-    $('pushList').innerHTML = '';
-    S.focusLineId = '';
-    S.pushCodes = [];
-    S.pushModelCodes = [];
-    return;
-  }
+/* 当天清单存在本机，换线各自一份 */
+const planKey = (lineId) => `esop.plan.${lineId}`;
 
-  const prev = S.focusLineId && run.some((l) => l.id === S.focusLineId) ? S.focusLineId : run[0].id;
-  S.focusLineId = prev;
-  sel.innerHTML = run.map((l) =>
-    `<option value="${H(l.id)}"${l.id === prev ? ' selected' : ''}>${H(l.name)}（${H(l.code)}）</option>`
-  ).join('');
-  renderPushModels();
+function loadPlan(lineId) {
+  try {
+    const a = JSON.parse(localStorage.getItem(planKey(lineId)) || '[]');
+    return Array.isArray(a) ? a.filter((x) => typeof x === 'string' && x) : [];
+  } catch { return []; }
 }
 
-async function renderPushModels() {
-  const lineId = S.focusLineId;
-  const line = S.board.find((l) => l.id === lineId);
-  if (!line) {
+function savePlan() {
+  if (!S.focusLineId) return;
+  try { localStorage.setItem(planKey(S.focusLineId), JSON.stringify(S.plan)); }
+  catch { /* 存不了也不影响用，只是下次进来清单空 */ }
+}
+
+async function renderBoard() {
+  const run = runningLines();
+  $('runSub').innerHTML = run.length ? `${run.length} 条线在运行` : '没有线在运行';
+
+  const bar = $('boardBar');
+  const empty = $('boardEmpty');
+
+  if (!run.length) {
+    S.focusLineId = '';
+    S.plan = [];
     S.pushCodes = [];
-    S.pushModelCodes = [];
-    setPushOpen(false);
-    $('pushList').hidden = true;
+    S.pushOpen = false;
+    S.barSig = '';
+    S.pushOptsSig = '';
+    bar.hidden = true;
+    bar.innerHTML = '';
+    $('pushPick').hidden = true;
+    $('planHead').hidden = true;
+    $('planList').innerHTML = '';
+    empty.hidden = false;
+    empty.innerHTML = `<b>现在没有产线在运行。</b>
+      <span>${S.board.length
+        ? '到「系统 → 本厂线体」把这条线的状态改成「运行中」。'
+        : '还没有线体 —— 交付包应当自带，去「系统 → 本厂线体」看。'}</span>`;
     return;
   }
+  empty.hidden = true;
 
-  // 该线下可生产的机种：S.lines 带 modelCodes，懒加载一次（loadLines 只在进线体设置页时拉）
-  if (!S.lines.length) { try { S.lines = (await api('/api/lines')).lines || []; } catch { S.lines = []; } }
+  // 换过线 / 原线被停用：取那条线自己的当天清单
+  if (!run.some((l) => l.id === S.focusLineId)) {
+    S.focusLineId = run[0].id;
+    S.plan = loadPlan(S.focusLineId);
+    S.pushOpen = false;
+    S.barSig = '';
+    S.pushOptsSig = '';
+  }
+
+  await loadPushCodes();
+  renderBar(run);
+  renderPushOpts();
+  renderPlan();
+}
+
+/* 这条线挂的机种（候选池）。第一次进来才拉 /api/lines */
+async function loadPushCodes() {
+  const lineId = S.focusLineId;
+  if (!S.lines.length) {
+    try { S.lines = (await api('/api/lines')).lines || []; } catch { S.lines = []; }
+  }
   const lrow = S.lines.find((l) => l.id === lineId);
   const codes = lrow ? (lrow.modelCodes || []) : [];
-
   S.pushCodes = codes;
-  S.pushModelCodes = S.pushModelCodes.filter((c) => codes.includes(c));
-  renderPushOpts();
-  renderPushList();
+  S.plan = S.plan.filter((c) => codes.includes(c));   // 机种被解绑了就从清单里去掉
+  return codes;
 }
 
-/* 折叠面板：点「选机种」展开，勾几个、点「收起」收回去；以前是常开的多选列表，收不回去 */
+/* 一行：作业线 + 正在生产 + 在线数 + 添加机种。
+   多条运行线时给个下拉（现场单线就只有线号文字），不铺列表。 */
+function renderBar(run) {
+  const line = S.board.find((l) => l.id === S.focusLineId) || run[0];
+  if (!line) return;
+
+  const sig = [S.pushOpen, run.length, run.map((l) => l.id).join(','), line.id,
+    line.currentModelCode, line.currentModelId, line.noContentCount,
+    line.onlineCount, line.clients.length].join('|');
+  if (sig === S.barSig) { pushPickerLabel(); return; }
+  S.barSig = sig;
+
+  const who = run.length > 1
+    ? `<label class="bar-k" for="pushLine">作业线</label>
+       <select id="pushLine" class="bar-sel">${run.map((l) =>
+         `<option value="${H(l.id)}"${l.id === line.id ? ' selected' : ''}>${H(l.name)}（${H(l.code)}）</option>`).join('')}</select>`
+    : `<span class="bar-line"><b>${H(line.name)}</b><em>${H(line.code)}</em></span>`;
+
+  const cur = line.currentModelCode
+    ? `<b class="bar-code">${H(line.currentModelCode)}</b>
+       <button class="bar-edit" data-pickcur="${H(line.id)}" title="改：这条线正在生产的机种">改</button>`
+    : `<b class="bar-code none">未指定</b>
+       <button class="bar-edit" data-pickcur="${H(line.id)}">+ 指定</button>`;
+
+  // 当前机种有工序没配内容 —— 推过去屏上也是空的，提前亮出来
+  const warn = line.currentModelCode && line.noContentCount > 0
+    ? `<button class="bar-warn" data-goto-model="${H(line.currentModelId)}"
+               title="点这里去媒体库补内容">⚠ ${line.noContentCount} 道工序没配</button>`
+    : '';
+
+  $('boardBar').hidden = false;
+  $('boardBar').innerHTML = `
+    <div class="bar-who">${who}</div>
+    <div class="bar-cur"><span class="bar-k">正在生产</span>${cur}${warn}</div>
+    <div class="spacer"></div>
+    <span class="bar-on" title="这条线上有几块屏在线">在线 <b>${line.onlineCount}</b>/${line.clients.length}</span>
+    <button type="button" class="push-picker" id="pushPicker" aria-expanded="${S.pushOpen ? 'true' : 'false'}"
+            title="点开勾选当天要做的机种，选完能收回去">
+      <span id="pushPickerText">+ 添加机种</span>
+      <svg class="push-caret" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>
+    </button>`;
+  $('pushPicker').classList.toggle('on', S.pushOpen);
+  pushPickerLabel();
+}
+
+/* 候选面板：默认收起，勾选的机种直接进下面的清单 */
 function setPushOpen(open) {
   S.pushOpen = !!open;
   const pick = $('pushPick');
   if (!pick) return;
   pick.hidden = !S.pushOpen;
-  $('pushPicker').setAttribute('aria-expanded', S.pushOpen ? 'true' : 'false');
-  $('pushPicker').classList.toggle('on', S.pushOpen);
+  const btn = $('pushPicker');
+  if (btn) {
+    btn.setAttribute('aria-expanded', S.pushOpen ? 'true' : 'false');
+    btn.classList.toggle('on', S.pushOpen);
+  }
   if (S.pushOpen) {
-    renderPushOpts();
+    renderPushOpts(true);
     $('pushSearch').focus();
   }
+  pushPickerLabel();
 }
 
 function pushPickerLabel() {
-  const n = S.pushModelCodes.length;
+  const el = $('pushPickerText');
+  if (!el) return;
+  if (S.pushOpen) { el.textContent = '收起'; return; }
   const total = S.pushCodes.length;
-  let txt = total ? `选机种（共 ${total} 个）` : '选机种';
-  if (n === 1) txt = S.pushModelCodes[0];
-  else if (n > 1) txt = `已选 ${n} 个：${S.pushModelCodes.slice(0, 2).join('、')}${n > 2 ? ' 等' : ''}`;
-  $('pushPickerText').textContent = txt;
+  el.textContent = total ? `+ 添加机种（本线共 ${total} 个）` : '+ 添加机种';
 }
 
-function renderPushOpts() {
+function renderPushOpts(force) {
   const box = $('pushOpts');
   if (!box) return;
+  const line = S.board.find((l) => l.id === S.focusLineId);
+  const cur = line ? line.currentModelCode : '';
   const q = (S.pushQuery || '').trim().toUpperCase();
+
+  // 2 秒一轮的 board 刷新会重绘这块；签名没变就别动，免得勾到一半被冲掉
+  const sig = [S.focusLineId, q, cur, S.pushCodes.length, S.plan.join(',')].join('|');
+  if (!force && sig === S.pushOptsSig) return;
+  S.pushOptsSig = sig;
+
+  const st = box.scrollTop;
   if (!S.pushCodes.length) {
     box.innerHTML = '<div class="push-opts-empty">这条线还没挂机种 —— 去「机种设置」给线体挂上</div>';
   } else {
     const list = S.pushCodes.filter((c) => !q || String(c).toUpperCase().includes(q));
-    if (!list.length) {
-      box.innerHTML = `<div class="push-opts-empty">没有匹配「${H(q)}」的机种</div>`;
-    } else {
-      const line = S.board.find((l) => l.id === S.focusLineId);
-      const cur = line ? line.currentModelCode : '';
-      box.innerHTML = list.map((c) => `
-        <label class="push-opt${S.pushModelCodes.includes(c) ? ' on' : ''}">
-          <input type="checkbox" value="${H(c)}"${S.pushModelCodes.includes(c) ? ' checked' : ''}>
+    box.innerHTML = list.length
+      ? list.map((c) => `
+        <label class="push-opt${S.plan.includes(c) ? ' on' : ''}">
+          <input type="checkbox" value="${H(c)}"${S.plan.includes(c) ? ' checked' : ''}>
           <span class="push-opt-c">${H(c)}</span>${c === cur ? '<em class="push-cur">正在生产</em>' : ''}
-        </label>`).join('');
-    }
+        </label>`).join('')
+      : `<div class="push-opts-empty">没有匹配「${H(q)}」的机种</div>`;
   }
-  $('pushPickCnt').textContent = S.pushModelCodes.length ? `已勾选 ${S.pushModelCodes.length} 个` : '';
-  pushPickerLabel();
+  box.scrollTop = st;
+  $('pushPickCnt').textContent = S.plan.length ? `清单里 ${S.plan.length} 个` : '';
 }
 
-function renderPushList() {
-  const box = $('pushList');
-  if (!S.pushModelCodes.length) { box.hidden = true; box.innerHTML = ''; return; }
-  box.hidden = false;
+/* 当天清单：序号 + 机种 + 推送 / 上下移 / 移除 */
+function renderPlan() {
+  const box = $('planList');
+  const head = $('planHead');
   const line = S.board.find((l) => l.id === S.focusLineId);
-  const curCode = line ? line.currentModelCode : '';
-  box.innerHTML = S.pushModelCodes.map((c) => `
-    <div class="push-row">
-      <span class="push-mc">${H(c)}${c === curCode ? ' <em class="push-cur">正在生产</em>' : ''}</span>
-      <button class="btn sm primary" data-pushmodel="${H(c)}"
-        title="把 ${H(c)} 设为这条线「正在生产」的机种，屏立即切到它各工序内容">推送</button>
-    </div>`).join('');
+
+  if (!S.plan.length) {
+    head.hidden = true;
+    box.innerHTML = `<div class="plan-empty">清单还是空的 —— 点上面「+ 添加机种」，
+      把当天要做的机种按顺序排上，做到哪个就点哪个「推送」。</div>`;
+    return;
+  }
+
+  head.hidden = false;
+  $('planCnt').textContent = `共 ${S.plan.length} 个`;
+  const cur = line ? line.currentModelCode : '';
+  const n = S.plan.length;
+  box.innerHTML = S.plan.map((c, i) => {
+    const on = c === cur;
+    return `<div class="plan-row${on ? ' cur' : ''}" data-code="${H(c)}">
+      <span class="plan-no">${i + 1}</span>
+      <b class="plan-code">${H(c)}</b>
+      ${on ? '<em class="plan-tag">正在生产</em>' : '<span class="plan-wait">未推送</span>'}
+      <div class="spacer"></div>
+      <button class="btn sm${on ? '' : ' primary'}" data-planpush="${H(c)}"${on ? ' disabled' : ''}
+              title="${on ? '屏上正在播这一条' : `把 ${H(c)} 的内容推送到屏上`}">${on ? '已推送' : '推送'}</button>
+      <button class="plan-ico" data-planup="${H(c)}"${i === 0 ? ' disabled' : ''} title="上移">↑</button>
+      <button class="plan-ico" data-plandown="${H(c)}"${i === n - 1 ? ' disabled' : ''} title="下移">↓</button>
+      <button class="plan-ico del" data-plandel="${H(c)}" title="从清单移除（不影响屏上内容）">×</button>
+    </div>`;
+  }).join('');
+}
+
+function movePlan(code, d) {
+  const i = S.plan.indexOf(code);
+  const j = i + d;
+  if (i < 0 || j < 0 || j >= S.plan.length) return;
+  [S.plan[i], S.plan[j]] = [S.plan[j], S.plan[i]];
+  savePlan();
+  renderPlan();
+  renderPushOpts(true);
 }
 
 async function pushModel(code) {
-  const lineId = S.focusLineId;
-  const line = S.board.find((l) => l.id === lineId);
-  if (!line) return toast('先选一条运行中的产线', 'err');
+  const line = S.board.find((l) => l.id === S.focusLineId);
+  if (!line) return toast('先确定作业线', 'err');
   try {
-    await postJson('/api/board/current', { lineId, modelCode: code });
+    await postJson('/api/board/current', { lineId: line.id, modelCode: code });
     toast(`已推送：${line.name} → ${code}，屏正在切换`, 'ok');
-    setPushOpen(false);   // 推完就把机种面板收回去，别一直占着地方
+    setPushOpen(false);   // 推完把候选项收回去，别一直占着地方
     await loadBoard();
   } catch (e) { toast(e.message, 'err'); }
 }
-
-$('pushLine').addEventListener('change', () => {
-  S.focusLineId = $('pushLine').value;
-  S.pushModelCodes = [];
-  S.pushQuery = '';
-  $('pushSearch').value = '';
-  renderPushModels();
-});
-$('pushPicker').addEventListener('click', () => setPushOpen(!S.pushOpen));
-$('pushFold').addEventListener('click', () => setPushOpen(false));
-$('pushClear').addEventListener('click', () => {
-  S.pushModelCodes = [];
-  renderPushOpts();
-  renderPushList();
-});
-$('pushSearch').addEventListener('input', () => {
-  S.pushQuery = $('pushSearch').value;
-  renderPushOpts();
-});
-$('pushOpts').addEventListener('change', (e) => {
-  const cb = e.target.closest('input[type="checkbox"]');
-  if (!cb) return;
-  const c = cb.value;
-  if (cb.checked) { if (!S.pushModelCodes.includes(c)) S.pushModelCodes.push(c); }
-  else S.pushModelCodes = S.pushModelCodes.filter((x) => x !== c);
-  const lab = cb.closest('.push-opt');
-  if (lab) lab.classList.toggle('on', cb.checked);
-  $('pushPickCnt').textContent = S.pushModelCodes.length ? `已勾选 ${S.pushModelCodes.length} 个` : '';
-  pushPickerLabel();
-  renderPushList();
-});
-$('pushList').addEventListener('click', async (e) => {
-  const b = e.target.closest('[data-pushmodel]');
-  if (!b) return;
-  b.disabled = true;
-  try { await pushModel(b.dataset.pushmodel); }
-  finally { b.disabled = false; }
-});
 
 async function pickCurrentModel(lineId) {
   const line = S.board.find((x) => x.id === lineId);
@@ -521,7 +540,11 @@ async function pickCurrentModel(lineId) {
   } catch (e) { toast(e.message, 'err'); }
 }
 
-$('board').addEventListener('click', async (e) => {
+/* ---------- 作业内容页事件 ---------- */
+// 重绘的是 boardBar 的 innerHTML，所以委托挂在容器上
+$('boardBar').addEventListener('click', async (e) => {
+  if (e.target.closest('#pushPicker')) return setPushOpen(!S.pushOpen);
+
   const pcur = e.target.closest('[data-pickcur]');
   if (pcur) return pickCurrentModel(pcur.dataset.pickcur);
 
@@ -534,11 +557,74 @@ $('board').addEventListener('click', async (e) => {
   }
 });
 
+// 多条运行线时才有这个下拉；现场单线看不到
+$('boardBar').addEventListener('change', async (e) => {
+  if (e.target.id !== 'pushLine') return;
+  S.focusLineId = e.target.value;
+  S.plan = loadPlan(S.focusLineId);
+  S.pushQuery = '';
+  $('pushSearch').value = '';
+  S.barSig = '';
+  S.pushOptsSig = '';
+  await loadPushCodes();
+  renderBar(runningLines());
+  renderPushOpts(true);
+  renderPlan();
+});
+
+$('pushFold').addEventListener('click', () => setPushOpen(false));
+$('pushSearch').addEventListener('input', () => {
+  S.pushQuery = $('pushSearch').value;
+  renderPushOpts(true);
+});
+$('pushOpts').addEventListener('change', (e) => {
+  const cb = e.target.closest('input[type="checkbox"]');
+  if (!cb) return;
+  const c = cb.value;
+  if (cb.checked) { if (!S.plan.includes(c)) S.plan.push(c); }
+  else S.plan = S.plan.filter((x) => x !== c);
+  const lab = cb.closest('.push-opt');
+  if (lab) lab.classList.toggle('on', cb.checked);
+  savePlan();
+  renderPlan();
+  $('pushPickCnt').textContent = S.plan.length ? `清单里 ${S.plan.length} 个` : '';
+});
+
+$('planList').addEventListener('click', async (e) => {
+  const b = e.target.closest('button');
+  if (!b || b.disabled) return;
+
+  if (b.dataset.planup) return movePlan(b.dataset.planup, -1);
+  if (b.dataset.plandown) return movePlan(b.dataset.plandown, 1);
+  if (b.dataset.plandel) {
+    S.plan = S.plan.filter((c) => c !== b.dataset.plandel);
+    savePlan();
+    renderPlan();
+    renderPushOpts(true);
+    return;
+  }
+  if (b.dataset.planpush) {
+    b.disabled = true;
+    try { await pushModel(b.dataset.planpush); } finally { b.disabled = false; }
+  }
+});
+
+$('planClear').addEventListener('click', async () => {
+  if (!S.plan.length) return;
+  const yes = await ask('清空当天清单',
+    `把清单里这 ${S.plan.length} 个机种都去掉？屏上正在播的内容不受影响。`, '清空');
+  if (!yes) return;
+  S.plan = [];
+  savePlan();
+  renderPlan();
+  renderPushOpts(true);
+});
+
 $('runRefresh').addEventListener('click', () => {
   loadBoard().then(() => toast('已刷新')).catch((e) => toast(e.message, 'err'));
 });
 
-// 运行产线 2 秒刷一次：在线数、屏正在播的机种要实时；切走页面就停
+// 作业内容 2 秒刷一次：在线数、屏正在播的机种要实时；切走页面就停
 S.boardTimer = setInterval(() => {
   if (S.tab !== 'board' || document.hidden) return;
   loadBoard().catch(() => {});

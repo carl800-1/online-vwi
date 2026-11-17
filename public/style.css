@@ -2250,30 +2250,57 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
   background: var(--brand-bg); color: var(--brand-ink);
 }
 
-/* ================= 运行产线「推送」面板 ================= */
-.push-panel { display: flex; gap: 16px; padding: 0 16px 12px; flex-wrap: wrap; align-items: flex-start; }
-.push-field { display: flex; flex-direction: column; gap: 5px; }
-.push-label { font-size: 11.5px; color: var(--ink3); }
-.push-sel {
-  min-width: 200px; padding: 6px 8px; font-size: 13px; color: var(--ink);
+/* ================= 作业内容：当天机种清单 ================= */
+/* 一句说明，告诉现场这页是干什么的 */
+.board-hint {
+  margin: 0 16px 10px; padding: 7px 12px;
+  font-size: 12.5px; color: var(--ink2); line-height: 1.6;
+  background: var(--brand-bg); border-left: 3px solid var(--brand);
+  border-radius: 0 6px 6px 0;
+}
+
+/* 一行信息：作业线 · 正在生产 · 在线数 · 添加机种 */
+.board-bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 0 16px 12px; }
+.board-bar[hidden] { display: none; }
+.bar-who { display: flex; align-items: center; gap: 7px; }
+.bar-line { display: inline-flex; align-items: baseline; gap: 7px; font-size: 15px; font-weight: 600; color: var(--ink); }
+.bar-line em {
+  font-style: normal; font-family: ui-monospace, Consolas, monospace; font-size: 11.5px; color: var(--ink3);
+  padding: 1px 7px; border: 1px solid var(--line); border-radius: 999px;
+}
+.bar-k { font-size: 11.5px; color: var(--ink3); white-space: nowrap; }
+.bar-sel {
+  padding: 5px 8px; font-size: 13px; color: var(--ink);
   border: 1px solid var(--line); border-radius: 6px; background: #fff;
 }
-.push-field:last-child .push-sel { min-width: 240px; }
-.push-sel:focus { outline: none; border-color: var(--brand); }
-.push-list { padding: 0 16px 14px; display: flex; flex-wrap: wrap; gap: 8px; }
-.push-row {
-  display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 12px;
-  border: 1px solid var(--line); border-radius: 8px; background: var(--line2);
+.bar-sel:focus { outline: none; border-color: var(--brand); }
+.bar-cur { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bar-code {
+  font-family: ui-monospace, Consolas, monospace; font-size: 17px; font-weight: 700;
+  letter-spacing: .3px; color: var(--brand-ink);
 }
-.push-mc { font-size: 13px; font-weight: 600; color: var(--ink); }
-.push-cur { font-style: normal; font-size: 11px; color: var(--ok); margin-left: 3px; }
+.bar-code.none { font-family: inherit; font-size: 13px; font-weight: 600; color: var(--ink3); }
+.bar-edit {
+  font: inherit; font-size: 11.5px; color: var(--ink3);
+  background: transparent; border: 1px solid var(--line); border-radius: 6px;
+  padding: 1px 7px; cursor: pointer;
+}
+.bar-edit:hover { color: var(--brand-ink); border-color: var(--brand); background: var(--brand-bg); }
+.bar-warn {
+  font: inherit; font-size: 11.5px; color: var(--warn);
+  background: #fffdf5; border: 1px solid #f0e0b0; border-radius: 6px;
+  padding: 1px 8px; cursor: pointer;
+}
+.bar-warn:hover { border-color: var(--warn); }
+.bar-on { font-size: 12px; color: var(--ink3); white-space: nowrap; }
+.bar-on b { color: var(--ink); font-variant-numeric: tabular-nums; }
 
 /* 机种选择：折叠面板（原来常开的 multiple 列表收不回去） */
 .push-picker {
-  min-width: 240px; max-width: 320px;
+  min-width: 190px; max-width: 300px;
   display: flex; align-items: center; gap: 8px;
   font: inherit; font-size: 13px; color: var(--ink); text-align: left; cursor: pointer;
-  padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff;
+  padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; background: #fff;
 }
 .push-picker:hover { border-color: var(--brand); }
 .push-picker.on { border-color: var(--brand); background: var(--brand-bg); }
@@ -2306,8 +2333,52 @@ body.is-desktop .view.desk-only.hide { display: none !important; }
 .push-opt.on { border-color: var(--brand); background: var(--brand-bg); }
 .push-opt input { margin: 0; accent-color: var(--brand); }
 .push-opt-c { font-family: ui-monospace, Consolas, monospace; font-weight: 600; }
+.push-cur { font-style: normal; font-size: 11px; color: var(--ok); margin-left: 3px; }
 .push-opts-empty { font-size: 12.5px; color: var(--ink3); }
 
+/* 当天要生产的机种：一行一条，序号即顺序 */
+.plan-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: 0 16px; padding: 9px 0 8px; border-top: 1px solid var(--line2);
+}
+.plan-head[hidden] { display: none; }
+.plan-head b { font-size: 13px; color: var(--ink); }
+.plan-seq-tip { font-size: 11.5px; color: var(--ink3); }
+.plan-cnt { font-size: 11.5px; color: var(--ink3); font-variant-numeric: tabular-nums; }
+.plan-list { display: flex; flex-direction: column; gap: 6px; padding: 0 16px 14px; }
+.plan-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 7px 10px 7px 12px;
+  border: 1px solid var(--line2); border-radius: 8px; background: #fbfcfe;
+}
+.plan-row.cur { border-color: var(--brand); background: var(--brand-bg); }
+.plan-no {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 21px; height: 21px; font-size: 11.5px; font-weight: 600; color: var(--ink3);
+  border: 1px solid var(--line); border-radius: 50%; background: #fff;
+  font-variant-numeric: tabular-nums;
+}
+.plan-row.cur .plan-no { color: #fff; background: var(--brand); border-color: var(--brand); }
+.plan-code { font-family: ui-monospace, Consolas, monospace; font-size: 14px; letter-spacing: .2px; color: var(--ink); }
+.plan-tag {
+  font-style: normal; font-size: 11px; color: var(--ok);
+  padding: 1px 7px; border-radius: 999px; background: #eefaf1;
+}
+.plan-wait { font-size: 11px; color: var(--ink3); }
+.plan-ico {
+  font: inherit; font-size: 12px; line-height: 1; flex: none;
+  width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
+  color: var(--ink3); background: #fff;
+  border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
+}
+.plan-ico:hover:not(:disabled) { color: var(--brand-ink); border-color: var(--brand); }
+.plan-ico:disabled { opacity: .35; cursor: default; }
+.plan-ico.del:hover:not(:disabled) { color: var(--danger); border-color: var(--danger); background: var(--danger-bg); }
+.plan-empty {
+  margin: 0 16px 14px; padding: 20px 14px; text-align: center;
+  font-size: 12.5px; line-height: 1.8; color: var(--ink3);
+  border: 1px dashed var(--line); border-radius: 8px; background: #fcfdff;
+}
 
 /* ================= 系统页：本厂线体 ================= */
 .sys-lines { display: flex; flex-direction: column; gap: 6px; }
