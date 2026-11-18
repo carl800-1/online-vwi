@@ -52,6 +52,11 @@ let closingHintShown = false;
 let quitting = false;
 let pollTimer = null;
 let snap = { online: [], phase: '', model: '', items: 0, mediaCount: 0 };
+// 「我正跑着」的记号：正常退出会删掉它。下次启动还看见它 = 上次是被杀 / 断电 / 崩的。
+// 没有这东西，被 TerminateProcess 结束的进程一点痕迹都不留（现场报「窗口自己没了」时全靠猜）。
+let runMarkFile = '';
+let bootAt = Date.now();
+let memTickCount = 0;
 
 // ───────────────────────── 日志 ─────────────────────────
 
@@ -83,6 +88,37 @@ function fatal(err, where) {
   } catch { /* 连对话框都弹不出来就算了 */ }
   quitting = true;
   app.exit(1);
+}
+
+// ───────────────────────── 运行记号（黑匣子） ─────────────────────────
+
+function mb(n) { return Math.round(n / 1048576) + 'MB'; }
+
+/**
+ * 启动时先看有没有上次留下的记号：
+ *  · 还在 → 上次没走正常退出（被杀进程 / 断电 / 主进程崩），把发现写进日志
+ *  · 然后立刻写一份新的，正常退出时由 clearRunMark() 删掉
+ */
+function checkRunMark() {
+  runMarkFile = path.join(dataDir, '.running.json');
+  try {
+    if (fs.existsSync(runMarkFile)) {
+      let prev = null;
+      try { prev = JSON.parse(fs.readFileSync(runMarkFile, 'utf8')); } catch { /* 内容坏了也算异常退出 */ }
+      log('WARN ', '上次没有正常退出（' +
+        (prev ? 'pid ' + prev.pid + ' 起于 ' + prev.at + '，版本 ' + (prev.version || '?') : '记号内容不可读') +
+        '）—— 可能是被结束进程、断电或程序崩溃。本次启动已自动恢复。');
+    }
+    fs.writeFileSync(runMarkFile, JSON.stringify({
+      pid: process.pid, at: new Date().toISOString(), version: app.getVersion()
+    }, null, 1), 'utf8');
+  } catch (e) {
+    log('WARN ', '运行记号写不进去：' + e.message);
+  }
+}
+
+function clearRunMark() {
+  try { if (runMarkFile) fs.rmSync(runMarkFile, { force: true }); } catch { /* 忽略 */ }
 }
 
 // ───────────────────────── 数据目录 ─────────────────────────
@@ -199,9 +235,11 @@ async function boot() {
   try {
     dataDir = resolveDataDir();
     logFile = path.join(dataDir, 'server.log');
+    bootAt = Date.now();
     log('INFO', '启动 electron=' + process.versions.electron +
       ' node=' + process.versions.node + ' chromium=' + process.versions.chrome +
       ' packaged=' + app.isPackaged + ' 期望端口=' + WANT_PORT + ' 数据目录=' + dataDir);
+    checkRunMark();
 
     try {
       inst = await listen({ data: dataDir, port: WANT_PORT });
@@ -262,6 +300,14 @@ function createWindow() {
   });
 
   win.loadURL('http://127.0.0.1:' + port + '/');
+
+  // 界面进程自己崩掉时（GPU/渲染 OOM 之类），Electron 只会留一个白窗口。
+  // 这里记一笔再自动重载，服务端本身不受影响 —— 但日志里要留下 reason，别让它无声无息。
+  win.webContents.on('render-process-gone', (_e, d) => {
+    log('ERROR', '界面进程崩溃 reason=' + d.reason + ' exitCode=' + d.exitCode + '，已自动重载界面（服务未中断）');
+    try { win.reload(); } catch { /* 窗口都没了就等用户点托盘 */ }
+  });
+  win.webContents.on('unresponsive', () => log('WARN ', '界面无响应（服务端仍在跑）'));
 
   win.once('ready-to-show', () => {
     if (!SILENT) win.show();
@@ -370,6 +416,13 @@ async function startPolling() {
       };
       refreshTray();
       broadcast('vwi:state', snap);
+      // 每 10 分钟往日志里落一行体温：崩了以后能回头看是不是内存一路涨上去的
+      if (++memTickCount % 120 === 0) {
+        const m = process.memoryUsage();
+        log('INFO', '心跳 在线=' + snap.online.length + ' 内存 rss=' + mb(m.rss) +
+          ' heap=' + mb(m.heapUsed) + '/' + mb(m.heapTotal) + ' 已运行 ' +
+          Math.round((Date.now() - bootAt) / 60000) + ' 分钟');
+      }
     } catch { /* 轮询失败不打扰用户，托盘下次刷新 */ }
   };
   await tick();
@@ -389,6 +442,7 @@ function quitForReal() {
   if (pollTimer) clearInterval(pollTimer);
   try { inst?.server.close(); } catch { /* 已经关了就算了 */ }
   log('INFO', '用户退出，服务停止');
+  clearRunMark();
   app.quit();
 }
 
@@ -442,12 +496,31 @@ if (!app.requestSingleInstanceLock()) {
     quitting = true;
     if (pollTimer) clearInterval(pollTimer);
     try { inst?.server.close(); } catch { /* 忽略 */ }
+    clearRunMark();
+  });
+
+  app.on('child-process-gone', (_e, d) => {
+    log('WARN ', '子进程退出 type=' + d.type + ' reason=' + d.reason +
+      ' exitCode=' + d.exitCode + '（主进程与服务不受影响）');
   });
 
   app.on('activate', () => showWindow());
 
+  // 正常/异常退出都留一行，并且只在这里删记号 —— 进程被强杀时不会走到这儿，
+  // 记号留在盘上，下次启动的 checkRunMark() 就能认出"上次没正常退"
+  process.on('exit', (code) => {
+    log(code === 0 ? 'INFO' : 'WARN ', '进程退出 code=' + code + '，已运行 ' +
+      Math.round((Date.now() - bootAt) / 60000) + ' 分钟');
+    clearRunMark();
+  });
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(sig, () => log('WARN ', '收到信号 ' + sig));
+  }
+
   process.on('uncaughtException', (e) => {
-    log('ERROR', '未捕获异常：' + (e && e.stack ? e.stack : e));
+    const m = process.memoryUsage();
+    log('ERROR', '未捕获异常：' + (e && e.stack ? e.stack : e) +
+      '\n（崩溃时内存 rss=' + mb(m.rss) + ' heap=' + mb(m.heapUsed) + '/' + mb(m.heapTotal) + '）');
     try {
       dialog?.showErrorBox('ESOP 服务端 出错了',
         '发生了未处理的错误（服务可能还能用，但建议重启）。\n\n' +
@@ -456,6 +529,8 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   process.on('unhandledRejection', (r) => {
-    log('ERROR', '未处理的 Promise 拒绝：' + (r && r.stack ? r.stack : r));
+    const m = process.memoryUsage();
+    log('ERROR', '未处理的 Promise 拒绝：' + (r && r.stack ? r.stack : r) +
+      '\n（当时内存 rss=' + mb(m.rss) + ' heap=' + mb(m.heapUsed) + '/' + mb(m.heapTotal) + '）');
   });
 }
